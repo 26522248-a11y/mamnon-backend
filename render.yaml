@@ -5,16 +5,12 @@ services:
     name: mamnon-api
     runtime: node
     region: singapore            # gần Việt Nam; chọn cùng vùng với Neon (ap-southeast-1)
-    plan: starter                # cần gói trả phí để gắn persistent disk (ảnh, hoá đơn). Free: ổ đĩa bị xoá mỗi lần deploy/restart
+    plan: free                   # ảnh và chứng từ lưu trên S3 (Backblaze B2 / R2) nên không cần ổ cố định
     branch: master
     buildCommand: npm ci --include=dev && npm run build
     startCommand: sh scripts/start.sh
     healthCheckPath: /api/v1/health
     autoDeploy: true
-    disk:
-      name: mamnon-data
-      mountPath: /var/data
-      sizeGB: 2
     envVars:
       - key: NODE_VERSION
         value: "20"
@@ -46,10 +42,7 @@ services:
       # 2 = Vercel proxy + Render proxy (lấy đúng IP người dùng cho khoá đăng nhập); 1 nếu web gọi thẳng API
       - key: TRUST_PROXY
         value: "2"
-      - key: UPLOAD_DIR
-        value: /var/data/uploads
-      - key: AUDIT_LOG_DIR
-        value: /var/data/logs
+      # Không có ổ cố định: audit chính nằm trong bảng audit_events; file audit.jsonl chỉ là bản phụ, mất khi deploy
       # URL công khai mà điện thoại phụ huynh mở được (link trong thông báo đẩy) = tên miền web Vercel
       - key: PUBLIC_API_BASE
         sync: false
@@ -88,9 +81,11 @@ services:
         sync: false
       - key: ANNOUNCEMENT_TICK_MS
         value: "30000"
-      # Lưu ảnh: mặc định ổ đĩa /var/data (UPLOAD_DIR). Đặt STORAGE_DRIVER=s3 + S3_* để dùng Cloudflare R2
+      # Lưu ảnh trên S3-compatible (B27): staging dùng Backblaze B2 (eu-central-003); đổi sang Cloudflare R2 chỉ cần đổi S3_*
       - key: STORAGE_DRIVER
-        value: local
+        value: s3
+      - key: S3_REGION
+        sync: false
       - key: S3_ENDPOINT
         sync: false
       - key: S3_BUCKET
