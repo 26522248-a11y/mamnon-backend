@@ -315,3 +315,29 @@ test/app.e2e-spec.ts, features.e2e-spec.ts, withdrawal.e2e-spec.ts   # 52 test e
 - Giảm trừ theo % (hiện chỉ có số tiền cố định) và hoàn tiền ăn theo đơn giá của đúng ngày vắng (hiện dùng đơn giá lúc lập hoá đơn).
 - Bộ đếm giới hạn đăng nhập cần Redis hoặc DB nếu chạy nhiều instance.
 - Lưu ảnh lên S3.
+
+## Quản lý giáo viên — chấm công, ca làm, nghỉ phép, trông thay (`/staff`)
+
+Swagger tag `staff`. Ngày theo giờ VN (UTC+7). Quyền: **admin** quản lý toàn bộ; **teacher/accountant** chỉ xem & chấm công của chính mình; phụ huynh 403.
+
+| Method | Path | Quyền | Mô tả |
+|---|---|---|---|
+| GET | `/staff/shifts` | staff | Danh sách ca (`includeInactive=true`) |
+| POST/PATCH/DELETE | `/staff/shifts[/:id]` | admin | CRUD ca `{name, startTime "HH:mm", endTime, lateGraceMinutes}`; ca đã dùng → chỉ ngừng hoạt động |
+| POST | `/staff/assignments` | admin | Xếp ca `{userId, shiftId, classId?, dates[] \| from+to(+weekdays, mặc định T2–T6)}`; trùng bỏ qua |
+| GET / DELETE | `/staff/assignments[/:id]` | staff / admin | GV chỉ thấy ca của mình |
+| GET | `/staff/me/today` | staff | Ca, lớp, giờ vào/ra, trạng thái, trông thay, dải 5 ngày trong tuần |
+| POST | `/staff/me/check-in`, `/staff/me/check-out` | staff | 409 `ALREADY_CHECKED_IN` / `NOT_CHECKED_IN` / `ALREADY_CHECKED_OUT` |
+| PUT | `/staff/attendance/:userId/:date` | admin | Sửa giờ công (bắt buộc `note`, ghi audit `staff_attendance.correct`) |
+| GET | `/staff/attendance?from&to&date&userId` | staff | Bảng công: mỗi người × mỗi ngày `{checkInAt, checkOutAt, status, lateMinutes, shifts, classes, substituteFor, coveredBy}` + `totals`; `summary` ngày `date`: `present, late, leave, absent, needSubstitute` (tối đa 62 ngày) |
+| POST | `/staff/leaves` | staff | Xin nghỉ `{fromDate, toDate, reason}` → báo BGH; admin gửi `userId` → duyệt luôn; trùng → 409 `LEAVE_OVERLAP` |
+| GET | `/staff/leaves?status&from&to&userId` | staff | GV chỉ thấy đơn của mình |
+| POST | `/staff/leaves/:id/approve` \| `reject` (cần `note`) | admin | Báo lại người xin nghỉ |
+| POST | `/staff/leaves/:id/cancel` | người xin (khi còn chờ) / admin | |
+| GET | `/staff/substitutions/needs?date` | admin | Lớp mà mọi GV được xếp đều nghỉ phép/vắng (quá giờ vào + grace) và chưa có người trông thay, kèm `suggestions` GV rảnh (rảnh cả ngày xếp trước) |
+| GET | `/staff/substitutions?from&to` | staff | GV thấy phân công mình trông thay / lớp mình được trông thay |
+| POST | `/staff/substitutions` | admin | `{date, shiftId, classId, substituteUserId, absentUserId?, reason?, force?}` → `{class, absentTeacher, substituteTeacher, date, shift}`; 409 `SLOT_TAKEN` / `SUBSTITUTE_ON_LEAVE` / `SUBSTITUTE_BUSY` (bỏ qua bằng `force` nếu trùng ca của chính mình); báo người trông thay; audit |
+| DELETE | `/staff/substitutions/:id` | admin | Huỷ phân công (audit) |
+
+Trạng thái ngày: `full` (đúng giờ) · `late` (sau giờ vào + grace) · `substitute` (đã vào ca và đang trông thay lớp khác) · `leave` (phép đã duyệt) · `absent` (có ca, không chấm công) · `pending` (ca hôm nay chưa kết thúc) · `off` (không có ca).
+Migration `1791557233777-StaffModule` chỉ thêm bảng `staff_*` (không đụng dữ liệu cũ). Test: `test/staff.e2e-spec.ts`.

@@ -495,7 +495,7 @@ export class Announcement {
 export type NotificationType = 'announcement' | 'pickup_request' | 'pickup_decision' | 'invoice' | 'payment' | 'picked_up' | 'picker_registration' | 'picker_decision' | 'contact_change'
   | 'absence_report' | 'absence_cancelled' | 'absence_overridden' | 'kitchen_change' | 'medicine_request' | 'medicine_given' | 'late_pickup'
   | 'late_pickup_cancelled' | 'medicine_cancelled' | 'school_closure' | 'holiday_reminder' | 'photo_consent'
-  | 'transfer_claim' | 'transfer_claim_rejected';
+  | 'transfer_claim' | 'transfer_claim_rejected' | 'staff_leave' | 'staff_leave_decision' | 'substitution';
 @Entity('notifications')
 @Index('ix_notifications_user_read', ['userId', 'readAt'])
 @Index('ix_notifications_announcement', ['announcementId'])
@@ -779,7 +779,99 @@ export class Enrollment {
   @UpdateDateColumn({ name: 'updated_at', type: 'timestamptz' }) updatedAt!: Date;
 }
 
+// ---------- Round 3: staff (chấm công, ca làm, nghỉ phép, trông thay) ----------
+
+/** Shift template (ca làm), e.g. "Ca sáng" 07:00–16:00. Times are VN local "HH:MM". */
+@Entity('staff_shifts')
+export class StaffShift {
+  @PrimaryGeneratedColumn('uuid') id!: string;
+  @Column({ length: 60 }) name!: string;
+  @Column({ name: 'start_time', type: 'varchar', length: 5 }) startTime!: string;
+  @Column({ name: 'end_time', type: 'varchar', length: 5 }) endTime!: string;
+  /** check-in later than start + grace = late */
+  @Column({ name: 'late_grace_minutes', type: 'int', default: 5 }) lateGraceMinutes!: number;
+  @Column({ name: 'is_active', default: true }) isActive!: boolean;
+  @CreateDateColumn({ name: 'created_at', type: 'timestamptz' }) createdAt!: Date;
+  @UpdateDateColumn({ name: 'updated_at', type: 'timestamptz' }) updatedAt!: Date;
+}
+
+/** Xếp ca: a staff member works a shift on a date (optionally in charge of a class). */
+@Entity('staff_shift_assignments')
+@Index('uq_staff_assignment', ['userId', 'date', 'shiftId'], { unique: true })
+export class StaffShiftAssignment {
+  @PrimaryGeneratedColumn('uuid') id!: string;
+  @Index() @Column({ type: 'date' }) date!: string;
+  @Index() @Column({ name: 'user_id', type: 'uuid' }) userId!: string;
+  @ManyToOne(() => User, { onDelete: 'CASCADE' }) @JoinColumn({ name: 'user_id' }) user!: User;
+  @Column({ name: 'shift_id', type: 'uuid' }) shiftId!: string;
+  @ManyToOne(() => StaffShift, { onDelete: 'RESTRICT' }) @JoinColumn({ name: 'shift_id' }) shift!: StaffShift;
+  @Column({ name: 'class_id', type: 'uuid', nullable: true }) classId!: string | null;
+  @ManyToOne(() => ClassRoom, { onDelete: 'SET NULL' }) @JoinColumn({ name: 'class_id' }) classRoom!: ClassRoom | null;
+  @Column({ type: 'text', nullable: true }) note!: string | null;
+  @Column({ name: 'created_by', type: 'uuid', nullable: true }) createdBy!: string | null;
+  @CreateDateColumn({ name: 'created_at', type: 'timestamptz' }) createdAt!: Date;
+}
+
+/** Chấm công: one row per staff member per day (check-in / check-out timestamps). */
+@Entity('staff_checkins')
+@Index('uq_staff_checkin_day', ['userId', 'date'], { unique: true })
+export class StaffCheckin {
+  @PrimaryGeneratedColumn('uuid') id!: string;
+  @Index() @Column({ type: 'date' }) date!: string;
+  @Column({ name: 'user_id', type: 'uuid' }) userId!: string;
+  @ManyToOne(() => User, { onDelete: 'CASCADE' }) @JoinColumn({ name: 'user_id' }) user!: User;
+  @Column({ name: 'check_in_at', type: 'timestamptz', nullable: true }) checkInAt!: Date | null;
+  @Column({ name: 'check_out_at', type: 'timestamptz', nullable: true }) checkOutAt!: Date | null;
+  @Column({ name: 'check_in_ip', type: 'varchar', length: 64, nullable: true }) checkInIp!: string | null;
+  @Column({ name: 'check_out_ip', type: 'varchar', length: 64, nullable: true }) checkOutIp!: string | null;
+  /** self | admin (corrected by admin) */
+  @Column({ length: 10, default: 'self' }) source!: 'self' | 'admin';
+  @Column({ type: 'text', nullable: true }) note!: string | null;
+  @CreateDateColumn({ name: 'created_at', type: 'timestamptz' }) createdAt!: Date;
+  @UpdateDateColumn({ name: 'updated_at', type: 'timestamptz' }) updatedAt!: Date;
+}
+
+export type StaffLeaveStatus = 'pending' | 'approved' | 'rejected' | 'cancelled';
+/** Nghỉ phép (date range, whole days). */
+@Entity('staff_leaves')
+export class StaffLeave {
+  @PrimaryGeneratedColumn('uuid') id!: string;
+  @Index() @Column({ name: 'user_id', type: 'uuid' }) userId!: string;
+  @ManyToOne(() => User, { onDelete: 'CASCADE' }) @JoinColumn({ name: 'user_id' }) user!: User;
+  @Column({ name: 'from_date', type: 'date' }) fromDate!: string;
+  @Column({ name: 'to_date', type: 'date' }) toDate!: string;
+  @Column({ type: 'text' }) reason!: string;
+  @Index() @Column({ length: 12, default: 'pending' }) status!: StaffLeaveStatus;
+  @Column({ name: 'requested_by', type: 'uuid', nullable: true }) requestedBy!: string | null;
+  @Column({ name: 'decided_by', type: 'uuid', nullable: true }) decidedBy!: string | null;
+  @Column({ name: 'decided_at', type: 'timestamptz', nullable: true }) decidedAt!: Date | null;
+  @Column({ name: 'decision_note', type: 'text', nullable: true }) decisionNote!: string | null;
+  @CreateDateColumn({ name: 'created_at', type: 'timestamptz' }) createdAt!: Date;
+  @UpdateDateColumn({ name: 'updated_at', type: 'timestamptz' }) updatedAt!: Date;
+}
+
+/** Trông thay: substitute covers a class for a date + shift (in place of the absent teacher). */
+@Entity('staff_substitutions')
+@Index('uq_substitution_slot', ['date', 'shiftId', 'classId'], { unique: true })
+export class StaffSubstitution {
+  @PrimaryGeneratedColumn('uuid') id!: string;
+  @Index() @Column({ type: 'date' }) date!: string;
+  @Column({ name: 'shift_id', type: 'uuid' }) shiftId!: string;
+  @ManyToOne(() => StaffShift, { onDelete: 'RESTRICT' }) @JoinColumn({ name: 'shift_id' }) shift!: StaffShift;
+  @Column({ name: 'class_id', type: 'uuid' }) classId!: string;
+  @ManyToOne(() => ClassRoom, { onDelete: 'CASCADE' }) @JoinColumn({ name: 'class_id' }) classRoom!: ClassRoom;
+  @Column({ name: 'absent_user_id', type: 'uuid', nullable: true }) absentUserId!: string | null;
+  @ManyToOne(() => User, { onDelete: 'SET NULL' }) @JoinColumn({ name: 'absent_user_id' }) absentUser!: User | null;
+  @Index() @Column({ name: 'substitute_user_id', type: 'uuid' }) substituteUserId!: string;
+  @ManyToOne(() => User, { onDelete: 'CASCADE' }) @JoinColumn({ name: 'substitute_user_id' }) substituteUser!: User;
+  @Column({ type: 'text', nullable: true }) reason!: string | null;
+  @Column({ type: 'text', nullable: true }) note!: string | null;
+  @Column({ name: 'created_by', type: 'uuid', nullable: true }) createdBy!: string | null;
+  @CreateDateColumn({ name: 'created_at', type: 'timestamptz' }) createdAt!: Date;
+}
+
 export const ENTITIES = [
+  StaffShift, StaffShiftAssignment, StaffCheckin, StaffLeave, StaffSubstitution,
   Enrollment,
   TransferClaim,
   Absence, AbsenceDay, AbsenceEvent, Holiday, Medicine, MedicineDose, LatePickup,
