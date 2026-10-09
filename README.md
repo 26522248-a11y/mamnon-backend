@@ -368,5 +368,10 @@ Mọi thao tác ghi đều vào nhật ký (`finance.expense.create`, `finance.e
 - Bộ hẹn giờ trong tiến trình mỗi `ANNOUNCEMENT_TICK_MS` (30s) + gửi bù khi khởi động; `POST /internal/cron/announcements` với header `X-Cron-Secret` (= `CRON_SECRET`) cho cron ngoài. Gửi đúng 1 lần nhờ `FOR UPDATE SKIP LOCKED` + đổi trạng thái cùng giao dịch tạo thông báo.
 - Lưu file qua `src/common/storage.ts`: `local` (UPLOAD_DIR) hoặc `s3` (R2). Xem DEPLOY.md.
 
+## Báo "Bé đã được đón" (U10)
+- `POST /attendance/:id/pickup` nhận JSON như cũ **hoặc** multipart với thêm `photo` (ảnh lúc giao, JPG/PNG/HEIC, tuỳ chọn). Người đón hộ đã duyệt chưa có ảnh → ảnh này thành ảnh của họ (U5). Trả thêm `photoUrl`, `handedOverByName`.
+- `GET /attendance/:id/pickup-photo` – BGH, GV lớp, phụ huynh của bé; còn lại 404.
+- Phụ huynh nhận thông báo `type=picked_up`: title `🚸 Bé <tên> đã được đón`, body `<quan hệ> <họ tên> đón lúc HH:MM, <GV> giao.`, `data = {childId, childName, pickupId, attendanceId, pickedUpByName, relation, pickedUpAt, handedOverById, handedOverByName, photoUrl|null, schoolPhone}`; kênh: trong app + web push, và SMS / Zalo ZNS khi bật trong `NOTIFY_CHANNELS` (hiện là adapter giả: ghi `skipped` vào `notification_deliveries`).
+
 ## Triển khai
 Vercel (web) + Render (API, `render.yaml`) + Neon (Postgres): xem [DEPLOY.md](DEPLOY.md). VPS/Docker: `deploy/`.

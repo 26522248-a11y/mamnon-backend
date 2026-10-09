@@ -434,7 +434,8 @@ describe('An toàn đón trẻ – đợt 1 (e2e, tester cases PK-*)', () => {
       const h = await handover('gv1', 0, { authorizedPickerId: pickerId }, 201);
       expect(h.body).toMatchObject({ pickerKind: 'authorized_picker', authorizedPickerId: pickerId, pickedUpByName: 'Trần Văn Tư', relation: 'Chú ruột' });
       const n = (await as('ph1').get('/notifications').expect(200)).body.items.find((x: any) => x.type === 'picked_up');
-      expect(n.body).toMatch(/^Bé đã được Trần Văn Tư \(Chú ruột\) đón lúc \d\d:\d\d$/);
+      expect(n.body).toMatch(/^Chú ruột Trần Văn Tư đón lúc \d\d:\d\d, .+ giao\.$/);
+      expect(n.title).toMatch(/^🚸 Bé \S+ đã được đón$/);
       expect(pushes.find((p) => p.endpoint.endsWith('/ph1'))!.payload.body).toBe(n.body);
       expect((await as('ph2').get('/notifications').expect(200)).body.items.some((x: any) => x.type === 'picked_up')).toBe(false);
       // guardian (parent) of another child: direct

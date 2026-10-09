@@ -138,6 +138,8 @@ export class Pickup {
   @Column({ name: 'authorized_picker_id', type: 'uuid', nullable: true }) authorizedPickerId!: string | null;
   /** 'guardian' | 'authorized_picker' | 'request' */
   @Column({ name: 'picker_kind', type: 'varchar', length: 20, nullable: true }) pickerKind!: string | null;
+  /** U10: photo taken by the teacher at hand-over (stored key, served via GET /attendance/:id/pickup-photo) */
+  @Column({ name: 'photo_url', type: 'text', nullable: true }) photoUrl!: string | null;
   @Index() @Column({ name: 'picker_phone', type: 'varchar', length: 20, nullable: true }) pickerPhone!: string | null;
   @Index() @Column({ name: 'picker_id_number', type: 'varchar', length: 20, nullable: true }) pickerIdNumber!: string | null;
 }

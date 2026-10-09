@@ -19,6 +19,7 @@ import { ESCALATE_MINUTES, maskId, PickupSafetyService } from '../pickup/pickup-
 import { cleanName, parsePhone } from '../imports/children-import';
 import { childrenInGap, notInEnrollmentGap } from '../children/enrollment';
 import { recordAudit } from '../common/audit';
+import { schoolInfo } from '../common/school';
 import { Request } from 'express';
 import { isExpired, requestBlockers } from '../pickup/request-rules';
 import { AbsencesService, confirmedHolidays } from '../absences/absences.service';
@@ -98,6 +99,7 @@ export function assertDateEditable(u: AuthUser, date: string) {
 const pickupView = (p: Pickup) => ({
   id: p.id, attendanceId: p.attendanceId, guardianId: p.guardianId, authorizedPickerId: p.authorizedPickerId, pickupRequestId: p.pickupRequestId,
   pickerKind: p.pickerKind, pickedUpByName: p.pickedUpByName, relation: p.relation, pickedUpAt: p.pickedUpAt, isAuthorized: p.isAuthorized, note: p.note, recordedBy: p.recordedBy,
+  photoUrl: p.photoUrl ? `/api/v1/attendance/${p.attendanceId}/pickup-photo` : null,
 });
 export const PICKUP_REQUEST_TTL_MS = 2 * 60 * 60 * 1000;
 /** min(now + 2h, midnight ending the school day in Vietnam time, UTC+7 without DST). */
@@ -308,7 +310,8 @@ export class AttendanceController {
    *    must not be the one handing over. Already handed over -> 409. Parents are notified "Bé đã được X đón lúc HH:MM".
    */
   @Post('attendance/:id/pickup') @Roles('admin', 'teacher')
-  async pickup(@CurrentUser() u: AuthUser, @Param('id', ParseUUIDPipe) id: string, @Body() dto: PickupDto) {
+  @ApiConsumes('application/json', 'multipart/form-data') @UseInterceptors(FileInterceptor('photo', imageUploadOptions))
+  async pickup(@CurrentUser() u: AuthUser, @Param('id', ParseUUIDPipe) id: string, @Body() dto: PickupDto, @UploadedFile() file?: Express.Multer.File) {
     const a = await this.attendanceForStaff(u, id);
     assertDateEditable(u, a.date);
     if (a.status === 'absent') throw BadRequest('Trẻ vắng mặt, không thể ghi nhận đón', 'CHILD_ABSENT');
@@ -344,20 +347,36 @@ export class AttendanceController {
       if (r.schoolDecidedBy === u.id) throw new AppError(403, 'APPROVER_CANNOT_HAND_OVER', 'Người duyệt phần nhà trường không được tự giao bé; người khác phải giao');
       requestId = r.id; name = r.pickerName; relation = r.relation; kind = 'request'; phone = r.pickerPhone; idNumber = r.pickerIdNumber;
     }
+    // U10/U5: optional hand-over photo (magic bytes JPG/PNG/HEIC→JPEG, else 400). First pick-up of an approved picker without photo → becomes their photo.
+    const photo = file ? await saveImage(file) : null;
+    if (photo && pickerId) await this.ds.getRepository(AuthorizedPicker).createQueryBuilder().update().set({ photoUrl: photo }).where('id = :id AND photo_url IS NULL', { id: pickerId }).execute();
     const warnings = this.safety.multiWarning(await this.safety.samePickerToday(a.childId, phone, idNumber, a.date), name);
     let p: Pickup;
     try {
       p = await this.pickups.save(this.pickups.create({
         attendanceId: id, guardianId, authorizedPickerId: pickerId, pickupRequestId: requestId, pickerKind: kind, pickerPhone: phone, pickerIdNumber: idNumber,
-        pickedUpByName: name, relation, pickedUpAt: dto.pickedUpAt ? new Date(dto.pickedUpAt) : new Date(), isAuthorized: true, note: dto.note ?? null, recordedBy: u.id,
+        pickedUpByName: name, relation, pickedUpAt: dto.pickedUpAt ? new Date(dto.pickedUpAt) : new Date(), isAuthorized: true, note: dto.note ?? null, recordedBy: u.id, photoUrl: photo,
       }));
     } catch (e: any) {
       if (e?.driverError?.code === '23505') throw new AppError(409, 'ALREADY_PICKED_UP', 'Bé đã được giao rồi');
       throw e;
     }
     const child = await this.children.findOne({ where: { id: a.childId } });
-    const sent = await this.safety.notifyPickedUp(a.childId, child?.fullName ?? '', name, relation, p.pickedUpAt, await this.parentIds(a.childId), p.id);
+    const sent = await this.safety.notifyPickedUp({ childId: a.childId, childName: child?.fullName ?? '', pickerName: name, relation, at: p.pickedUpAt,
+      parentIds: await this.parentIds(a.childId), pickupId: p.id, attendanceId: id, handedOverBy: { id: u.id, name: u.name }, hasPhoto: !!photo, schoolPhone: schoolInfo().phone });
     return { ...pickupView(p), handedOverBy: u.id, handedOverByName: u.name, warnings, notified: sent };
+  }
+
+  /** U10: hand-over photo – staff of the class, admin, or a parent of the child. 404 when none. */
+  @Get('attendance/:id/pickup-photo')
+  async pickupPhoto(@CurrentUser() u: AuthUser, @Param('id', ParseUUIDPipe) id: string, @Res() res: Response) {
+    const a = await this.ds.getRepository(Attendance).findOne({ where: { id } });
+    if (!a) throw NotFound('Không tìm thấy');
+    const ok = u.role === 'admin' || (u.role === 'teacher' && u.classIds.includes(a.classId)) || (u.role === 'parent' && u.childIds.includes(a.childId));
+    if (!ok) throw NotFound('Không tìm thấy');
+    const p = await this.pickups.findOne({ where: { attendanceId: id } });
+    if (!p?.photoUrl) throw NotFound('Chưa có ảnh');
+    sendImage(res, p.photoUrl);
   }
 
   /** Handover screen: everyone who may pick this child up, with what is still missing. CCCD masked (full via /pickup-identity). */

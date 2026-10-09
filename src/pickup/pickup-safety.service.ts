@@ -152,12 +152,21 @@ export class PickupSafetyService {
     }, { only: ['webpush', 'sms', 'zalo'] });
   }
 
-  /** "Bé đã được X đón lúc HH:MM" to the child's parents (inbox + push). */
-  async notifyPickedUp(childId: string, childName: string, pickerName: string, relation: string | null, at: Date, parentIds: string[], pickupId: string) {
-    return this.notify.send(parentIds, {
-      type: 'picked_up', refId: pickupId, title: `Bé ${childName} đã được đón`,
-      body: `Bé đã được ${pickerName}${relation ? ' (' + relation + ')' : ''} đón lúc ${vnTime(at)}`,
-      data: { childId, pickupId, pickedUpByName: pickerName, pickedUpAt: at.toISOString() }, push: { url: '/today', tag: `picked-${childId}` },
+  /**
+   * U10 "Bé đã được đón": inbox + web push (+ sms / zalo adapters when enabled) to the child's parents.
+   * Body: "<relation> <name> đón lúc HH:MM, <teacher> giao." data carries who / when / teacher / photo / school phone for the card.
+   */
+  async notifyPickedUp(x: { childId: string; childName: string; pickerName: string; relation: string | null; at: Date; parentIds: string[]; pickupId: string;
+    attendanceId: string; handedOverBy: { id: string; name: string } | null; hasPhoto: boolean; schoolPhone: string | null }) {
+    const short = x.childName.trim().split(/\s+/).pop() ?? x.childName;
+    const who = `${x.relation ? x.relation + ' ' : ''}${x.pickerName}`;
+    const photoUrl = x.hasPhoto ? `/api/v1/attendance/${x.attendanceId}/pickup-photo` : null;
+    return this.notify.send(x.parentIds, {
+      type: 'picked_up', refId: x.pickupId, title: `🚸 Bé ${short} đã được đón`,
+      body: `${who} đón lúc ${vnTime(x.at)}${x.handedOverBy ? `, ${x.handedOverBy.name} giao` : ''}.`,
+      data: { childId: x.childId, childName: x.childName, pickupId: x.pickupId, attendanceId: x.attendanceId, pickedUpByName: x.pickerName, relation: x.relation,
+        pickedUpAt: x.at.toISOString(), handedOverById: x.handedOverBy?.id ?? null, handedOverByName: x.handedOverBy?.name ?? null, photoUrl, schoolPhone: x.schoolPhone },
+      push: { url: '/notifications', tag: `picked-${x.childId}` },
     });
   }
 
