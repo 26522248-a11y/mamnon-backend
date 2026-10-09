@@ -88,6 +88,6 @@ export class PushController {
     this.safety.verifyAction(t, id);
     const r = await this.ds.getRepository(PickupRequest).findOne({ where: { id } });
     if (!r) throw NotFound('Không tìm thấy yêu cầu đón');
-    sendImage(res, r.photoUrl);
+    await sendImage(res, r.photoUrl);
   }
 }

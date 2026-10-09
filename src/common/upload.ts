@@ -1,12 +1,12 @@
 import * as crypto from 'crypto';
 import { Response } from 'express';
-import * as fs from 'fs';
 import { memoryStorage } from 'multer';
 import * as path from 'path';
 import { BadRequest, NotFound } from './errors';
+import { storage, uploadDir } from './storage';
 
-/** Private storage dir (NOT served statically). Files are streamed only through permission-checked endpoints. */
-export const uploadDir = () => process.env.UPLOAD_DIR || path.resolve(process.cwd(), 'uploads');
+/** Re-exported for older imports; the local driver lives in ./storage. */
+export { uploadDir };
 const MAX_BYTES = 3 * 1024 * 1024;
 
 /** Multer options: keep the upload in memory so the real content can be checked before anything touches disk. */
@@ -47,6 +47,7 @@ export async function heifToJpeg(buf: Buffer): Promise<Buffer> {
 /**
  * Validates and stores an uploaded image; returns the storage key (file name). Accepts JPG, PNG and HEIC/HEIF
  * (converted to JPEG on save). Anything else, including a non-image renamed to .heic/.jpg -> 400 INVALID_FILE.
+ * B27: written through storage() (local dir or S3/R2), never straight to the container disk.
  */
 export async function saveImage(file?: Express.Multer.File): Promise<string> {
   if (!file?.buffer?.length) throw BadRequest('Thiếu file ảnh', 'INVALID_FILE');
@@ -54,25 +55,31 @@ export async function saveImage(file?: Express.Multer.File): Promise<string> {
   if (!kind) throw BadRequest('File không phải ảnh JPG/PNG/HEIC hợp lệ', 'INVALID_FILE');
   const data = kind === 'heif' ? await heifToJpeg(file.buffer) : file.buffer;
   const key = `${crypto.randomUUID()}.${kind === 'png' ? 'png' : 'jpg'}`;
-  fs.mkdirSync(uploadDir(), { recursive: true });
-  fs.writeFileSync(path.join(uploadDir(), key), data, { flag: 'wx' });
+  await storage().put(key, data, contentTypeOf(key));
   return key;
 }
 
 /** Stored values may be legacy "/uploads/<key>" or just "<key>"; never trust them as paths. */
 export const keyOf = (stored: string) => path.basename(stored);
 
-export function removeImage(stored?: string | null) {
-  if (stored) fs.rm(path.join(uploadDir(), keyOf(stored)), { force: true }, () => undefined);
+export const contentTypeOf = (key: string) => (key.endsWith('.pdf') ? 'application/pdf' : key.endsWith('.png') ? 'image/png' : 'image/jpeg');
+
+/** Best-effort delete (old photo replaced / removed); never fails the request. */
+export async function removeImage(stored?: string | null) {
+  if (stored) await storage().remove(keyOf(stored)).catch(() => undefined);
 }
 
-export function sendImage(res: Response, stored?: string | null) {
-  if (!stored) throw NotFound('Không có ảnh');
+/** Streams a stored file through the (already permission-checked) endpoint; 404 when the record has no file or it is gone. */
+export async function sendStored(res: Response, stored: string | null | undefined, notFound: string, extra: Record<string, string> = {}) {
+  if (!stored) throw NotFound(notFound);
   const key = keyOf(stored);
-  const file = path.join(uploadDir(), key);
-  if (!fs.existsSync(file)) throw NotFound('Không có ảnh');
-  res.setHeader('Content-Type', key.endsWith('.png') ? 'image/png' : 'image/jpeg');
+  const buf = await storage().get(key);
+  if (!buf) throw NotFound(notFound);
+  res.setHeader('Content-Type', contentTypeOf(key));
+  for (const [k, v] of Object.entries(extra)) res.setHeader(k, v);
   res.setHeader('Cache-Control', 'private, no-store');
   res.setHeader('X-Content-Type-Options', 'nosniff');
-  res.sendFile(file);
+  res.end(buf);
 }
+
+export const sendImage = (res: Response, stored?: string | null) => sendStored(res, stored, 'Không có ảnh');

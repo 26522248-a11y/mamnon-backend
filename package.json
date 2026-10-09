@@ -22,7 +22,8 @@
     "backfill:audit": "ts-node --transpile-only src/database/backfill-audit.ts",
     "import:template": "ts-node --transpile-only src/imports/write-template.ts",
     "demo:load": "ts-node --transpile-only src/database/demo.ts load",
-    "demo:purge": "ts-node --transpile-only src/database/demo.ts purge"
+    "demo:purge": "ts-node --transpile-only src/database/demo.ts purge",
+    "repair:missing-photos": "ts-node --transpile-only src/database/null-missing-photos.ts"
   },
   "keywords": [],
   "author": "",

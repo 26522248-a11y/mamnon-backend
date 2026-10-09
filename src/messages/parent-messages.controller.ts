@@ -177,7 +177,7 @@ export class ParentMessagesController {
 
   @Get('medicines/:id/photo') @Roles('parent', 'admin', 'teacher')
   async medicinePhoto(@CurrentUser() u: AuthUser, @Param('id', ParseUUIDPipe) id: string, @Res() res: Response) {
-    sendImage(res, (await this.medicineFor(u, id, false)).photoUrl);
+    await sendImage(res, (await this.medicineFor(u, id, false)).photoUrl);
   }
 
   @Delete('medicines/:id') @Roles('parent', 'admin') @HttpCode(200)

@@ -2,10 +2,8 @@ import * as bcrypt from 'bcryptjs';
 import { DataSource } from 'typeorm';
 import { addDays, todayStr } from '../common/dates';
 import dataSource from './data-source';
-import * as fs from 'fs';
-import * as path from 'path';
 import { writePlaceholderAvatar } from '../common/avatar';
-import { uploadDir } from '../common/upload';
+import { storage } from '../common/storage';
 import { Announcement, Attendance, AttendanceHistory, Child, CreditTransaction, Notification, DailyNote, FeeItem, GrowthRecord, Invoice, MenuItem, Payment, ClassRoom, ClassTeacher, Guardian, User } from './entities';
 
 export const SEED_PASSWORD = '123456';
@@ -51,8 +49,8 @@ export async function seed(ds: DataSource) {
     }));
   }
   // placeholder avatars (real PNG, one file per child); old seed avatars are removed first
-  for (const f of fs.existsSync(uploadDir()) ? fs.readdirSync(uploadDir()) : []) if (/^avatar-.*\.png$/.test(f)) fs.rmSync(path.join(uploadDir(), f), { force: true });
-  for (const [i, k] of kids.entries()) { k.photoUrl = writePlaceholderAvatar(k.id, i); await ds.getRepository(Child).update(k.id, { photoUrl: k.photoUrl }); }
+  for (const f of await storage().list('avatar-')) if (/^avatar-.*\.png$/.test(f)) await storage().remove(f);
+  for (const [i, k] of kids.entries()) { k.photoUrl = await writePlaceholderAvatar(k.id, i); await ds.getRepository(Child).update(k.id, { photoUrl: k.photoUrl }); }
   // kids[0] = "Nguyễn Gia An" (Mầm 1), kids[1] = "Trần Minh Bình" (Chồi 1)
   const gRepo = ds.getRepository(Guardian);
   for (const [idx, k] of kids.entries()) {
