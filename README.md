@@ -113,7 +113,10 @@ Dữ liệu mẫu:
 | POST | `/notifications/:id/read`, `/notifications/read-all` | chính chủ (của người khác thì nhận 404) |
 | GET | `/reports/attendance?fromMonth&toMonth&classId` (tỉ lệ chuyên cần theo lớp, theo tháng) | admin |
 | GET | `/reports/enrollment` (sĩ số, sức chứa, nam/nữ, số trẻ mới nhập học theo tháng) | admin |
-| GET | `/reports/finance?fromMonth&toMonth&classId` (phải thu, đã thu, công nợ, quá hạn, giảm trừ theo kỳ; tiền thu theo tháng) | admin, kế toán |
+| GET | `/reports/finance?fromMonth&toMonth&classId` (phải thu, đã thu, công nợ, quá hạn, giảm trừ theo kỳ; tiền thu theo tháng; `cashFlowByMonth`: thu / chi (phiếu chi) / chênh lệch) | admin, kế toán |
+| GET | `/reports/attendance/export`, `/reports/enrollment/export`, `/reports/finance/export` (cùng tham số) → file **.xlsx** | như báo cáo tương ứng |
+
+Báo cáo chuyên cần có `lowThreshold` (mặc định 80, đổi bằng env `LOW_ATTENDANCE_RATE`) và `low: true` cho lớp dưới ngưỡng.
 | GET/POST/PATCH/DELETE | `/users`, `/users/:id` | admin |
 | POST | `/users/:id/reset-password`, `/users/:id/deactivate`, `/users/:id/activate` | admin |
 | POST | `/users/:id/unlock` (mở khoá đăng nhập sai nhiều lần) | admin |
