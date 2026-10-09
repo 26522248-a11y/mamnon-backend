@@ -258,9 +258,11 @@ export class StaffController {
     if (now.getTime() - ex.checkInAt.getTime() < MIN_SHIFT_MS)
       throw new AppError(409, 'CHECKOUT_TOO_SOON', `Cô vừa vào ca lúc ${vnHm(ex.checkInAt)}, chưa ra ca được ngay. Nếu bấm nhầm thì không sao, giờ vào ca vẫn được giữ.`);
     // conditional update: two concurrent taps record one checkout only
-    await this.ds.query(`UPDATE staff_checkins SET check_out_at = $2, check_out_ip = $3${dto.note ? ', note = $4' : ''} WHERE id = $1 AND check_out_at IS NULL`,
+    // H9: the tap whose UPDATE lost the race reports alreadyCheckedOut: true
+    const res = await this.ds.query(`UPDATE staff_checkins SET check_out_at = $2, check_out_ip = $3${dto.note ? ', note = $4' : ''} WHERE id = $1 AND check_out_at IS NULL RETURNING id`,
       dto.note ? [ex.id, now, req.ip?.slice(0, 64) ?? null, dto.note] : [ex.id, now, req.ip?.slice(0, 64) ?? null]);
-    return { ...(await this.today(u)), alreadyCheckedOut: false };
+    const updated = Array.isArray(res) && Array.isArray(res[0]) ? res[0].length : Array.isArray(res) ? res.length : 0;
+    return { ...(await this.today(u)), alreadyCheckedOut: updated === 0 };
   }
 
   @Get('me/today') @Roles('admin', 'teacher', 'accountant')
@@ -347,10 +349,14 @@ export class StaffController {
           status = covering.length ? 'substitute' : late ? 'late' : 'full';
           if (!late) lateMinutes = 0;
         } else if (leave) status = 'leave';
-        else if (own.length || covering.length) status = date < today || (date === today && lastEnd && now >= vnAt(date, lastEnd)) ? 'absent' : 'pending';
+        else if (own.length || covering.length) {
+          const over = date < today || (date === today && !!lastEnd && now >= vnAt(date, lastEnd));
+          // H9: a planned substitution (today before the shift ends, or a future day) is 'substitute', not 'pending'; `planned` = not checked in yet
+          status = over ? 'absent' : covering.length ? 'substitute' : 'pending';
+        }
         else status = 'off';
         return {
-          date, status, lateMinutes, checkInAt: c?.checkInAt ?? null, checkOutAt: c?.checkOutAt ?? null, checkInSource: c?.source ?? null,
+          date, status, planned: status === 'substitute' && !c?.checkInAt, lateMinutes, checkInAt: c?.checkInAt ?? null, checkOutAt: c?.checkOutAt ?? null, checkInSource: c?.source ?? null,
           shifts: [...new Map(shifts.map((s) => [s.id, shiftView(s)])).values()],
           classes: own.filter((a) => a.classId).map((a) => ({ id: a.classId, name: a.classRoom?.name ?? null, shiftId: a.shiftId })),
           substituteFor: covering.map((s) => ({ substitutionId: s.id, classId: s.classId, className: s.classRoom?.name ?? null, shiftId: s.shiftId, absentUser: person(s.absentUser, s.absentUserId) })),
@@ -359,7 +365,8 @@ export class StaffController {
           leaveDays: leave && isoWeekday(date) <= 5 ? (leave.session === 'full' ? 1 : 0.5) : 0,
         };
       });
-      const count = (st: DayStatus) => days.filter((d) => d.status === st).length;
+      // H9: planned substitute days (not checked in yet) are not worked days
+      const count = (st: DayStatus) => days.filter((d) => d.status === st && !d.planned).length;
       // G6: half-day leave counts 0.5 leave; if the other half was worked it counts 0.5 work day
       const leaveDays = days.reduce((t, d) => t + d.leaveDays, 0);
       const halfWorked = days.filter((d) => d.leaveDays === 0.5 && ['full', 'late', 'substitute'].includes(d.status)).length;
