@@ -1,16 +1,49 @@
 import * as crypto from 'crypto';
-import { diskStorage } from 'multer';
+import { Response } from 'express';
+import * as fs from 'fs';
+import { memoryStorage } from 'multer';
 import * as path from 'path';
-import { AppError } from './errors';
+import { BadRequest, NotFound } from './errors';
 
-export const UPLOAD_DIR = path.resolve(process.cwd(), 'uploads');
-/** Multer options for image uploads (JPG/PNG/WEBP ≤ 3MB) into ./uploads, served at /uploads/. */
-export const imageUploadOptions = {
-  storage: diskStorage({
-    destination: UPLOAD_DIR,
-    filename: (_req, file, cb) => cb(null, `${crypto.randomUUID()}${path.extname(file.originalname).toLowerCase() || '.jpg'}`),
-  }),
-  limits: { fileSize: 3 * 1024 * 1024 },
-  fileFilter: (_req: any, file: Express.Multer.File, cb: (e: Error | null, ok: boolean) => void) =>
-    /^image\/(jpeg|png|webp)$/.test(file.mimetype) ? cb(null, true) : cb(new AppError(400, 'INVALID_FILE', 'Chỉ nhận ảnh JPG, PNG hoặc WEBP'), false),
-};
+/** Private storage dir (NOT served statically). Files are streamed only through permission-checked endpoints. */
+export const uploadDir = () => process.env.UPLOAD_DIR || path.resolve(process.cwd(), 'uploads');
+const MAX_BYTES = 3 * 1024 * 1024;
+
+/** Multer options: keep the upload in memory so the real content can be checked before anything touches disk. */
+export const imageUploadOptions = { storage: memoryStorage(), limits: { fileSize: MAX_BYTES, files: 1 } };
+
+/** Detect image type from magic bytes. Only JPEG and PNG are accepted (filename / Content-Type are ignored). */
+export function detectImage(buf: Buffer): 'jpg' | 'png' | null {
+  if (buf.length >= 3 && buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) return 'jpg';
+  if (buf.length >= 8 && buf.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) return 'png';
+  return null;
+}
+
+/** Validates and stores an uploaded image; returns the storage key (file name). Throws 400 INVALID_FILE. */
+export function saveImage(file?: Express.Multer.File): string {
+  if (!file?.buffer?.length) throw BadRequest('Thiếu file ảnh', 'INVALID_FILE');
+  const ext = detectImage(file.buffer);
+  if (!ext) throw BadRequest('File không phải ảnh JPG/PNG hợp lệ', 'INVALID_FILE');
+  const key = `${crypto.randomUUID()}.${ext}`;
+  fs.mkdirSync(uploadDir(), { recursive: true });
+  fs.writeFileSync(path.join(uploadDir(), key), file.buffer, { flag: 'wx' });
+  return key;
+}
+
+/** Stored values may be legacy "/uploads/<key>" or just "<key>"; never trust them as paths. */
+export const keyOf = (stored: string) => path.basename(stored);
+
+export function removeImage(stored?: string | null) {
+  if (stored) fs.rm(path.join(uploadDir(), keyOf(stored)), { force: true }, () => undefined);
+}
+
+export function sendImage(res: Response, stored?: string | null) {
+  if (!stored) throw NotFound('Không có ảnh');
+  const key = keyOf(stored);
+  const file = path.join(uploadDir(), key);
+  if (!fs.existsSync(file)) throw NotFound('Không có ảnh');
+  res.setHeader('Content-Type', key.endsWith('.png') ? 'image/png' : 'image/jpeg');
+  res.setHeader('Cache-Control', 'private, no-store');
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.sendFile(file);
+}

@@ -1,6 +1,7 @@
 process.env.DATABASE_URL = process.env.TEST_DATABASE_URL || 'postgres://mamnon:mamnon@localhost:5432/mamnon_test';
 process.env.JWT_ACCESS_SECRET = 'test-access';
 process.env.JWT_REFRESH_SECRET = 'test-refresh';
+process.env.UPLOAD_DIR = require('path').join(require('os').tmpdir(), 'mamnon-test-uploads');
 
 import { NestExpressApplication } from '@nestjs/platform-express';
 import { Test } from '@nestjs/testing';
@@ -32,7 +33,7 @@ describe('Mầm non API (e2e)', () => {
     const ds = app.get(DataSource);
     await ds.runMigrations();
     s = await seed(ds);
-    for (const u of ['admin', 'gv1', 'ketoan', 'ph1']) tokens[u] = (await login(u)).body.accessToken;
+    for (const u of ['admin', 'gv1', 'ketoan', 'ph1', 'ph2']) tokens[u] = (await login(u)).body.accessToken;
   });
   afterAll(async () => { await app?.close(); });
 
@@ -145,7 +146,10 @@ describe('Mầm non API (e2e)', () => {
       const r1 = await request(http).post(`/api/v1/attendance/${attId}/pickup-requests`).set('Authorization', `Bearer ${tokens.gv1}`)
         .field('pickerName', 'Chú Tư').field('pickerPhone', '0909123456').field('note', 'Mẹ bé gọi báo').attach('photo', png, { filename: 'a.png', contentType: 'image/png' })
         .expect(201);
-      expect(r1.body).toMatchObject({ status: 'pending', photoUrl: expect.stringMatching(/^\/uploads\//) });
+      expect(r1.body).toMatchObject({ status: 'pending', photoUrl: `/api/v1/pickup-requests/${r1.body.id}/photo` });
+      await request(http).get(r1.body.photoUrl).expect(401);
+      const ph = await request(http).get(r1.body.photoUrl).set('Authorization', `Bearer ${tokens.ph1}`).expect(200);
+      expect(ph.headers['content-type']).toBe('image/png');
       expect((await as('gv1').post(`/attendance/${attId}/pickup`, { pickupRequestId: r1.body.id }).expect(403)).body.code).toBe('PICKUP_REQUEST_PENDING');
       // parent sees pending request for own child; other parent does not, and cannot confirm
       const mine = await as('ph1').get('/pickup-requests?status=pending').expect(200);
@@ -153,6 +157,7 @@ describe('Mầm non API (e2e)', () => {
       tokens.ph2 = (await login('ph2')).body.accessToken;
       expect((await as('ph2').get('/pickup-requests?status=pending').expect(200)).body).toHaveLength(0);
       await as('ph2').post(`/pickup-requests/${r1.body.id}/confirm`, {}).expect(403);
+      await request(http).get(r1.body.photoUrl).set('Authorization', `Bearer ${tokens.ph2}`).expect(403);
       await as('gv1').post(`/pickup-requests/${r1.body.id}/confirm`, {}).expect(403);
       await as('ketoan').get('/pickup-requests').expect(403);
       // parent confirms -> teacher can release
@@ -177,6 +182,45 @@ describe('Mầm non API (e2e)', () => {
       const p = await as('ph1').get(`/children/attendance-summary?month=${month}`).expect(200);
       expect(p.body.total).toBe(1);
       await as('ketoan').get(`/children/${s.kids[0].id}/attendance`).expect(403);
+    });
+  });
+
+  describe('photos (P0)', () => {
+    const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==', 'base64');
+    const upload = (who: string, childId: string, buf: Buffer, name: string, type: string) =>
+      request(http).post(`/api/v1/children/${childId}/photo`).set('Authorization', `Bearer ${tokens[who]}`).attach('file', buf, { filename: name, contentType: type });
+
+    it('rejects non-image content even with image name/type (magic bytes)', async () => {
+      const exe = Buffer.concat([Buffer.from('MZ'), Buffer.alloc(200, 0x90)]);
+      expect((await upload('admin', s.kids[0].id, exe, 'x.jpg', 'image/jpeg').expect(400)).body.code).toBe('INVALID_FILE');
+      await upload('admin', s.kids[0].id, Buffer.from('<svg xmlns="http://www.w3.org/2000/svg"/>'), 'x.png', 'image/png').expect(400);
+      await upload('admin', s.kids[0].id, Buffer.from('GIF89a......'), 'x.gif', 'image/gif').expect(400);
+      const jpg = Buffer.concat([Buffer.from([0xff, 0xd8, 0xff, 0xe0]), Buffer.alloc(100)]);
+      await upload('gv1', s.kids[0].id, jpg, 'renamed.bin', 'application/octet-stream').expect(201); // real JPEG, odd name OK
+      await upload('gv1', s.kids[1].id, png, 'a.png', 'image/png').expect(403);
+    });
+
+    it('photo served only via authenticated, permission-checked endpoint', async () => {
+      const r = await upload('gv1', s.kids[0].id, png, 'a.png', 'image/png').expect(201);
+      const url = r.body.photoUrl;
+      expect(url).toBe(`/api/v1/children/${s.kids[0].id}/photo`);
+      expect((await as('ph1').get(`/children/${s.kids[0].id}`).expect(200)).body.photoUrl).toBe(url);
+      await request(http).get(url).expect(401);
+      const ok = await request(http).get(url).set('Authorization', `Bearer ${tokens.ph1}`).expect(200);
+      expect(ok.headers['content-type']).toBe('image/png');
+      expect(Buffer.compare(ok.body, png)).toBe(0);
+      await request(http).get(url).set('Authorization', `Bearer ${tokens.gv1}`).expect(200);
+      await request(http).get(url).set('Authorization', `Bearer ${tokens.admin}`).expect(200);
+      await request(http).get(url).set('Authorization', `Bearer ${tokens.ph2}`).expect(403);
+      await request(http).get(url).set('Authorization', `Bearer ${tokens.ketoan}`).expect(403);
+      const gv2 = (await login('gv2')).body.accessToken;
+      await request(http).get(url).set('Authorization', `Bearer ${gv2}`).expect(403);
+      // no public static serving of the storage dir
+      const files = require('fs').readdirSync(process.env.UPLOAD_DIR!);
+      expect(files.length).toBeGreaterThan(0);
+      const st = await request(http).get(`/uploads/${files[0]}`);
+      expect([401, 404]).toContain(st.status);
+      await as('ph2').get(`/children/${s.kids[1].id}/photo`).expect(404); // no photo yet
     });
   });
 

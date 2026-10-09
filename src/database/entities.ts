@@ -274,7 +274,42 @@ export class PickupRequest {
   @CreateDateColumn({ name: 'created_at', type: 'timestamptz' }) createdAt!: Date;
 }
 
+// ───────────── Announcements & notifications ─────────────
+export type AnnouncementScope = 'school' | 'class';
+export type Audience = 'all' | 'parents' | 'staff';
+@Entity('announcements')
+export class Announcement {
+  @PrimaryGeneratedColumn('uuid') id!: string;
+  @Column({ length: 200 }) title!: string;
+  @Column({ type: 'text' }) body!: string;
+  @Column({ type: 'varchar', length: 10 }) scope!: AnnouncementScope;
+  @Index() @Column({ name: 'class_id', type: 'uuid', nullable: true }) classId!: string | null;
+  @ManyToOne(() => ClassRoom, { onDelete: 'CASCADE', nullable: true }) @JoinColumn({ name: 'class_id' }) classRoom!: ClassRoom | null;
+  @Column({ type: 'varchar', length: 10, default: 'all' }) audience!: Audience;
+  @Column({ name: 'created_by', type: 'uuid', nullable: true }) createdBy!: string | null;
+  @ManyToOne(() => User, { onDelete: 'SET NULL', nullable: true }) @JoinColumn({ name: 'created_by' }) author!: User | null;
+  @Index() @CreateDateColumn({ name: 'created_at', type: 'timestamptz' }) createdAt!: Date;
+}
+
+export type NotificationType = 'announcement' | 'pickup_request' | 'pickup_decision' | 'invoice' | 'payment';
+@Entity('notifications')
+@Index('ix_notifications_user_read', ['userId', 'readAt'])
+export class Notification {
+  @PrimaryGeneratedColumn('uuid') id!: string;
+  @Index() @Column({ name: 'user_id', type: 'uuid' }) userId!: string;
+  @ManyToOne(() => User, { onDelete: 'CASCADE' }) @JoinColumn({ name: 'user_id' }) user!: User;
+  @Column({ type: 'varchar', length: 30 }) type!: NotificationType;
+  @Column({ length: 200 }) title!: string;
+  @Column({ type: 'text', nullable: true }) body!: string | null;
+  @Column({ type: 'jsonb', nullable: true }) data!: Record<string, unknown> | null;
+  @Column({ name: 'announcement_id', type: 'uuid', nullable: true }) announcementId!: string | null;
+  @ManyToOne(() => Announcement, { onDelete: 'CASCADE', nullable: true }) @JoinColumn({ name: 'announcement_id' }) announcement!: Announcement | null;
+  @Column({ name: 'read_at', type: 'timestamptz', nullable: true }) readAt!: Date | null;
+  @Index() @CreateDateColumn({ name: 'created_at', type: 'timestamptz' }) createdAt!: Date;
+}
+
 export const ENTITIES = [
+  Announcement, Notification,
   AttendanceHistory, PickupRequest,
   User, ClassRoom, ClassTeacher, Child, Guardian, Attendance, Pickup,
   FeeItem, Invoice, InvoiceLine, Payment, GrowthRecord, MenuItem, DailyNote,

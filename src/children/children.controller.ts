@@ -1,5 +1,5 @@
 import {
-  Body, Controller, Delete, Get, HttpCode, Param, ParseUUIDPipe, Patch, Post, Query, UploadedFile, UseInterceptors,
+  Body, Controller, Delete, Get, HttpCode, Param, ParseUUIDPipe, Patch, Post, Query, Res, UploadedFile, UseInterceptors,
 } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { ApiBearerAuth, ApiBody, ApiConsumes, ApiProperty, ApiPropertyOptional, ApiTags, PartialType } from '@nestjs/swagger';
@@ -9,16 +9,14 @@ import { Type } from 'class-transformer';
 import {
   IsBoolean, IsDateString, IsIn, IsInt, IsOptional, IsString, IsUUID, Matches, Max, MaxLength, Min, MinLength, ValidateNested,
 } from 'class-validator';
-import * as crypto from 'crypto';
-import * as fs from 'fs';
-import { diskStorage } from 'multer';
-import * as path from 'path';
+import { Response } from 'express';
 import { Between, DataSource, Repository } from 'typeorm';
 import { AccessService } from '../common/access';
 import { AuthUser, CurrentUser, Roles } from '../common/auth';
 import { AppError, BadRequest, Forbidden, NotFound } from '../common/errors';
 import { Attendance, Child, ClassRoom, Guardian, User } from '../database/entities';
 import { addDays, todayStr } from '../common/dates';
+import { imageUploadOptions, removeImage, saveImage, sendImage } from '../common/upload';
 
 export class ListChildrenQuery {
   @ApiPropertyOptional({ default: 1 }) @IsOptional() @Type(() => Number) @IsInt() @Min(1) page?: number;
@@ -64,7 +62,6 @@ export class ChildAttendanceQuery {
   @ApiPropertyOptional({ description: 'YYYY-MM-DD, mặc định hôm nay' }) @IsOptional() @IsDateString() to?: string;
 }
 
-const UPLOAD_DIR = path.resolve(process.cwd(), 'uploads');
 
 @ApiTags('children') @ApiBearerAuth()
 @Controller('children')
@@ -84,7 +81,7 @@ export class ChildrenController {
     if (u.role === 'accountant') return base;
     return {
       ...base, dob: c.dob, gender: c.gender, allergies: c.allergies ?? undefined, healthNotes: c.healthNotes,
-      address: c.address, photoUrl: c.photoUrl, enrolledAt: c.enrolledAt,
+      address: c.address, photoUrl: c.photoUrl ? `/api/v1/children/${c.id}/photo` : null, enrolledAt: c.enrolledAt,
     };
   }
 
@@ -172,28 +169,27 @@ export class ChildrenController {
   async remove(@Param('id', ParseUUIDPipe) id: string) {
     const c = await this.access.getChildOr404(id);
     await this.children.delete(id);
-    if (c.photoUrl) fs.rm(path.join(UPLOAD_DIR, path.basename(c.photoUrl)), () => undefined);
+    removeImage(c.photoUrl);
   }
 
   @Post(':id/photo') @Roles('admin', 'teacher')
   @ApiConsumes('multipart/form-data')
-  @ApiBody({ schema: { type: 'object', properties: { file: { type: 'string', format: 'binary' } } } })
-  @UseInterceptors(FileInterceptor('file', {
-    storage: diskStorage({
-      destination: UPLOAD_DIR,
-      filename: (_req, file, cb) => cb(null, `${crypto.randomUUID()}${path.extname(file.originalname).toLowerCase() || '.jpg'}`),
-    }),
-    limits: { fileSize: 3 * 1024 * 1024 },
-    fileFilter: (_req, file, cb) => /^image\/(jpeg|png|webp)$/.test(file.mimetype)
-      ? cb(null, true) : cb(new AppError(400, 'INVALID_FILE', 'Chỉ nhận ảnh JPG, PNG hoặc WEBP'), false),
-  }))
+  @ApiBody({ schema: { type: 'object', properties: { file: { type: 'string', format: 'binary', description: 'JPG/PNG ≤ 3MB (kiểm tra nội dung thật)' } } } })
+  @UseInterceptors(FileInterceptor('file', imageUploadOptions))
   async photo(@CurrentUser() u: AuthUser, @Param('id', ParseUUIDPipe) id: string, @UploadedFile() file?: Express.Multer.File) {
     const c = await this.access.getChildOr404(id);
-    if (!this.access.canOperateClass(u, c.classId)) { if (file) fs.rm(file.path, () => undefined); throw Forbidden('Không có quyền với trẻ này'); }
-    if (!file) throw BadRequest('Thiếu file ảnh (field "file")', 'INVALID_FILE');
-    if (c.photoUrl) fs.rm(path.join(UPLOAD_DIR, path.basename(c.photoUrl)), () => undefined);
-    await this.children.update(id, { photoUrl: `/uploads/${file.filename}` });
-    return { photoUrl: `/uploads/${file.filename}` };
+    if (!this.access.canOperateClass(u, c.classId)) throw Forbidden('Không có quyền với trẻ này');
+    const key = saveImage(file); // 400 INVALID_FILE unless real JPEG/PNG
+    await this.children.update(id, { photoUrl: key });
+    removeImage(c.photoUrl);
+    return { photoUrl: `/api/v1/children/${id}/photo` };
+  }
+
+  /** Photo bytes; same rule as child detail: admin, teacher of the class, parent of the child (accountant 403). */
+  @Get(':id/photo')
+  async getPhoto(@CurrentUser() u: AuthUser, @Param('id', ParseUUIDPipe) id: string, @Res() res: Response) {
+    const c = await this.access.assertChildRead(u, id, true);
+    sendImage(res, c.photoUrl);
   }
 
   @Get(':id/guardians')

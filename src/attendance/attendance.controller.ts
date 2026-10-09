@@ -1,4 +1,4 @@
-import { Body, Controller, Get, HttpCode, Param, ParseUUIDPipe, Post, Put, Query, UploadedFile, UseInterceptors } from '@nestjs/common';
+import { Body, Controller, Get, HttpCode, Param, ParseUUIDPipe, Post, Put, Query, Res, UploadedFile, UseInterceptors } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { ApiBearerAuth, ApiConsumes, ApiProperty, ApiPropertyOptional, ApiTags } from '@nestjs/swagger';
 import { InjectRepository } from '@nestjs/typeorm';
@@ -6,13 +6,13 @@ import { Type } from 'class-transformer';
 import {
   ArrayMaxSize, IsArray, IsDateString, IsIn, IsISO8601, IsOptional, IsString, IsUUID, Matches, MaxLength, MinLength, ValidateNested,
 } from 'class-validator';
-import * as fs from 'fs';
 import { DataSource, In, Repository } from 'typeorm';
 import { AccessService } from '../common/access';
 import { AuthUser, CurrentUser, Roles } from '../common/auth';
 import { dayDiff, todayStr } from '../common/dates';
 import { AppError, BadRequest, Forbidden, NotFound } from '../common/errors';
-import { imageUploadOptions } from '../common/upload';
+import { imageUploadOptions, saveImage, sendImage } from '../common/upload';
+import { Response } from 'express';
 import { Attendance, AttendanceHistory, AttStatus, Child, Guardian, Pickup, PickupRequest } from '../database/entities';
 
 export const TEACHER_EDIT_WINDOW_DAYS = 3;
@@ -65,7 +65,7 @@ const pickupView = (p: Pickup) => ({
 });
 const requestView = (r: PickupRequest & { child?: Child }) => ({
   id: r.id, attendanceId: r.attendanceId, childId: r.childId, childName: r.child?.fullName, classId: r.classId,
-  pickerName: r.pickerName, pickerPhone: r.pickerPhone, relation: r.relation, note: r.note, photoUrl: r.photoUrl,
+  pickerName: r.pickerName, pickerPhone: r.pickerPhone, relation: r.relation, note: r.note, photoUrl: r.photoUrl ? `/api/v1/pickup-requests/${r.id}/photo` : null,
   status: r.status, requestedBy: r.requestedBy, decidedBy: r.decidedBy, decidedByName: r.decider?.name ?? null,
   decidedAt: r.decidedAt, decisionNote: r.decisionNote, createdAt: r.createdAt,
 });
@@ -203,17 +203,27 @@ export class AttendanceController {
   @UseInterceptors(FileInterceptor('photo', imageUploadOptions))
   async createRequest(@CurrentUser() u: AuthUser, @Param('id', ParseUUIDPipe) id: string, @Body() dto: CreatePickupRequestDto,
     @UploadedFile() file?: Express.Multer.File) {
-    const cleanup = () => file && fs.rm(file.path, () => undefined);
-    try {
-      const a = await this.attendanceForStaff(u, id);
-      if (a.date !== todayStr()) throw BadRequest('Chỉ tạo yêu cầu đón cho ngày hôm nay', 'NOT_TODAY');
-      if (a.status === 'absent') throw BadRequest('Trẻ vắng mặt, không thể tạo yêu cầu đón', 'CHILD_ABSENT');
-      const r = await this.requests.save(this.requests.create({
-        attendanceId: a.id, childId: a.childId, classId: a.classId, pickerName: dto.pickerName.trim(), pickerPhone: dto.pickerPhone,
-        relation: dto.relation ?? null, note: dto.note, photoUrl: file ? `/uploads/${file.filename}` : null, status: 'pending', requestedBy: u.id,
-      }));
-      return requestView(r);
-    } catch (e) { cleanup(); throw e; }
+    const a = await this.attendanceForStaff(u, id);
+    if (a.date !== todayStr()) throw BadRequest('Chỉ tạo yêu cầu đón cho ngày hôm nay', 'NOT_TODAY');
+    if (a.status === 'absent') throw BadRequest('Trẻ vắng mặt, không thể tạo yêu cầu đón', 'CHILD_ABSENT');
+    const photo = file ? saveImage(file) : null; // validated by magic bytes
+    const r = await this.requests.save(this.requests.create({
+      attendanceId: a.id, childId: a.childId, classId: a.classId, pickerName: dto.pickerName.trim(), pickerPhone: dto.pickerPhone,
+      relation: dto.relation ?? null, note: dto.note, photoUrl: photo, status: 'pending', requestedBy: u.id,
+    }));
+    return requestView(r);
+  }
+
+  private canSeeRequest(u: AuthUser, r: PickupRequest) {
+    return u.role === 'admin' || (u.role === 'teacher' && u.classIds.includes(r.classId)) || (u.role === 'parent' && u.childIds.includes(r.childId));
+  }
+
+  @Get('pickup-requests/:id/photo') @Roles('admin', 'teacher', 'parent')
+  async requestPhoto(@CurrentUser() u: AuthUser, @Param('id', ParseUUIDPipe) id: string, @Res() res: Response) {
+    const r = await this.requests.findOne({ where: { id } });
+    if (!r) throw NotFound('Không tìm thấy yêu cầu đón');
+    if (!this.canSeeRequest(u, r)) throw Forbidden('Không có quyền xem ảnh này');
+    sendImage(res, r.photoUrl);
   }
 
   /** admin: all; teacher: own classes; parent: own children (e.g. ?status=pending). Accountant: 403. */

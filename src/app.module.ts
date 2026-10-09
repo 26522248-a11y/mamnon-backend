@@ -45,7 +45,7 @@ export function configureApp(app: NestExpressApplication) {
   app.use(cookieParser());
   app.enableCors({ origin: (process.env.CORS_ORIGIN || 'http://localhost:3000').split(','), credentials: true });
   app.useGlobalPipes(new ValidationPipe({ whitelist: true, forbidNonWhitelisted: true, transform: true }));
-  app.useStaticAssets(path.resolve(process.cwd(), 'uploads'), { prefix: '/uploads/' });
+  // NOTE: uploads are intentionally NOT served statically; photos go through permission-checked endpoints.
   const doc = new DocumentBuilder()
     .setTitle('Mầm non API').setDescription('API quản lý học sinh trường mầm non. Lỗi luôn có dạng { code, message }.')
     .setVersion('1.0').addBearerAuth().addCookieAuth('refresh_token').build();
