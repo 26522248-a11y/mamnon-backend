@@ -1,0 +1,82 @@
+# Render Blueprint – API NestJS (Render) + Postgres (Neon) + web (Vercel). See DEPLOY.md.
+# Render dashboard → New → Blueprint → chọn repo mamnon-backend → điền các biến "sync: false".
+services:
+  - type: web
+    name: mamnon-api
+    runtime: node
+    region: singapore            # gần Việt Nam; chọn cùng vùng với Neon (ap-southeast-1)
+    plan: starter                # cần gói trả phí để gắn persistent disk (ảnh, hoá đơn). Free: ổ đĩa bị xoá mỗi lần deploy/restart
+    branch: master
+    buildCommand: npm ci --include=dev && npm run build
+    startCommand: sh scripts/start.sh
+    healthCheckPath: /api/v1/health
+    autoDeploy: true
+    disk:
+      name: mamnon-data
+      mountPath: /var/data
+      sizeGB: 2
+    envVars:
+      - key: NODE_VERSION
+        value: "20"
+      - key: NODE_ENV
+        value: production
+      - key: TZ
+        value: Asia/Ho_Chi_Minh
+      - key: MIGRATIONS_RUN
+        value: "true"
+      # Neon → Connection string (Direct connection, không dùng -pooler), giữ ?sslmode=require
+      - key: DATABASE_URL
+        sync: false
+      - key: JWT_ACCESS_SECRET
+        generateValue: true
+      - key: JWT_REFRESH_SECRET
+        generateValue: true
+      - key: JWT_ACCESS_TTL
+        value: 15m
+      - key: JWT_REFRESH_TTL
+        value: 7d
+      # Tên miền web trên Vercel, nhiều tên cách nhau bởi dấu phẩy; preview: https://mamnon-*-<team>.vercel.app
+      - key: CORS_ORIGIN
+        sync: false
+      - key: COOKIE_SECURE
+        value: "true"
+      # lax khi web gọi API qua proxy của Vercel (khuyến nghị); none nếu web gọi thẳng https://...onrender.com
+      - key: COOKIE_SAMESITE
+        value: lax
+      # 2 = Vercel proxy + Render proxy (lấy đúng IP người dùng cho khoá đăng nhập); 1 nếu web gọi thẳng API
+      - key: TRUST_PROXY
+        value: "2"
+      - key: UPLOAD_DIR
+        value: /var/data/uploads
+      - key: AUDIT_LOG_DIR
+        value: /var/data/logs
+      # URL công khai mà điện thoại phụ huynh mở được (link trong thông báo đẩy) = tên miền web Vercel
+      - key: PUBLIC_API_BASE
+        sync: false
+      - key: SCHOOL_NAME
+        sync: false
+      - key: SCHOOL_ADDRESS
+        sync: false
+      - key: SCHOOL_PHONE
+        sync: false
+      # Tài khoản BGH đầu tiên – chỉ tạo 1 lần. Xoá INITIAL_ADMIN_PASSWORD sau khi deploy thành công.
+      - key: INITIAL_ADMIN_USERNAME
+        sync: false
+      - key: INITIAL_ADMIN_PASSWORD
+        sync: false
+      - key: INITIAL_ADMIN_NAME
+        sync: false
+      - key: LOGIN_MAX_FAILS
+        value: "5"
+      - key: LOGIN_IP_MAX_FAILS
+        value: "30"
+      - key: LOGIN_LOCK_MINUTES
+        value: "15"
+      - key: NOTIFY_CHANNELS
+        value: inapp,webpush
+      - key: VAPID_PUBLIC_KEY
+        sync: false
+      - key: VAPID_PRIVATE_KEY
+        sync: false
+      - key: VAPID_SUBJECT
+        sync: false

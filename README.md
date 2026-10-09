@@ -357,3 +357,6 @@ Swagger tag `finance`. Tháng theo giờ VN.
 | POST | `/finance/entries/:id/void` (cần `note`) | admin; kế toán chỉ khoản mình ghi còn chờ duyệt | Huỷ khoản (không xoá, giữ lịch sử) |
 
 Mọi thao tác ghi đều vào nhật ký (`finance.expense.create`, `finance.entry.approve|reject|void`, `finance.receipt.attach`, `finance_category.*`). Migration `1791557748627-Finance` chỉ thêm bảng `finance_*`. Test: `test/finance.e2e-spec.ts`.
+
+## Triển khai
+Vercel (web) + Render (API, `render.yaml`) + Neon (Postgres): xem [DEPLOY.md](DEPLOY.md). VPS/Docker: `deploy/`.

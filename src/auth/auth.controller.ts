@@ -9,6 +9,7 @@ import { Repository } from 'typeorm';
 import { AuthUser, CurrentUser, Public, UserContextService, AllowWhenPasswordChangeRequired } from '../common/auth';
 import { AppError } from '../common/errors';
 import { User } from '../database/entities';
+import { refreshCookieOptions } from '../common/deploy-config';
 import { LoginThrottleService } from './login-throttle.service';
 
 export class LoginDto {
@@ -48,10 +49,7 @@ export class AuthController {
     const refresh = await this.jwt.signAsync({ sub: user.id, ver: user.tokenVersion, typ: 'refresh' },
       { secret: process.env.JWT_REFRESH_SECRET, expiresIn: refreshTtl });
     const decoded: any = this.jwt.decode(refresh);
-    res.cookie(REFRESH_COOKIE, refresh, {
-      httpOnly: true, sameSite: 'lax', secure: process.env.COOKIE_SECURE === 'true',
-      path: '/api/v1/auth', expires: new Date(decoded.exp * 1000),
-    });
+    res.cookie(REFRESH_COOKIE, refresh, { ...refreshCookieOptions(), expires: new Date(decoded.exp * 1000) });
     return { accessToken, tokenType: 'Bearer', expiresIn: accessTtl, user: await this.ctx.build(user) };
   }
 
@@ -87,7 +85,7 @@ export class AuthController {
   @AllowWhenPasswordChangeRequired() @Post('logout') @HttpCode(200) @ApiBearerAuth()
   async logout(@CurrentUser() u: AuthUser, @Res({ passthrough: true }) res: Response) {
     await this.users.increment({ id: u.id }, 'tokenVersion', 1); // revokes all tokens of this user
-    res.clearCookie(REFRESH_COOKIE, { path: '/api/v1/auth' });
+    res.clearCookie(REFRESH_COOKIE, refreshCookieOptions());
     return { ok: true };
   }
 

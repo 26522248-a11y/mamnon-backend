@@ -2,6 +2,7 @@ import 'reflect-metadata';
 import * as fs from 'fs';
 import * as path from 'path';
 import { DataSource, DataSourceOptions } from 'typeorm';
+import { databaseSsl, stripSslMode } from '../common/deploy-config';
 import { ENTITIES } from './entities';
 
 // Minimal .env loader (no extra dependency) so CLI/seed and app share config.
@@ -15,9 +16,13 @@ export function loadEnv() {
 }
 loadEnv();
 
+const DB_URL = process.env.DATABASE_URL || 'postgres://mamnon:mamnon@localhost:5432/mamnon';
+const DB_SSL = databaseSsl(DB_URL);
+
 export const dataSourceOptions: DataSourceOptions = {
   type: 'postgres',
-  url: process.env.DATABASE_URL || 'postgres://mamnon:mamnon@localhost:5432/mamnon',
+  url: DB_SSL ? stripSslMode(DB_URL) : DB_URL,
+  ssl: DB_SSL,
   entities: ENTITIES,
   migrations: [path.join(__dirname, 'migrations', '*.{ts,js}')],
   synchronize: false,

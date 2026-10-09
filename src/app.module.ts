@@ -41,6 +41,7 @@ import { AccessService } from './common/access';
 import { JwtAuthGuard, Public, UserContextService } from './common/auth';
 import { AllExceptionsFilter } from './common/errors';
 import { dataSourceOptions } from './database/data-source';
+import { corsOriginList, isAllowedOrigin } from './common/deploy-config';
 import { ENTITIES } from './database/entities';
 
 @Controller('health')
@@ -80,7 +81,8 @@ export function configureApp(app: NestExpressApplication) {
   app.setGlobalPrefix('api/v1');
   if (process.env.TRUST_PROXY) { const t = process.env.TRUST_PROXY; app.set('trust proxy', t === 'true' ? true : /^\d+$/.test(t) ? Number(t) : t); } // for correct req.ip behind a reverse proxy
   app.use(cookieParser());
-  app.enableCors({ origin: (process.env.CORS_ORIGIN || 'http://localhost:3000').split(','), credentials: true });
+  const origins = corsOriginList();
+  app.enableCors({ origin: (origin: string | undefined, cb: (e: Error | null, ok?: boolean) => void) => cb(null, isAllowedOrigin(origin, origins)), credentials: true });
   app.useGlobalPipes(new ValidationPipe({ whitelist: true, forbidNonWhitelisted: true, transform: true }));
   // NOTE: uploads are intentionally NOT served statically; photos go through permission-checked endpoints.
   const doc = new DocumentBuilder()
