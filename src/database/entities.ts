@@ -6,6 +6,8 @@ import {
 export type Role = 'admin' | 'teacher' | 'accountant' | 'parent';
 export const ROLES: Role[] = ['admin', 'teacher', 'accountant', 'parent'];
 export type AttStatus = 'present' | 'absent' | 'late';
+export type AbsenceReason = 'sick' | 'family' | 'other';
+export const ABSENCE_REASONS: AbsenceReason[] = ['sick', 'family', 'other'];
 
 @Entity('users')
 export class User {
@@ -69,6 +71,10 @@ export class Child {
   @Column({ name: 'contact_phone2', type: 'varchar', length: 20, nullable: true }) contactPhone2!: string | null;
   @Column({ name: 'contact_phones_updated_by', type: 'uuid', nullable: true }) contactPhonesUpdatedBy!: string | null;
   @Column({ name: 'contact_phones_updated_at', type: 'timestamptz', nullable: true }) contactPhonesUpdatedAt!: Date | null;
+  /** Parent consent for taking/posting photos of the child. Default false; every change audited (child.photo_consent). */
+  @Column({ name: 'photo_consent', default: false }) photoConsent!: boolean;
+  @Column({ name: 'photo_consent_updated_at', type: 'timestamptz', nullable: true }) photoConsentUpdatedAt!: Date | null;
+  @Column({ name: 'photo_consent_updated_by', type: 'uuid', nullable: true }) photoConsentUpdatedBy!: string | null;
   @OneToMany(() => Guardian, (g) => g.child) guardians!: Guardian[];
   @CreateDateColumn({ name: 'created_at', type: 'timestamptz' }) createdAt!: Date;
   @UpdateDateColumn({ name: 'updated_at', type: 'timestamptz' }) updatedAt!: Date;
@@ -102,6 +108,11 @@ export class Attendance {
   @Column({ type: 'text', nullable: true }) note!: string | null;
   /** Absence notified in advance by the family -> eligible for meal refund. */
   @Column({ name: 'notified_in_advance', default: false }) notifiedInAdvance!: boolean;
+  /** sick | family | other (absent only). */
+  @Column({ name: 'absence_reason', type: 'varchar', length: 10, nullable: true }) absenceReason!: AbsenceReason | null;
+  /** Set when the row was generated from a parent absence report (excused absence). */
+  @Index() @Column({ name: 'absence_id', type: 'uuid', nullable: true }) absenceId!: string | null;
+  @ManyToOne(() => Absence, { onDelete: 'SET NULL', nullable: true }) @JoinColumn({ name: 'absence_id' }) absence!: Absence | null;
   @Column({ name: 'recorded_by', type: 'uuid', nullable: true }) recordedBy!: string | null;
   @OneToOne(() => Pickup, (p) => p.attendance) pickup!: Pickup | null;
   @CreateDateColumn({ name: 'created_at', type: 'timestamptz' }) createdAt!: Date;
@@ -259,6 +270,7 @@ export class DailyNote {
   @ManyToOne(() => ClassRoom, { onDelete: 'CASCADE' }) @JoinColumn({ name: 'class_id' }) classRoom!: ClassRoom;
   @Index() @Column({ type: 'date' }) date!: string;
   @Column({ type: 'varchar', length: 10, nullable: true }) eating!: EatingLevel | null;
+  @Column({ type: 'varchar', length: 10, nullable: true }) breakfast!: EatingLevel | null;
   @Column({ name: 'sleep_minutes', type: 'integer', nullable: true }) sleepMinutes!: number | null;
   @Column({ type: 'varchar', length: 40, nullable: true }) mood!: string | null;
   @Column({ type: 'varchar', length: 40, nullable: true }) toilet!: string | null;
@@ -480,7 +492,8 @@ export class Announcement {
   @Column({ name: 'recipient_count', type: 'integer', default: 0 }) recipientCount!: number;
 }
 
-export type NotificationType = 'announcement' | 'pickup_request' | 'pickup_decision' | 'invoice' | 'payment' | 'picked_up' | 'picker_registration' | 'picker_decision' | 'contact_change';
+export type NotificationType = 'announcement' | 'pickup_request' | 'pickup_decision' | 'invoice' | 'payment' | 'picked_up' | 'picker_registration' | 'picker_decision' | 'contact_change'
+  | 'absence_report' | 'absence_cancelled' | 'absence_overridden' | 'kitchen_change' | 'medicine_request' | 'medicine_given' | 'late_pickup';
 @Entity('notifications')
 @Index('ix_notifications_user_read', ['userId', 'readAt'])
 @Index('ix_notifications_announcement', ['announcementId'])
@@ -601,7 +614,117 @@ export class AuditEvent {
   @Index() @CreateDateColumn({ name: 'created_at', type: 'timestamptz' }) createdAt!: Date;
 }
 
+// ---------- Round 2: parent messages, holidays, medicine, late pickup ----------
+
+/** Parent absence report ("báo vắng"), possibly multi-day. Days live in absence_days. */
+@Entity('absences')
+export class Absence {
+  @PrimaryGeneratedColumn('uuid') id!: string;
+  @Index() @Column({ name: 'child_id', type: 'uuid' }) childId!: string;
+  @ManyToOne(() => Child, { onDelete: 'CASCADE' }) @JoinColumn({ name: 'child_id' }) child!: Child;
+  @Column({ name: 'class_id', type: 'uuid', nullable: true }) classId!: string | null;
+  @Column({ name: 'from_date', type: 'date' }) from!: string;
+  @Column({ name: 'to_date', type: 'date' }) to!: string;
+  @Column({ type: 'varchar', length: 10 }) reason!: AbsenceReason;
+  @Column({ type: 'text', nullable: true }) note!: string | null;
+  @Column({ name: 'created_by', type: 'uuid', nullable: true }) createdBy!: string | null;
+  @CreateDateColumn({ name: 'created_at', type: 'timestamptz' }) createdAt!: Date;
+  /** All days cancelled. */
+  @Column({ name: 'cancelled_at', type: 'timestamptz', nullable: true }) cancelledAt!: Date | null;
+  @OneToMany(() => AbsenceDay, (d) => d.absence) days!: AbsenceDay[];
+}
+
+@Entity('absence_days')
+@Index('uq_absence_day_active', ['childId', 'date'], { unique: true, where: 'cancelled_at IS NULL' })
+export class AbsenceDay {
+  @PrimaryGeneratedColumn('uuid') id!: string;
+  @Index() @Column({ name: 'absence_id', type: 'uuid' }) absenceId!: string;
+  @ManyToOne(() => Absence, (a) => a.days, { onDelete: 'CASCADE' }) @JoinColumn({ name: 'absence_id' }) absence!: Absence;
+  @Column({ name: 'child_id', type: 'uuid' }) childId!: string;
+  @Index() @Column({ type: 'date' }) date!: string;
+  @Column({ name: 'refund_eligible', default: false }) refundEligible!: boolean;
+  @Column({ default: false }) overridden!: boolean;
+  @Column({ name: 'overridden_by', type: 'uuid', nullable: true }) overriddenBy!: string | null;
+  @Column({ name: 'overridden_at', type: 'timestamptz', nullable: true }) overriddenAt!: Date | null;
+  @Column({ name: 'cancelled_at', type: 'timestamptz', nullable: true }) cancelledAt!: Date | null;
+  @Column({ name: 'cancelled_by', type: 'uuid', nullable: true }) cancelledBy!: string | null;
+}
+
+@Entity('absence_events')
+export class AbsenceEvent {
+  @PrimaryGeneratedColumn('uuid') id!: string;
+  @Index() @Column({ name: 'absence_id', type: 'uuid' }) absenceId!: string;
+  @ManyToOne(() => Absence, { onDelete: 'CASCADE' }) @JoinColumn({ name: 'absence_id' }) absence!: Absence;
+  @Column({ type: 'varchar', length: 20 }) action!: 'created' | 'cancelled' | 'overridden';
+  @Column({ type: 'jsonb' }) dates!: string[];
+  @Column({ name: 'actor_id', type: 'uuid', nullable: true }) actorId!: string | null;
+  @CreateDateColumn({ name: 'created_at', type: 'timestamptz' }) createdAt!: Date;
+}
+
+@Entity('holidays')
+export class Holiday {
+  @PrimaryGeneratedColumn('uuid') id!: string;
+  @Index({ unique: true }) @Column({ type: 'date' }) date!: string;
+  @Column({ length: 120 }) name!: string;
+  @Column({ type: 'varchar', length: 10, default: 'school' }) kind!: 'national' | 'school';
+  /** pending = template lunar holiday awaiting admin confirmation: NO effect until confirmed. */
+  @Column({ type: 'varchar', length: 10, default: 'confirmed' }) status!: 'pending' | 'confirmed';
+  @Column({ name: 'confirmed_by', type: 'uuid', nullable: true }) confirmedBy!: string | null;
+  @Column({ name: 'confirmed_at', type: 'timestamptz', nullable: true }) confirmedAt!: Date | null;
+  @Column({ name: 'created_by', type: 'uuid', nullable: true }) createdBy!: string | null;
+  @CreateDateColumn({ name: 'created_at', type: 'timestamptz' }) createdAt!: Date;
+}
+
+/** Parent medicine instruction ("dặn thuốc") for one day; doses in medicine_doses. */
+@Entity('medicines')
+export class Medicine {
+  @PrimaryGeneratedColumn('uuid') id!: string;
+  @Index() @Column({ name: 'child_id', type: 'uuid' }) childId!: string;
+  @ManyToOne(() => Child, { onDelete: 'CASCADE' }) @JoinColumn({ name: 'child_id' }) child!: Child;
+  @Column({ name: 'class_id', type: 'uuid', nullable: true }) classId!: string | null;
+  @Index() @Column({ type: 'date' }) date!: string;
+  @Column({ length: 120 }) name!: string;
+  @Column({ length: 120 }) dose!: string;
+  @Column({ type: 'text', nullable: true }) note!: string | null;
+  @Column({ name: 'photo_url', type: 'text', nullable: true }) photoUrl!: string | null;
+  @Column({ name: 'created_by', type: 'uuid', nullable: true }) createdBy!: string | null;
+  @CreateDateColumn({ name: 'created_at', type: 'timestamptz' }) createdAt!: Date;
+  @Column({ name: 'cancelled_at', type: 'timestamptz', nullable: true }) cancelledAt!: Date | null;
+  @Column({ name: 'cancelled_by', type: 'uuid', nullable: true }) cancelledBy!: string | null;
+  @OneToMany(() => MedicineDose, (d) => d.medicine) doses!: MedicineDose[];
+}
+
+@Entity('medicine_doses')
+export class MedicineDose {
+  @PrimaryGeneratedColumn('uuid') id!: string;
+  @Index() @Column({ name: 'medicine_id', type: 'uuid' }) medicineId!: string;
+  @ManyToOne(() => Medicine, (m) => m.doses, { onDelete: 'CASCADE' }) @JoinColumn({ name: 'medicine_id' }) medicine!: Medicine;
+  @Column({ type: 'varchar', length: 5 }) time!: string;
+  @Column({ type: 'varchar', length: 60, nullable: true }) label!: string | null;
+  @Column({ name: 'given_at', type: 'timestamptz', nullable: true }) givenAt!: Date | null;
+  @Column({ name: 'given_by', type: 'uuid', nullable: true }) givenBy!: string | null;
+  @Column({ name: 'given_note', type: 'text', nullable: true }) givenNote!: string | null;
+}
+
+@Entity('late_pickups')
+@Index('uq_late_pickup_active', ['childId', 'date'], { unique: true, where: 'cancelled_at IS NULL' })
+export class LatePickup {
+  @PrimaryGeneratedColumn('uuid') id!: string;
+  @Column({ name: 'child_id', type: 'uuid' }) childId!: string;
+  @ManyToOne(() => Child, { onDelete: 'CASCADE' }) @JoinColumn({ name: 'child_id' }) child!: Child;
+  @Column({ name: 'class_id', type: 'uuid', nullable: true }) classId!: string | null;
+  @Index() @Column({ type: 'date' }) date!: string;
+  @Column({ type: 'varchar', length: 5 }) time!: string;
+  @Column({ name: 'picker_name', type: 'varchar', length: 120, nullable: true }) pickerName!: string | null;
+  @Column({ type: 'text', nullable: true }) note!: string | null;
+  @Column({ name: 'created_by', type: 'uuid', nullable: true }) createdBy!: string | null;
+  @CreateDateColumn({ name: 'created_at', type: 'timestamptz' }) createdAt!: Date;
+  @Column({ name: 'cancelled_at', type: 'timestamptz', nullable: true }) cancelledAt!: Date | null;
+  @Column({ name: 'cancelled_by', type: 'uuid', nullable: true }) cancelledBy!: string | null;
+}
+
 export const ENTITIES = [
+  Absence, AbsenceDay, AbsenceEvent, Holiday, Medicine, MedicineDose, LatePickup,
   AuthorizedPicker, AuthorizedPickerHistory, ChildContactHistory, AuditEvent, SensitiveAccessLog, PickupDuty, PickupCallAttempt, PushSubscription, NotificationDelivery,
   RefundPayout,
   MealRefund, InvoiceAudit,

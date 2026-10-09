@@ -9,6 +9,7 @@ import request from 'supertest';
 import { DataSource } from 'typeorm';
 import { AppModule, configureApp } from '../src/app.module';
 import { addDays, todayStr } from '../src/common/dates';
+import { parentReported } from './helpers/absence';
 import { seed } from '../src/database/seed';
 
 const nextMonth = (p: string) => { const [y, m] = p.split('-').map(Number); return m === 12 ? `${y + 1}-01` : `${y}-${String(m + 1).padStart(2, '0')}`; };
@@ -110,6 +111,7 @@ describe('PM round 3: void rules, withdrawal & payout, discount cap, account sec
 
     it('positive balance: future invoice voided (paid -> credit), pending meal refunds -> credit, payout voucher -> balance 0', async () => {
       const w = W1();
+      await parentReported(ds, w.id, [addDays(today, -2), addDays(today, -3)]);
       for (const d of [addDays(today, -2), addDays(today, -3)])
         await as('admin').put(`/classes/${c1()}/attendance`, { date: d, items: [{ childId: w.id, status: 'absent', notifiedInAdvance: true }] }).expect(200);
       await as('ketoan').post('/invoices/generate', { period: next, classId: c1() }).expect(201);
@@ -218,8 +220,10 @@ describe('PM round 3: void rules, withdrawal & payout, discount cap, account sec
       `SELECT COUNT(*)::int n FROM attendance WHERE child_id=$1 AND status IN ('present','late') AND date >= $2 AND date <= $3`, [childId, `${leave.slice(0, 7)}-01`, leave]))[0].n);
     const markDays = async (childId: string) => {
       for (const [d, st] of [[addDays(today, -4), 'present'], [addDays(today, -5), 'late'], [addDays(today, -6), 'absent']] as const)
-        if (d.slice(0, 7) === leave.slice(0, 7))
+        if (d.slice(0, 7) === leave.slice(0, 7)) {
+          if (st === 'absent') await parentReported(ds, childId, [d]);
           await as('admin').put(`/classes/${c1()}/attendance`, { date: d, items: [{ childId, status: st, notifiedInAdvance: st === 'absent' }] }).expect(200);
+        }
     };
 
     it('existing leave-month invoice: tuition unchanged, refund line for meal days not attended, editable by accountant', async () => {

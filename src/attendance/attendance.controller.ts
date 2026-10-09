@@ -14,12 +14,13 @@ import { NotificationsService } from '../notifications/notifications.service';
 import { AppError, BadRequest, Forbidden, NotFound } from '../common/errors';
 import { imageUploadOptions, saveImage, sendImage } from '../common/upload';
 import { Response } from 'express';
-import { Attendance, AttendanceHistory, AttStatus, AuthorizedPicker, Child, ClassRoom, Guardian, Pickup, PickupCallAttempt, PickupRequest, User } from '../database/entities';
+import { ABSENCE_REASONS, AbsenceDay, AbsenceReason, Absence, Attendance, AttendanceHistory, AttStatus, AuthorizedPicker, Child, ClassRoom, Guardian, Pickup, PickupCallAttempt, PickupRequest, User } from '../database/entities';
 import { ESCALATE_MINUTES, maskId, PickupSafetyService } from '../pickup/pickup-safety.service';
 import { cleanName, parsePhone } from '../imports/children-import';
 import { recordAudit } from '../common/audit';
 import { Request } from 'express';
 import { isExpired, requestBlockers } from '../pickup/request-rules';
+import { AbsencesService, confirmedHolidays } from '../absences/absences.service';
 
 export const TEACHER_EDIT_WINDOW_DAYS = 3;
 
@@ -30,8 +31,11 @@ class AttendanceItemDto {
   @ApiProperty() @IsUUID() childId!: string;
   @ApiProperty({ enum: ['present', 'absent', 'late'] }) @IsIn(['present', 'absent', 'late']) status!: AttStatus;
   @ApiPropertyOptional({ example: 'Ốm, mẹ xin nghỉ' }) @IsOptional() @IsString() @MaxLength(500) note?: string;
-  @ApiPropertyOptional({ default: false, description: 'Vắng có báo trước (được hoàn tiền ăn); chỉ có nghĩa khi status=absent' })
+  @ApiPropertyOptional({ deprecated: true, description: 'Bỏ qua (giữ để tương thích): máy chủ tự tính – chỉ báo vắng của phụ huynh trước giờ chốt mới được hoàn tiền ăn' })
   @IsOptional() @IsBoolean() notifiedInAdvance?: boolean;
+  @ApiPropertyOptional({ enum: ABSENCE_REASONS, description: 'Lý do vắng (status=absent)' }) @IsOptional() @IsIn(ABSENCE_REASONS) absenceReason?: AbsenceReason;
+  @ApiPropertyOptional({ default: false, description: 'Chủ động ghi đè báo vắng của phụ huynh (có mặt): không hoàn tiền, báo bếp. "Tất cả có mặt" KHÔNG gửi cờ này.' })
+  @IsOptional() @IsBoolean() overrideAbsence?: boolean;
 }
 export class PutAttendanceDto {
   @ApiProperty({ example: '2026-10-09' }) @IsDateString() date!: string;
@@ -123,7 +127,7 @@ export class AttendanceController {
     @InjectRepository(Guardian) private guardians: Repository<Guardian>,
     @InjectRepository(Pickup) private pickups: Repository<Pickup>,
     @InjectRepository(PickupRequest) private requests: Repository<PickupRequest>,
-    private access: AccessService, private ds: DataSource, private notify: NotificationsService, private safety: PickupSafetyService,
+    private access: AccessService, private ds: DataSource, private notify: NotificationsService, private safety: PickupSafetyService, private absences: AbsencesService,
   ) {}
 
   /** Lazily flips overdue pending requests to 'expired'. */
@@ -141,12 +145,23 @@ export class AttendanceController {
     const extra = rows.filter((r) => !kids.some((k) => k.id === r.childId));
     const extraKids = extra.length ? await this.children.find({ where: { id: In(extra.map((r) => r.childId)) } }) : [];
     await this.sweepExpired();
+    const allIds = [...kids, ...extraKids].map((k) => k.id);
+    const excused = allIds.length ? await this.ds.getRepository(AbsenceDay).createQueryBuilder('d').innerJoinAndSelect('d.absence', 'a')
+      .where('d.child_id IN (:...ids) AND d.date = :date AND d.cancelled_at IS NULL', { ids: allIds, date }).getMany() : [];
+    const exBy = new Map(excused.map((d) => [d.childId, d]));
     const pending = rows.length ? await this.requests.find({ where: { attendanceId: In(rows.map((r) => r.id)), status: 'pending' } }) : [];
     return [...kids, ...extraKids].map((k) => {
       const r = byChild.get(k.id);
       return {
         attendanceId: r?.id ?? null, childId: k.id, fullName: k.fullName, allergies: k.allergies ?? undefined,
         status: r?.status ?? null, note: r?.note ?? null, notifiedInAdvance: r?.notifiedInAdvance ?? false, recorded: !!r,
+        photoConsent: k.photoConsent,
+        excused: !!exBy.get(k.id) && !exBy.get(k.id)!.overridden && r?.status === 'absent',
+        excusedOverridden: !!exBy.get(k.id)?.overridden,
+        absenceId: exBy.get(k.id)?.absenceId ?? r?.absenceId ?? null,
+        absenceReason: r?.absenceReason ?? (exBy.get(k.id) && !exBy.get(k.id)!.overridden ? exBy.get(k.id)!.absence.reason : null),
+        absenceNote: exBy.get(k.id)?.absence.note ?? null,
+        refundEligible: r?.status === 'absent' && !!r?.notifiedInAdvance,
         pickup: r?.pickup ? pickupView(r.pickup) : null,
         pendingPickupRequests: r ? pending.filter((p) => p.attendanceId === r.id).length : 0,
       };
@@ -158,7 +173,8 @@ export class AttendanceController {
     await this.access.getClassOr404(id);
     this.access.assertOperateClass(u, id); // accountant & parent: 403 (no attendance detail at class level)
     const date = q.date ?? todayStr();
-    return { classId: id, date, items: await this.sheet(id, date) };
+    const holiday = (await confirmedHolidays(this.ds.manager, date, date)).get(date);
+    return { classId: id, date, holiday: holiday ? { id: holiday.id, name: holiday.name } : null, items: await this.sheet(id, date) };
   }
 
   /** Bulk save. Every create/change is written to attendance_history (who, when, old → new). */
@@ -167,6 +183,8 @@ export class AttendanceController {
     await this.access.getClassOr404(id);
     this.access.assertOperateClass(u, id);
     assertDateEditable(u, dto.date);
+    const hol = (await confirmedHolidays(this.ds.manager, dto.date, dto.date)).get(dto.date);
+    if (hol) throw new AppError(400, 'SCHOOL_HOLIDAY', `Trường nghỉ (${hol.name}) – không điểm danh`, { holiday: { id: hol.id, name: hol.name } });
     const ids = dto.items.map((i) => i.childId);
     if (new Set(ids).size !== ids.length) throw BadRequest('Trùng trẻ trong danh sách điểm danh');
     if (ids.length) {
@@ -176,28 +194,58 @@ export class AttendanceController {
       const gone = kids.filter((k) => k.status === 'withdrawn' && (!k.leaveDate || dto.date > k.leaveDate));
       if (gone.length) throw BadRequest(`Trẻ đã nghỉ học, không điểm danh sau ngày nghỉ: ${gone.map((k) => `${k.fullName} (${k.leaveDate})`).join(', ')}`, 'CHILD_WITHDRAWN');
     }
+    const skipped: { childId: string; reason: string }[] = [];
+    const overrides: { childId: string; absenceId: string }[] = [];
     await this.ds.transaction(async (m) => {
+      const exDays = ids.length ? await m.createQueryBuilder(AbsenceDay, 'd').setLock('pessimistic_write')
+        .where('d.child_id IN (:...ids) AND d.date = :d AND d.cancelled_at IS NULL', { ids, d: dto.date }).getMany() : [];
+      const exBy = new Map(exDays.map((d) => [d.childId, d]));
+      const reasons = exDays.length ? new Map((await m.find(Absence, { where: { id: In(exDays.map((d) => d.absenceId)) } })).map((a) => [a.id, a.reason])) : new Map();
       const existing = ids.length
         ? await m.createQueryBuilder(Attendance, 'a').setLock('pessimistic_write')
             .where('a.child_id IN (:...ids)', { ids }).andWhere('a.date = :d', { d: dto.date }).getMany()
         : [];
       const byChild = new Map(existing.map((a) => [a.childId, a]));
       for (const i of dto.items) {
-        const note = i.note ?? null;
-        const notified = i.status === 'absent' && !!i.notifiedInAdvance;
         const old = byChild.get(i.childId);
+        const day = exBy.get(i.childId);
+        let note = i.note ?? null;
+        // Refund eligibility is computed by the server (client notifiedInAdvance is ignored): only a parent report made before
+        // the cutoff makes an absence refundable. Legacy rows (before round 2) keep their stored flag while they stay absent.
+        let notified = i.status === 'absent' && !!old && old.status === 'absent' && !old.absenceId && old.notifiedInAdvance;
+        let absenceReason: AbsenceReason | null = i.status === 'absent' ? i.absenceReason ?? old?.absenceReason ?? null : null;
+        let absenceId: string | null = old?.absenceId ?? null;
+        if (day && !day.overridden) {
+          if (i.status !== 'absent' && !i.overrideAbsence) { skipped.push({ childId: i.childId, reason: 'EXCUSED_ABSENCE' }); continue; }
+          if (i.status === 'absent') {
+            // excused day stays excused: refund flag comes from the report, not from the sheet
+            notified = day.refundEligible; absenceReason = i.absenceReason ?? reasons.get(day.absenceId) ?? null; absenceId = day.absenceId;
+            if (i.note === undefined) note = old?.note ?? null;
+          } else {
+            await this.absences.override(m, day, u.id);
+            overrides.push({ childId: i.childId, absenceId: day.absenceId });
+            absenceId = day.absenceId;
+          }
+        }
         if (!old) {
-          const a = await m.save(Attendance, m.create(Attendance, { childId: i.childId, classId: id, date: dto.date, status: i.status, note, notifiedInAdvance: notified, recordedBy: u.id }));
+          const a = await m.save(Attendance, m.create(Attendance, { childId: i.childId, classId: id, date: dto.date, status: i.status, note, notifiedInAdvance: notified, absenceReason, absenceId, recordedBy: u.id }));
           await m.save(AttendanceHistory, m.create(AttendanceHistory, { attendanceId: a.id, action: 'create', oldStatus: null, oldNote: null, oldNotified: null,
             newStatus: i.status, newNote: note, newNotified: notified, changedBy: u.id }));
-        } else if (old.status !== i.status || (old.note ?? null) !== note || old.notifiedInAdvance !== notified) {
-          await m.update(Attendance, old.id, { status: i.status, note, notifiedInAdvance: notified, recordedBy: u.id, classId: id });
+        } else if (old.status !== i.status || (old.note ?? null) !== note || old.notifiedInAdvance !== notified || (old.absenceReason ?? null) !== absenceReason) {
+          await m.update(Attendance, old.id, { status: i.status, note, notifiedInAdvance: notified, absenceReason, absenceId, recordedBy: u.id, classId: id });
           await m.save(AttendanceHistory, m.create(AttendanceHistory, { attendanceId: old.id, action: 'update', oldStatus: old.status, oldNote: old.note,
             oldNotified: old.notifiedInAdvance, newStatus: i.status, newNote: note, newNotified: notified, changedBy: u.id }));
         }
       }
     });
-    return { classId: id, date: dto.date, items: await this.sheet(id, dto.date) };
+    if (overrides.length) {
+      const kids = await this.children.find({ where: { id: In(overrides.map((o) => o.childId)) }, relations: { classRoom: true } });
+      for (const o of overrides) {
+        const k = kids.find((x) => x.id === o.childId)!;
+        await this.absences.notifyOverride(k.id, k.fullName, k.classRoom?.name ?? null, dto.date, o.absenceId, u.name);
+      }
+    }
+    return { classId: id, date: dto.date, holiday: null, skipped, items: await this.sheet(id, dto.date) };
   }
 
   private async attendanceForStaff(u: AuthUser, id: string) {

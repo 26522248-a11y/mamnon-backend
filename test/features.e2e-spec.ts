@@ -10,6 +10,7 @@ import { DataSource } from 'typeorm';
 import { AppModule, configureApp } from '../src/app.module';
 import { pickupRequestExpiry } from '../src/attendance/attendance.controller';
 import { addDays, todayStr } from '../src/common/dates';
+import { parentReported } from './helpers/absence';
 import { seed } from '../src/database/seed';
 
 const nextMonth = (p: string) => { const [y, m] = p.split('-').map(Number); return m === 12 ? `${y + 1}-01` : `${y}-${String(m + 1).padStart(2, '0')}`; };
@@ -110,6 +111,7 @@ describe('PM decisions, notifications, reports, users, rate limit (e2e)', () => 
       const month = todayStr().slice(0, 7), period = nextMonth(month);
       // kids[9] (Mầm 1): seeded notified absence yesterday + 2 more notified, 1 not notified
       const d1 = `${month}-01`, d2 = `${month}-02`, d3 = `${month}-03`;
+      await parentReported(ds, s.kids[9].id, [d1, d2]); // parent reports before cutoff → refundable; d3 teacher-only → not
       for (const [d, notified] of [[d1, true], [d2, true], [d3, false]] as const)
         await as('admin').put(`/classes/${s.classes.c1.id}/attendance`, { date: d, items: [{ childId: s.kids[9].id, status: 'absent', notifiedInAdvance: notified }] }).expect(200);
       const expectedDays = Number((await ds.query(`SELECT COUNT(*) n FROM attendance WHERE child_id=$1 AND status='absent' AND notified_in_advance AND to_char(date,'YYYY-MM')=$2`, [s.kids[9].id, month]))[0].n);
@@ -159,7 +161,7 @@ describe('PM decisions, notifications, reports, users, rate limit (e2e)', () => 
       await as('ketoan').post('/invoices/generate', { period: p2, classId: s.classes.c1.id }).expect(201);
       expect((await inv(p2)).lines.some((l: any) => l.kind === 'refund')).toBe(false);
       // attendance corrected (absent-notified -> present) after the refund => one clawback line, only once
-      await as('admin').put(`/classes/${s.classes.c1.id}/attendance`, { date: `${month}-01`, items: [{ childId: s.kids[9].id, status: 'present' }] }).expect(200);
+      await as('admin').put(`/classes/${s.classes.c1.id}/attendance`, { date: `${month}-01`, items: [{ childId: s.kids[9].id, status: 'present', overrideAbsence: true }] }).expect(200);
       await as('ketoan').post('/invoices/generate', { period: p3, classId: s.classes.c1.id }).expect(201);
       const claw = (await inv(p3)).lines.filter((l: any) => l.description.startsWith('Thu lại tiền ăn'));
       expect(claw).toHaveLength(1);

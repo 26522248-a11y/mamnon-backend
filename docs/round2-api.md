@@ -24,7 +24,8 @@ timestamps ISO-8601 UTC. Names follow `mamnon-web/src/lib/messages-api.ts`; diff
 ### Model
 ```ts
 type AbsenceReason = 'sick' | 'family' | 'other';
-type AbsenceDay = { date: string; refundEligible: boolean; overridden: boolean; cancelled: boolean; cancelledAt: string | null };
+type AbsenceDay = { date: string; refundEligible: boolean; reportedAt: string; overridden: boolean; cancelled: boolean; cancelledAt: string | null };
+// days falling on a CONFIRMED school holiday are omitted from `days` (history excludes them)
 type Absence = { id; childId; childName; classId; className; from; to; reason: AbsenceReason; note: string | null;
   days: AbsenceDay[];              // school days only (no weekends, no holidays)
   skippedDates: { date: string; reason: 'WEEKEND' | 'HOLIDAY' | 'ALREADY_PRESENT' }[];
@@ -45,7 +46,7 @@ type Absence = { id; childId; childName; classId; className; from; to; reason: A
 
 ### Rules
 - **Refund**: a day is `refundEligible` iff it was reported before that day, or on that day strictly before `absenceCutoff` (VN time; reported at 07:59:59 = refund, at exactly 08:00:00 = no refund). Weekends/holidays never appear. `AbsenceDay.refundEligible` is exactly what the meal invoice uses (false once overridden).
-- `GET /children/:id/absences?from&to`: e.g. the parent screen loads the past 30 days with `from = today − 30` (also the default).
+- History route = `GET /children/:id/absences?from&to` (reports overlapping the range; `days` exclude confirmed holidays; each day has `refundEligible` + `reportedAt`). E.g. the parent screen loads the past 30 days with `from = today − 30` (also the default).
 - **Attendance**: each day is written to attendance immediately as `status:'absent'`, `excused: true`, `absenceReason`, `absenceId`, `notifiedInAdvance = refundEligible` (this is what meal refunds read, unchanged logic).
 - **Cancel (parent)**: allowed for future days, and for today only strictly before the cutoff. After the cutoff a parent cannot cancel today (nor past days). Admin may cancel any day that is today or later. Cancelled days remove the generated attendance row.
 - **Teacher marks present on an excused day** (explicit override, see §5): attendance becomes present, the day gets `overridden: true`, `notifiedInAdvance=false` → **no refund** for that day; kitchen roles + parents notified (`absence_overridden`).

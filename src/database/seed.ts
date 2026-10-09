@@ -12,7 +12,7 @@ export const SEED_PASSWORD = '123456';
 
 /** Wipes all app tables and inserts deterministic sample data. Returns handy ids (used by e2e tests). */
 export async function seed(ds: DataSource) {
-  await ds.query('TRUNCATE audit_events, child_contact_history, notification_deliveries, push_subscriptions, sensitive_access_logs, pickup_call_attempts, pickup_duties, authorized_picker_history, authorized_pickers, refund_payouts, meal_refunds, invoice_audit, notifications, announcements, credit_transactions, payments, invoice_lines, invoices, fee_items, growth_records, menus, daily_notes, pickup_requests, attendance_history, pickups, attendance, guardians, children, class_teachers, classes, users RESTART IDENTITY CASCADE');
+  await ds.query('TRUNCATE absence_events, absence_days, absences, holidays, medicine_doses, medicines, late_pickups, audit_events, child_contact_history, notification_deliveries, push_subscriptions, sensitive_access_logs, pickup_call_attempts, pickup_duties, authorized_picker_history, authorized_pickers, refund_payouts, meal_refunds, invoice_audit, notifications, announcements, credit_transactions, payments, invoice_lines, invoices, fee_items, growth_records, menus, daily_notes, pickup_requests, attendance_history, pickups, attendance, guardians, children, class_teachers, classes, users RESTART IDENTITY CASCADE');
   const hash = await bcrypt.hash(SEED_PASSWORD, 10);
   const mk = (username: string, name: string, role: User['role'], phone: string | null = null) =>
     ds.getRepository(User).save({ username, name, role, phone, passwordHash: hash });

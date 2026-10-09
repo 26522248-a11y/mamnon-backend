@@ -2,7 +2,10 @@ import { Controller, Get, INestApplication, Module, ValidationPipe } from '@nest
 import { APP_FILTER, APP_GUARD } from '@nestjs/core';
 import { JwtModule } from '@nestjs/jwt';
 import { ApiTags, DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
-import { schoolInfo } from './common/school';
+import { AbsencesController } from './absences/absences.controller';
+import { AbsencesService } from './absences/absences.service';
+import { HolidaysController } from './calendar/holidays.controller';
+import { schoolSettings } from './common/school';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import cookieParser from 'cookie-parser';
 import { NestExpressApplication } from '@nestjs/platform-express';
@@ -41,7 +44,7 @@ class HealthController {
 @Controller('settings')
 class SettingsController {
   /** Public (login page / print headers): school name, address, phone from env. */
-  @Public() @Get('school') school() { return schoolInfo(); }
+  @Public() @Get('school') school() { return schoolSettings(); }
 }
 
 @Module({
@@ -50,9 +53,9 @@ class SettingsController {
     TypeOrmModule.forFeature(ENTITIES),
     JwtModule.register({}),
   ],
-  controllers: [HealthController, SettingsController, AuthController, ClassesController, ChildrenController, AttendanceController, DashboardController, FeesController, HealthNutritionController, NotificationsController, ReportsController, UsersController, ImportsController, AuthorizedPickersController, ContactPhonesController, PickupDutiesController, PushController, AuditController],
+  controllers: [HealthController, SettingsController, AuthController, ClassesController, ChildrenController, AttendanceController, DashboardController, FeesController, HealthNutritionController, NotificationsController, ReportsController, UsersController, ImportsController, AuthorizedPickersController, ContactPhonesController, PickupDutiesController, PushController, AuditController, AbsencesController, HolidaysController],
   providers: [
-    AccessService, UserContextService, NotificationsService, NotificationDispatcher, PickupSafetyService, LoginThrottleService,
+    AccessService, UserContextService, AbsencesService, NotificationsService, NotificationDispatcher, PickupSafetyService, LoginThrottleService,
     { provide: APP_GUARD, useClass: JwtAuthGuard },
     { provide: APP_FILTER, useClass: AllExceptionsFilter },
   ],

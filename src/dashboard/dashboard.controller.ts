@@ -1,3 +1,4 @@
+import { confirmedHolidays } from '../absences/absences.service';
 import { Controller, Get, Query } from '@nestjs/common';
 import { ApiBearerAuth, ApiPropertyOptional, ApiTags } from '@nestjs/swagger';
 import { InjectRepository } from '@nestjs/typeorm';
@@ -65,9 +66,12 @@ export class DashboardController {
     const [{ n: pending }] = await this.ds.query(`
       SELECT COUNT(*)::int AS n FROM pickup_requests pr JOIN attendance a ON a.id = pr.attendance_id
       WHERE pr.status = 'pending' AND (pr.expires_at IS NULL OR pr.expires_at > now()) AND a.date = $1`, [date]);
-    const notMarked = byClass.filter((c) => c.classId && c.totalChildren > 0 && c.unmarked === c.totalChildren);
-    const partly = byClass.filter((c) => c.classId && c.unmarked > 0 && c.unmarked < c.totalChildren);
+    const holiday = (await confirmedHolidays(this.ds.manager, date, date)).get(date);
+    // confirmed school holiday: nothing to mark
+    const notMarked = holiday ? [] : byClass.filter((c) => c.classId && c.totalChildren > 0 && c.unmarked === c.totalChildren);
+    const partly = holiday ? [] : byClass.filter((c) => c.classId && c.unmarked > 0 && c.unmarked < c.totalChildren);
     return {
+      holiday: holiday ? { id: holiday.id, name: holiday.name } : null,
       /** classes with active children and no attendance at all for the day */
       classesNotMarked: notMarked.map((c) => ({ classId: c.classId, className: c.className, totalChildren: c.totalChildren })),
       classesNotMarkedCount: notMarked.length,

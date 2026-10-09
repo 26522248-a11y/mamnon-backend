@@ -161,10 +161,10 @@ describe('Round 4: announcements recall/specific/important, 0đ invoices, settin
     it('public, values from env, used by receipts', async () => {
       process.env.SCHOOL_NAME = 'Trường MN Test'; process.env.SCHOOL_ADDRESS = '1 Lê Lợi'; process.env.SCHOOL_PHONE = '0281234567';
       const r = await request(http).get('/api/v1/settings/school').expect(200);
-      expect(r.body).toEqual({ name: 'Trường MN Test', address: '1 Lê Lợi', phone: '0281234567' });
+      expect(r.body).toMatchObject({ name: 'Trường MN Test', address: '1 Lê Lợi', phone: '0281234567', absenceCutoff: '08:00', latestPickupTime: '18:00' });
       const k = s.kids[26];
       const pay = await as('ketoan').post(`/children/${k.id}/prepayments`, { amount: 10000, method: 'cash' }).expect(201);
-      expect(pay.body.school).toEqual(r.body);
+      expect(pay.body.school).toEqual({ name: r.body.name, address: r.body.address, phone: r.body.phone });
     });
   });
 
