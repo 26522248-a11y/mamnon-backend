@@ -10,6 +10,7 @@ export interface AuthUser {
   id: string; username: string; name: string; role: Role;
   classIds: string[]; // teacher: classes taught
   childIds: string[]; // parent: own children
+  mustChangePassword: boolean; // admin-created / admin-reset password: frontend should force change-password
 }
 
 export const IS_PUBLIC = 'isPublic';
@@ -27,7 +28,7 @@ export class UserContextService {
   async build(u: User): Promise<AuthUser> {
     const classIds = u.role === 'teacher' ? (await this.ct.find({ where: { userId: u.id } })).map((x) => x.classId) : [];
     const childIds = u.role === 'parent' ? [...new Set((await this.guardians.find({ where: { userId: u.id } })).map((g) => g.childId))] : [];
-    return { id: u.id, username: u.username, name: u.name, role: u.role, classIds, childIds };
+    return { id: u.id, username: u.username, name: u.name, role: u.role, classIds, childIds, mustChangePassword: !!u.mustChangePassword };
   }
 }
 

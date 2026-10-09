@@ -30,8 +30,10 @@ export class LoginThrottleService {
     const now = Date.now(), k = this.keys(username, ip);
     const locked = [this.live(k.user, now), this.live(k.ip, now)].filter((b) => b && b.lockedUntil > now) as Bucket[];
     if (locked.length) {
-      const retry = Math.ceil((Math.max(...locked.map((b) => b.lockedUntil)) - now) / 1000);
-      const e = new AppError(429, 'TOO_MANY_ATTEMPTS', `Đăng nhập sai quá nhiều lần. Vui lòng thử lại sau ${Math.ceil(retry / 60)} phút`);
+      const until = Math.max(...locked.map((b) => b.lockedUntil));
+      const retry = Math.ceil((until - now) / 1000);
+      const e = new AppError(429, 'TOO_MANY_ATTEMPTS', `Đăng nhập sai quá nhiều lần. Vui lòng thử lại sau ${Math.ceil(retry / 60)} phút`, undefined,
+        { lockedUntil: new Date(until).toISOString(), retryAfterSeconds: retry, lockScope: locked.some((b) => b === this.live(k.user, now)) ? 'account' : 'ip' });
       (e as any).retryAfter = retry;
       throw e;
     }
@@ -49,6 +51,14 @@ export class LoginThrottleService {
   }
 
   recordSuccess(username: string, ip: string) { this.buckets.delete(this.keys(username, ip).user); }
+
+  /** Latest lock end for this username across all IPs (null if not locked). */
+  lockedUntil(username: string): Date | null {
+    const now = Date.now(), prefix = `u:${username.toLowerCase()}|`;
+    let max = 0;
+    for (const [key, b] of this.buckets) if (key.startsWith(prefix) && b.lockedUntil > now) max = Math.max(max, b.lockedUntil);
+    return max ? new Date(max) : null;
+  }
 
   /** Admin password reset / unlock: clear all username buckets. */
   clearUser(username: string) {

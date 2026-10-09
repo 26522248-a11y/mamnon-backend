@@ -17,6 +17,8 @@ export class User {
   @Column({ type: 'varchar', nullable: true, length: 20 }) phone!: string | null;
   @Column({ name: 'is_active', default: true }) isActive!: boolean;
   @Column({ name: 'token_version', default: 0 }) tokenVersion!: number;
+  /** Set for admin-created accounts and after an admin password reset; cleared by change-password. */
+  @Column({ name: 'must_change_password', default: false }) mustChangePassword!: boolean;
   @CreateDateColumn({ name: 'created_at', type: 'timestamptz' }) createdAt!: Date;
   @UpdateDateColumn({ name: 'updated_at', type: 'timestamptz' }) updatedAt!: Date;
 }
@@ -56,7 +58,12 @@ export class Child {
   @Column({ type: 'text', nullable: true }) address!: string | null;
   @Column({ name: 'photo_url', type: 'text', nullable: true }) photoUrl!: string | null;
   @Column({ name: 'enrolled_at', type: 'date', nullable: true }) enrolledAt!: string | null;
-  @Column({ length: 20, default: 'active' }) status!: 'active' | 'left';
+  @Column({ length: 20, default: 'active' }) status!: 'active' | 'withdrawn';
+  /** Last day the child attends (withdrawal). Data is kept; child is excluded from new invoices and attendance after this date. */
+  @Column({ name: 'leave_date', type: 'date', nullable: true }) leaveDate!: string | null;
+  @Column({ name: 'withdrawal_reason', type: 'text', nullable: true }) withdrawalReason!: string | null;
+  @Column({ name: 'withdrawn_at', type: 'timestamptz', nullable: true }) withdrawnAt!: Date | null;
+  @Column({ name: 'withdrawn_by', type: 'uuid', nullable: true }) withdrawnBy!: string | null;
   @OneToMany(() => Guardian, (g) => g.child) guardians!: Guardian[];
   @CreateDateColumn({ name: 'created_at', type: 'timestamptz' }) createdAt!: Date;
   @UpdateDateColumn({ name: 'updated_at', type: 'timestamptz' }) updatedAt!: Date;
@@ -335,7 +342,7 @@ export class CreditTransaction {
   @ManyToOne(() => Child, { onDelete: 'RESTRICT' }) @JoinColumn({ name: 'child_id' }) child!: Child;
   /** + credit added (prepayment/overpayment/void restore), - credit applied to an invoice */
   @Column({ type: 'integer' }) amount!: number;
-  @Column({ type: 'varchar', length: 20 }) type!: 'prepayment' | 'overpayment' | 'applied' | 'restored' | 'void_refund' | 'adjustment';
+  @Column({ type: 'varchar', length: 20 }) type!: 'prepayment' | 'overpayment' | 'applied' | 'restored' | 'void_refund' | 'adjustment' | 'meal_refund' | 'meal_clawback' | 'payout';
   @Column({ name: 'payment_id', type: 'uuid', nullable: true }) paymentId!: string | null;
   @Column({ name: 'invoice_id', type: 'uuid', nullable: true }) invoiceId!: string | null;
   @Column({ type: 'text', nullable: true }) note!: string | null;
@@ -348,16 +355,19 @@ export class CreditTransaction {
  * and a later attendance correction can be clawed back exactly once.
  */
 @Entity('meal_refunds')
-@Index('uq_meal_refund_active', ['attendanceId'], { unique: true, where: 'reversed_by_line_id IS NULL' })
+@Index('uq_meal_refund_active', ['attendanceId'], { unique: true, where: 'reversed_by_line_id IS NULL AND reversed_by_credit_tx_id IS NULL' })
 export class MealRefund {
   @PrimaryGeneratedColumn('uuid') id!: string;
   @Column({ name: 'attendance_id', type: 'uuid' }) attendanceId!: string;
   @ManyToOne(() => Attendance, { onDelete: 'CASCADE' }) @JoinColumn({ name: 'attendance_id' }) attendance!: Attendance;
   @Index() @Column({ name: 'child_id', type: 'uuid' }) childId!: string;
-  @Index() @Column({ name: 'invoice_line_id', type: 'uuid' }) invoiceLineId!: string;
-  @ManyToOne(() => InvoiceLine, { onDelete: 'CASCADE' }) @JoinColumn({ name: 'invoice_line_id' }) invoiceLine!: InvoiceLine;
+  /** Refunded on an invoice line, or (withdrawal settlement) straight into the credit balance via credit_tx_id. */
+  @Index() @Column({ name: 'invoice_line_id', type: 'uuid', nullable: true }) invoiceLineId!: string | null;
+  @ManyToOne(() => InvoiceLine, { onDelete: 'CASCADE', nullable: true }) @JoinColumn({ name: 'invoice_line_id' }) invoiceLine!: InvoiceLine | null;
+  @Column({ name: 'credit_tx_id', type: 'uuid', nullable: true }) creditTxId!: string | null;
   @Column({ type: 'integer' }) amount!: number;
   @Column({ name: 'reversed_by_line_id', type: 'uuid', nullable: true }) reversedByLineId!: string | null;
+  @Column({ name: 'reversed_by_credit_tx_id', type: 'uuid', nullable: true }) reversedByCreditTxId!: string | null;
   @CreateDateColumn({ name: 'created_at', type: 'timestamptz' }) createdAt!: Date;
 }
 
@@ -367,7 +377,7 @@ export class InvoiceAudit {
   @PrimaryGeneratedColumn('uuid') id!: string;
   @Index() @Column({ name: 'invoice_id', type: 'uuid' }) invoiceId!: string;
   @ManyToOne(() => Invoice, { onDelete: 'CASCADE' }) @JoinColumn({ name: 'invoice_id' }) invoice!: Invoice;
-  @Column({ type: 'varchar', length: 30 }) action!: 'line_added' | 'line_updated' | 'line_deleted' | 'voided';
+  @Column({ type: 'varchar', length: 30 }) action!: 'line_added' | 'line_updated' | 'line_deleted' | 'voided' | 'credit_applied';
   @Column({ name: 'line_id', type: 'uuid', nullable: true }) lineId!: string | null;
   @Column({ name: 'old_value', type: 'jsonb', nullable: true }) oldValue!: any;
   @Column({ name: 'new_value', type: 'jsonb', nullable: true }) newValue!: any;
@@ -376,7 +386,26 @@ export class InvoiceAudit {
   @CreateDateColumn({ name: 'changed_at', type: 'timestamptz' }) changedAt!: Date;
 }
 
+/** Phiếu chi: paying a withdrawn child's remaining credit balance back to the family (balance -> 0). */
+@Entity('refund_payouts')
+export class RefundPayout {
+  @PrimaryGeneratedColumn('uuid') id!: string;
+  @Index({ unique: true }) @Column({ name: 'voucher_no', length: 30 }) voucherNo!: string;
+  @Index() @Column({ name: 'child_id', type: 'uuid' }) childId!: string;
+  @ManyToOne(() => Child, { onDelete: 'RESTRICT' }) @JoinColumn({ name: 'child_id' }) child!: Child;
+  @Column({ type: 'integer' }) amount!: number;
+  @Column({ type: 'varchar', length: 20 }) method!: 'cash' | 'transfer';
+  @Column({ name: 'paid_at', type: 'timestamptz' }) paidAt!: Date;
+  @Column({ name: 'recipient_name', length: 120 }) recipientName!: string;
+  @Column({ type: 'text', nullable: true }) note!: string | null;
+  @Column({ name: 'credit_tx_id', type: 'uuid', nullable: true }) creditTxId!: string | null;
+  @Column({ name: 'paid_by', type: 'uuid', nullable: true }) paidBy!: string | null;
+  @ManyToOne(() => User, { onDelete: 'SET NULL', nullable: true }) @JoinColumn({ name: 'paid_by' }) payer!: User | null;
+  @CreateDateColumn({ name: 'created_at', type: 'timestamptz' }) createdAt!: Date;
+}
+
 export const ENTITIES = [
+  RefundPayout,
   MealRefund, InvoiceAudit,
   CreditTransaction,
   Announcement, Notification,

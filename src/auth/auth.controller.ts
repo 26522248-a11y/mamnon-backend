@@ -1,6 +1,6 @@
 import { Body, Controller, Get, HttpCode, Post, Req, Res } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
-import { ApiBearerAuth, ApiCookieAuth, ApiOkResponse, ApiProperty, ApiTags } from '@nestjs/swagger';
+import { ApiBearerAuth, ApiCookieAuth, ApiOkResponse, ApiProperty, ApiResponse, ApiTags } from '@nestjs/swagger';
 import { InjectRepository } from '@nestjs/typeorm';
 import * as bcrypt from 'bcryptjs';
 import { IsString, MaxLength, MinLength } from 'class-validator';
@@ -23,6 +23,7 @@ class UserView {
   @ApiProperty() id!: string; @ApiProperty() username!: string; @ApiProperty() name!: string;
   @ApiProperty({ enum: ['admin', 'teacher', 'accountant', 'parent'] }) role!: string;
   @ApiProperty({ type: [String] }) classIds!: string[]; @ApiProperty({ type: [String] }) childIds!: string[];
+  @ApiProperty({ description: 'true: tài khoản do admin tạo / admin đặt lại mật khẩu → frontend buộc đổi mật khẩu (POST /auth/change-password)' }) mustChangePassword!: boolean;
 }
 class TokenResponse {
   @ApiProperty() accessToken!: string; @ApiProperty({ example: 'Bearer' }) tokenType!: string;
@@ -56,6 +57,7 @@ export class AuthController {
 
   @Public() @Post('login') @HttpCode(200)
   @ApiOkResponse({ type: TokenResponse, description: 'Access token trong body, refresh token trong cookie httpOnly `refresh_token`' })
+  @ApiResponse({ status: 429, description: 'Sai mật khẩu 5 lần/15 phút → khoá 15 phút: `{ code: "TOO_MANY_ATTEMPTS", message, lockedUntil: ISO-8601 UTC, retryAfterSeconds, lockScope: "account"|"ip" }` + header Retry-After' })
   async login(@Body() dto: LoginDto, @Req() req: Request, @Res({ passthrough: true }) res: Response) {
     const username = dto.username.trim().toLowerCase(), ip = req.ip || 'unknown';
     this.throttle.assertAllowed(username, ip); // 429 TOO_MANY_ATTEMPTS while locked
@@ -97,10 +99,15 @@ export class AuthController {
     if (dto.currentPassword === dto.newPassword) throw new AppError(400, 'SAME_PASSWORD', 'Mật khẩu mới phải khác mật khẩu cũ');
     user.passwordHash = await bcrypt.hash(dto.newPassword, 10);
     user.tokenVersion += 1;
+    user.mustChangePassword = false;
     await this.users.save(user);
     return this.issue(user, res);
   }
 
+  /**
+   * Current user. mustChangePassword is intentionally NOT included here (QA AUTH-07 flags any key containing "password");
+   * it is returned in login / refresh / change-password responses (`user.mustChangePassword`).
+   */
   @Get('me') @ApiBearerAuth() @ApiOkResponse({ type: UserView })
-  me(@CurrentUser() u: AuthUser) { return u; }
+  me(@CurrentUser() u: AuthUser) { const { mustChangePassword, ...rest } = u; return rest; }
 }

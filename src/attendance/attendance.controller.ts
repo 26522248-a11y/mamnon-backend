@@ -1,6 +1,6 @@
 import { Body, Controller, Get, HttpCode, Param, ParseUUIDPipe, Post, Put, Query, Res, UploadedFile, UseInterceptors } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
-import { ApiBearerAuth, ApiConsumes, ApiProperty, ApiPropertyOptional, ApiTags } from '@nestjs/swagger';
+import { ApiBearerAuth, ApiOperation, ApiConsumes, ApiProperty, ApiPropertyOptional, ApiTags } from '@nestjs/swagger';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Type } from 'class-transformer';
 import {
@@ -42,7 +42,7 @@ export class CreatePickupRequestDto {
   @ApiProperty({ example: 'Nguyễn Văn Tư' }) @IsString() @MinLength(1) @MaxLength(120) pickerName!: string;
   @ApiProperty({ example: '0909123456' }) @Matches(/^[0-9+ ]{8,20}$/) pickerPhone!: string;
   @ApiPropertyOptional({ example: 'Chú ruột' }) @IsOptional() @IsString() @MaxLength(40) relation?: string;
-  @ApiProperty({ example: 'Mẹ bé gọi báo nhờ chú đón' }) @IsString() @MinLength(1) @MaxLength(500) note!: string;
+  @ApiProperty({ example: 'Mẹ bé gọi báo nhờ chú đón', description: 'BẮT BUỘC (thiếu/rỗng → 400 VALIDATION_ERROR): ai báo, báo lúc nào' }) @IsString() @MinLength(1) @MaxLength(500) note!: string;
   @ApiPropertyOptional({ type: 'string', format: 'binary', description: 'Ảnh người đón (tuỳ chọn)' }) @IsOptional() photo?: any;
 }
 export class DecisionDto {
@@ -99,7 +99,9 @@ export class AttendanceController {
   }
 
   private async sheet(classId: string, date: string) {
-    const kids = await this.children.find({ where: { classId, status: 'active' }, order: { fullName: 'ASC' } });
+    // withdrawn children stay on sheets up to (and including) their leave date
+    const kids = await this.children.createQueryBuilder('c').where('c.class_id = :classId', { classId })
+      .andWhere("(c.status = 'active' OR (c.status = 'withdrawn' AND c.leave_date >= :date))", { date }).orderBy('c.fullName', 'ASC').getMany();
     const rows = await this.att.find({ where: { classId, date }, relations: { pickup: true } });
     const byChild = new Map(rows.map((r) => [r.childId, r]));
     const extra = rows.filter((r) => !kids.some((k) => k.id === r.childId));
@@ -137,6 +139,8 @@ export class AttendanceController {
       const kids = await this.children.find({ where: { id: In(ids) } });
       const bad = ids.filter((cid) => kids.find((k) => k.id === cid)?.classId !== id);
       if (bad.length) throw BadRequest(`Trẻ không thuộc lớp này: ${bad.join(', ')}`, 'CHILD_NOT_IN_CLASS');
+      const gone = kids.filter((k) => k.status === 'withdrawn' && (!k.leaveDate || dto.date > k.leaveDate));
+      if (gone.length) throw BadRequest(`Trẻ đã nghỉ học, không điểm danh sau ngày nghỉ: ${gone.map((k) => `${k.fullName} (${k.leaveDate})`).join(', ')}`, 'CHILD_WITHDRAWN');
     }
     await this.ds.transaction(async (m) => {
       const existing = ids.length
@@ -292,8 +296,10 @@ export class AttendanceController {
   }
 
   @Post('pickup-requests/:id/confirm') @Roles('admin', 'parent') @HttpCode(200)
+  @ApiOperation({ summary: "Xác nhận yêu cầu đón → status = 'approved' (không phải 'confirmed'). Trạng thái: pending | approved | rejected | expired" })
   confirm(@CurrentUser() u: AuthUser, @Param('id', ParseUUIDPipe) id: string, @Body() dto: DecisionDto) { return this.decide(u, id, 'approved', dto); }
 
   @Post('pickup-requests/:id/reject') @Roles('admin', 'parent') @HttpCode(200)
+  @ApiOperation({ summary: "Từ chối yêu cầu đón → status = 'rejected'; giao trẻ cho người này sẽ bị 403" })
   reject(@CurrentUser() u: AuthUser, @Param('id', ParseUUIDPipe) id: string, @Body() dto: DecisionDto) { return this.decide(u, id, 'rejected', dto); }
 }

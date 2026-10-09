@@ -14,9 +14,9 @@ sudo -u postgres psql -c "CREATE USER mamnon WITH PASSWORD 'mamnon' CREATEDB;" \
 npm install
 cp .env.example .env          # đổi JWT_*_SECRET khi chạy thật
 
-# 3. Migration + dữ liệu mẫu (seed xoá sạch dữ liệu cũ rồi tạo lại)
+# 3. Migration + dữ liệu mẫu (CHỈ lần đầu)
 npm run migration:run
-npm run seed
+npm run seed                  # DB đã có dữ liệu thì seed TỪ CHỐI chạy; muốn xoá sạch và tạo lại: npm run seed -- --force
 
 # 4. Chạy
 npm run start:dev             # chạy trực tiếp bằng ts-node
@@ -27,7 +27,9 @@ npm run start:dev             # chạy trực tiếp bằng ts-node
 - Swagger: `http://localhost:3001/api/docs`
 - Kiểm tra: `GET /api/v1/health`
 
-Test e2e (dùng DB `mamnon_test`, tự migrate và seed): `npm test`
+**Khởi động lại server không bao giờ seed hay xoá dữ liệu.** `npm start` / `start:dev` chỉ chạy app; migration chỉ chạy khi gọi `npm run migration:run` (hoặc đặt `MIGRATIONS_RUN=true`), và mọi migration đều giữ nguyên dữ liệu. Seed là script riêng `npm run seed`, có chặn khi DB đã có dữ liệu.
+
+Test e2e (dùng DB riêng `mamnon_test`, tự migrate và seed DB test, không đụng DB dev): `npm test`
 
 Tạo migration mới sau khi sửa entity: `npm run typeorm -- migration:generate src/database/migrations/TenMigration`
 
@@ -79,20 +81,24 @@ Dữ liệu mẫu:
 | PUT | `/classes/:id/attendance` `{date, items:[{childId,status,note?}]}` | admin, giáo viên của lớp |
 | GET | `/attendance/:id/history` (ai sửa, lúc nào, giá trị cũ, giá trị mới) | admin, giáo viên của lớp |
 | POST | `/attendance/:id/pickup` `{guardianId \| pickupRequestId, pickedUpAt?, note?}` | admin, giáo viên của lớp |
-| POST | `/attendance/:id/pickup-requests` (JSON hoặc multipart: `pickerName, pickerPhone, note, relation?`, ảnh `photo` tuỳ chọn) | admin, giáo viên của lớp |
+| POST | `/attendance/:id/pickup-requests` (JSON hoặc multipart: `pickerName, pickerPhone, note` **bắt buộc** (thiếu/rỗng → 400), `relation?`, ảnh `photo` tuỳ chọn) | admin, giáo viên của lớp |
 | GET | `/pickup-requests?status&childId&date` | admin; giáo viên: lớp mình; phụ huynh: con mình |
-| POST | `/pickup-requests/:id/confirm`, `/pickup-requests/:id/reject` `{note?}` | admin, phụ huynh của trẻ |
+| POST | `/pickup-requests/:id/confirm`, `/pickup-requests/:id/reject` `{note?}` → `status` thành **`approved`** (không phải `confirmed`) / `rejected` | admin, phụ huynh của trẻ |
 | GET | `/children/attendance-summary?month=YYYY-MM&classId` (chỉ số ngày) | admin, kế toán; giáo viên: lớp mình; phụ huynh: con mình |
 | GET | `/dashboard/summary?date=` | tất cả (theo phạm vi, xem dưới) |
 | GET/POST/PATCH/DELETE | `/fee-items`, `/fee-items/:id` (scope `school`/`class`/`child`, type `monthly`/`one_time`) | admin, kế toán |
 | POST | `/invoices/generate` `{period, classId?, dueDate?}` | admin, kế toán |
-| POST | `/invoices` `{childId, period, lines:[{feeItemId? \| description+unitPrice, quantity?}]}` (unitPrice âm = giảm trừ) | admin, kế toán |
+| POST | `/invoices` `{childId, period, applyCredit?, lines:[{feeItemId? \| description+unitPrice, kind?: charge\|discount\|refund, quantity?, reason?}]}` → hoá đơn + `warnings[]` | admin, kế toán |
 | GET | `/invoices?period&classId&childId&status(unpaid\|partial\|paid\|void\|outstanding)&page&limit`, `/invoices/:id` | admin, kế toán; phụ huynh: con mình |
-| POST | `/invoices/:id/void` `{reason}` (chỉ huỷ được khi chưa có thanh toán) | admin, kế toán |
+| POST | `/invoices/:id/void` `{reason}` (bắt buộc; huỷ cả hoá đơn đã thu: tiền đã thu → số dư; ghi vào `/invoices/:id/history`) | admin, kế toán (giáo viên/phụ huynh 403) |
+| POST | `/children/:id/withdraw` `{leaveDate, reason}` (tất toán nghỉ học, xem dưới) | admin, kế toán |
+| GET | `/children/:id/withdrawal` (trạng thái tất toán: nợ, số dư, `nextAction`, các phiếu chi) | admin, kế toán; phụ huynh: con mình |
+| POST | `/children/:id/refund-payouts` `{method, recipientName, amount?, paidAt?, note?}` → dữ liệu **phiếu chi** | admin, kế toán |
+| GET | `/refund-payouts/:id/voucher` (in phiếu chi: số PC, số tiền bằng chữ) | admin, kế toán; phụ huynh: con mình |
 | POST | `/invoices/:id/payments` `{amount, method: cash\|transfer, paidAt?, payerName?, note?}` → dữ liệu phiếu thu | admin, kế toán |
 | GET | `/payments/:id/receipt` (số phiếu, số tiền bằng chữ, các dòng hoá đơn) | admin, kế toán; phụ huynh: con mình |
 | GET | `/children/:id/balance` | admin, kế toán; phụ huynh: con mình |
-| GET | `/debts?classId&upToPeriod` | admin, kế toán |
+| GET | `/debts?classId&upToPeriod&overdueOnly` (mỗi dòng có `childStatus`, `leaveDate`) | admin, kế toán |
 | GET / POST | `/children/:id/growth` (ghi lại theo ngày), DELETE `/growth/:id` | đọc: admin, giáo viên của lớp, phụ huynh của trẻ; ghi: admin, giáo viên của lớp |
 | GET / PUT | `/menus?week=`, `/menus` `{weekStart (thứ Hai), items:[{date, meal: breakfast\|lunch\|snack, dishes}]}` | đọc: admin, giáo viên, phụ huynh; ghi: admin |
 | GET / PUT | `/classes/:id/daily-notes?date=` `{date, items:[{childId, eating, sleepMinutes, mood, toilet, note}]}` | admin, giáo viên của lớp |
@@ -110,6 +116,7 @@ Dữ liệu mẫu:
 | GET | `/reports/finance?fromMonth&toMonth&classId` (phải thu, đã thu, công nợ, quá hạn, giảm trừ theo kỳ; tiền thu theo tháng) | admin, kế toán |
 | GET/POST/PATCH/DELETE | `/users`, `/users/:id` | admin |
 | POST | `/users/:id/reset-password`, `/users/:id/deactivate`, `/users/:id/activate` | admin |
+| POST | `/users/:id/unlock` (mở khoá đăng nhập sai nhiều lần) | admin |
 | POST | `/auth/change-password` `{currentPassword, newPassword}` → cấp token mới | mọi người dùng |
 
 Mỗi phần tử trong bảng điểm danh có dạng `{ attendanceId, childId, fullName, allergies, status, note, recorded, pickup }`. Trẻ chưa được điểm danh có `status: null` và `recorded: false`.
@@ -152,16 +159,26 @@ Front end phải tải ảnh bằng `fetch` có header `Authorization`, rồi hi
   - Nếu sau khi đã hoàn mà điểm danh bị sửa (không còn là vắng có báo trước), hoá đơn tiếp theo có đúng 1 dòng "Thu lại tiền ăn".
   - Kế toán sửa dòng hoàn bằng PATCH, mọi thay đổi được ghi vào `invoice_audit`. Dòng hoàn không xoá được; muốn bỏ hoàn thì đặt `unitPrice=0`.
 - **Trả trước và trả thừa:** phần tiền vượt số còn nợ được cộng vào số dư (credit) của trẻ. `POST /children/:id/prepayments` dùng để trả trước khi chưa có hoá đơn. Số dư được tự trừ vào hoá đơn kế tiếp bằng dòng `credit`.
-- **Huỷ hoá đơn:** huỷ được cả hoá đơn đã thu tiền. Số đã nộp được chuyển thành số dư (`void_refund`), số dư đã dùng cho hoá đơn đó được hoàn lại, và các ngày hoàn tiền ăn được giải phóng để hoá đơn mới xử lý lại.
+- **Huỷ hoá đơn (chốt):** chỉ admin/kế toán, bắt buộc `reason` (rỗng → 400 `REASON_REQUIRED`), ghi lịch sử `voided` kèm `reason`, `movedToCredit`, `creditRestored`. Huỷ được cả hoá đơn đã thu tiền. Số đã nộp được chuyển thành số dư (`void_refund`), số dư đã dùng cho hoá đơn đó được hoàn lại, và các ngày hoàn tiền ăn được giải phóng để hoá đơn mới xử lý lại.
 - **Giảm trừ:** là khoản thu loại `type=discount`, bắt buộc có `reason`. Mọi dòng hoá đơn đều có `unitPrice ≥ 0`; dấu của số tiền do `kind` quyết định (`charge`, `discount`, `refund`, `credit`). Nhập số âm thì nhận 400.
-  - Khi lập hoá đơn tự động, giảm trừ bị giới hạn để tổng không âm. Lập tay mà tổng âm thì nhận 400.
+  - **Giảm trừ vượt số phải thu (chốt):** áp dụng giống nhau cho hoá đơn tự động, lập tay và thêm/sửa dòng: hoá đơn về **0đ**, phần vượt **bị bỏ** (không thành số dư). Không còn lỗi 400. Response có `warnings[]`: `{code: "DISCOUNT_CAPPED", message, description, kind, requested, applied, discarded, lineId?}` (khi lập tự động còn có `invoiceId, childId, childName`). Hoàn tiền ăn được trừ trước, giảm trừ bị giới hạn sau.
 - **Quá hạn:** hạn nộp mặc định là ngày 10. Hoá đơn bị tính quá hạn từ **00:01 giờ VN ngày 11**. `/debts` có `overdue`, `overdueAmount`, lọc được bằng `?overdueOnly=true`, và sắp xếp khoản quá hạn lên đầu. Không có phí trễ hạn.
+- **Trẻ nghỉ học (chốt):** `POST /children/:id/withdraw {leaveDate, reason}`; `leaveDate` là ngày học cuối, không được ở tương lai. Không xoá dữ liệu nào. Trong 1 giao dịch:
+  1. Hoá đơn của các kỳ **sau** tháng nghỉ bị huỷ (tiền đã thu → số dư).
+  2. Tiền ăn những ngày vắng có báo trước đến hết `leaveDate` mà chưa hoàn → cộng vào số dư (`meal_refund`); ngày đã hoàn nhưng điểm danh bị sửa → trừ lại (`meal_clawback`).
+  3. Số dư được trừ vào các hoá đơn còn nợ, cũ trước (dòng `credit`, ghi lịch sử `credit_applied`).
+  4. Trẻ chuyển `status='withdrawn'`, lưu `leaveDate`, lý do, người thực hiện; yêu cầu đón đang chờ chuyển `expired`.
+  - Kết quả có `outstandingDebt`, `creditBalance`, `netBalance`, `nextAction`: `refund_payout` (còn số dư → kế toán lập phiếu chi `POST /children/:id/refund-payouts`, chi đúng toàn bộ số dư, số dư về 0, số phiếu `PCyyyymm-00001`), `collect_debt` (còn nợ → vẫn nằm trong `/debts` đến khi thu đủ), hoặc `none`.
+  - Sau khi nghỉ: không có trong danh sách trẻ mặc định (`?status=withdrawn` hoặc `all` để xem), không có trong bảng điểm danh các ngày sau `leaveDate` (điểm danh → 400 `CHILD_WITHDRAWN`), không được lập hoá đơn tự động, lập tay cho kỳ sau tháng nghỉ hay trả trước → 409 `CHILD_WITHDRAWN`. Thu nợ cũ vẫn bình thường.
+  - Học phí của tháng nghỉ giữ nguyên (chưa tính theo ngày). Chưa có thao tác nhập học lại.
 - **Thực đơn:** mỗi bữa có `allergyNotes` (món thay thế cho trẻ dị ứng). `GET /menus` trả kèm `allergyAlerts` gồm các trẻ có dị ứng: admin thấy toàn trường, giáo viên thấy lớp mình, phụ huynh thấy con mình.
 
 ## Tài khoản và bảo mật đăng nhập
 
-- Sai mật khẩu 5 lần trong 15 phút (tính theo cặp username + IP) thì bị khoá 15 phút: trả 429 `TOO_MANY_ATTEMPTS` kèm header `Retry-After`. Khi đang khoá, nhập đúng mật khẩu cũng bị chặn.
-  - Mỗi IP bị giới hạn 30 lần sai. Đăng nhập đúng thì bộ đếm của username đó được xoá. Admin reset mật khẩu cũng mở khoá luôn.
+- Sai mật khẩu 5 lần trong 15 phút (tính theo cặp username + IP) thì bị khoá 15 phút: trả 429 `{ code: "TOO_MANY_ATTEMPTS", message, lockedUntil: "2026-10-09T11:56:46.013Z" (ISO, UTC), retryAfterSeconds, lockScope: "account"|"ip" }` kèm header `Retry-After`. Khi đang khoá, nhập đúng mật khẩu cũng bị chặn.
+  - Mỗi IP bị giới hạn 30 lần sai. Đăng nhập đúng thì bộ đếm của username đó được xoá.
+  - `GET /users` / `GET /users/:id` có `locked`, `lockedUntil`. Admin mở khoá bằng `POST /users/:id/unlock` (hoặc reset mật khẩu). Khoá theo IP (30 lần) không gỡ bằng unlock, tự hết sau 15 phút.
+- **`mustChangePassword`:** `true` với tài khoản admin tạo (`POST /users`, tài khoản phụ huynh tạo kèm người giám hộ) và sau khi admin reset mật khẩu; về `false` khi người dùng tự đổi (`POST /auth/change-password`). Có trong `user` của response login / refresh / change-password và trong `/users`. Frontend nên chuyển thẳng tới màn hình đổi mật khẩu khi `true` (backend chưa chặn API khác). Không có trong `/auth/me` (script QA AUTH-07 coi mọi khoá chứa chữ "password" là lộ mật khẩu). Tài khoản seed = `false`.
   - Các ngưỡng chỉnh được qua `LOGIN_MAX_FAILS`, `LOGIN_IP_MAX_FAILS`, `LOGIN_LOCK_MINUTES`. Nếu chạy sau reverse proxy thì đặt `TRUST_PROXY`.
   - Bộ đếm nằm trong bộ nhớ, chỉ đúng khi chạy 1 instance.
 - Reset mật khẩu, khoá tài khoản, đổi vai trò, hay tự đổi mật khẩu đều thu hồi mọi phiên đăng nhập cũ.
@@ -171,8 +188,8 @@ Front end phải tải ảnh bằng `fetch` có header `Authorization`, rồi hi
 
 ## Định dạng lỗi
 
-Mọi lỗi đều có dạng `{ "code": "FORBIDDEN", "message": "..." }`. Lỗi validate có thêm `details[]`.
-Các mã lỗi: `UNAUTHORIZED`, `TOKEN_INVALID`, `INVALID_CREDENTIALS`, `NO_REFRESH_TOKEN`, `FORBIDDEN`, `EDIT_WINDOW_EXPIRED`, `PICKUP_NOT_ALLOWED`, `NOT_FOUND`, `VALIDATION_ERROR`, `BAD_REQUEST`, `CONFLICT`, `USERNAME_TAKEN`, `TOO_MANY_ATTEMPTS`, `WRONG_PASSWORD`, `SAME_PASSWORD`, `LAST_ADMIN`, `SELF_CHANGE`, `USER_HAS_LINKS`, `USER_HAS_HISTORY`, `PICKUP_REQUEST_EXPIRED`, `REQUEST_EXPIRED`, `NOTE_REQUIRED`, `REASON_REQUIRED`, `TOTAL_BELOW_PAID`, `CREDIT_LINE_LOCKED`, `REFUND_LINE_USE_PATCH`, `PICKUP_REQUEST_PENDING`, `PICKUP_REQUEST_REJECTED`, `ALREADY_DECIDED`, `INVOICE_EXISTS`, `ALREADY_VOID`, `ALREADY_PAID`, `INVOICE_VOID`, `INVALID_SCOPE`, `NEGATIVE_TOTAL`, `INVALID_WEEK_START`, `CHILD_NOT_IN_CLASS`, `CLASS_NOT_EMPTY`, `DATE_IN_FUTURE`, `NOTE_REQUIRED`, `INVALID_GUARDIAN`, `INVALID_FILE`, `INTERNAL_ERROR`.
+Mọi lỗi đều có dạng `{ "code": "FORBIDDEN", "message": "..." }`. Lỗi validate có thêm `details[]`; 429 có thêm `lockedUntil`; `AMOUNT_MISMATCH` có `details.creditBalance`.
+Các mã lỗi: `UNAUTHORIZED`, `TOKEN_INVALID`, `INVALID_CREDENTIALS`, `NO_REFRESH_TOKEN`, `FORBIDDEN`, `EDIT_WINDOW_EXPIRED`, `PICKUP_NOT_ALLOWED`, `NOT_FOUND`, `VALIDATION_ERROR`, `BAD_REQUEST`, `CONFLICT`, `USERNAME_TAKEN`, `TOO_MANY_ATTEMPTS`, `WRONG_PASSWORD`, `SAME_PASSWORD`, `LAST_ADMIN`, `SELF_CHANGE`, `USER_HAS_LINKS`, `USER_HAS_HISTORY`, `PICKUP_REQUEST_EXPIRED`, `REQUEST_EXPIRED`, `NOTE_REQUIRED`, `REASON_REQUIRED`, `TOTAL_BELOW_PAID`, `CREDIT_LINE_LOCKED`, `REFUND_LINE_USE_PATCH`, `PICKUP_REQUEST_PENDING`, `PICKUP_REQUEST_REJECTED`, `ALREADY_DECIDED`, `INVOICE_EXISTS`, `ALREADY_VOID`, `ALREADY_PAID`, `INVOICE_VOID`, `INVALID_SCOPE`, `NEGATIVE_TOTAL`, `INVALID_WEEK_START`, `CHILD_NOT_IN_CLASS`, `CLASS_NOT_EMPTY`, `DATE_IN_FUTURE`, `NOTE_REQUIRED`, `INVALID_GUARDIAN`, `INVALID_FILE`, `CHILD_WITHDRAWN`, `ALREADY_WITHDRAWN`, `LEAVE_DATE_IN_FUTURE`, `INVALID_LEAVE_DATE`, `CHILD_NOT_WITHDRAWN`, `NO_CREDIT_BALANCE`, `OUTSTANDING_DEBT`, `AMOUNT_MISMATCH`, `INTERNAL_ERROR`.
 
 ## Cấu trúc
 
@@ -182,13 +199,13 @@ src/database/migrations/      # migration TypeORM
 src/database/seed.ts          # dữ liệu mẫu
 src/common/                   # guard JWT, quy tắc phân quyền (access.ts), bộ lọc lỗi, xử lý ngày
 src/auth, classes, children, attendance, dashboard, fees, health, notifications, reports, users/   # controller
-test/app.e2e-spec.ts, test/features.e2e-spec.ts   # 43 test e2e
+test/app.e2e-spec.ts, features.e2e-spec.ts, withdrawal.e2e-spec.ts   # 52 test e2e
 ```
 
 ## Chưa làm
 
 - Gửi push, SMS hoặc Zalo (hiện chỉ có hộp thư trong app) và xuất PDF phiếu thu.
 - Giảm trừ theo % (hiện chỉ có số tiền cố định) và hoàn tiền ăn theo đơn giá của đúng ngày vắng (hiện dùng đơn giá lúc lập hoá đơn).
-- Xử lý khi trẻ nghỉ học hẳn (hoàn tiền hay giữ số dư), đang chờ PM chốt.
+- Tính học phí tháng nghỉ theo số ngày học thực tế; nhập học lại trẻ đã nghỉ.
 - Bộ đếm giới hạn đăng nhập cần Redis hoặc DB nếu chạy nhiều instance.
 - Lưu ảnh lên S3.

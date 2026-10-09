@@ -84,7 +84,7 @@ describe('Mầm non API (e2e)', () => {
     it('accountant: basic child info only, no attendance / guardians', async () => {
       const r = await as('ketoan').get('/children?limit=5').expect(200);
       expect(r.body.total).toBe(30);
-      expect(Object.keys(r.body.items[0]).sort()).toEqual(['classId', 'className', 'fullName', 'id', 'status']);
+      expect(Object.keys(r.body.items[0]).sort()).toEqual(['classId', 'className', 'fullName', 'id', 'leaveDate', 'status']);
       await as('ketoan').get(`/classes/${s.classes.c1.id}/attendance`).expect(403);
       await as('ketoan').get(`/children/${s.kids[0].id}/guardians`).expect(403);
     });

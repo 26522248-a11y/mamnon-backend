@@ -43,7 +43,9 @@ export class UsersController {
 
   private async view(u: User) {
     const c = await this.ctx.build(u);
-    return { id: u.id, username: u.username, name: u.name, role: u.role, phone: u.phone, isActive: u.isActive,
+    const lockedUntil = this.throttle.lockedUntil(u.username);
+    return { id: u.id, username: u.username, name: u.name, role: u.role, phone: u.phone, isActive: u.isActive, mustChangePassword: u.mustChangePassword,
+      locked: !!lockedUntil, lockedUntil: lockedUntil?.toISOString() ?? null,
       classIds: c.classIds, childIds: c.childIds, createdAt: u.createdAt, updatedAt: u.updatedAt };
   }
   private async getOr404(id: string) {
@@ -77,7 +79,7 @@ export class UsersController {
   async create(@Body() dto: CreateUserDto) {
     if (await this.users.exist({ where: { username: dto.username } })) throw new AppError(409, 'USERNAME_TAKEN', 'Tên đăng nhập đã tồn tại');
     const u = await this.users.save(this.users.create({ username: dto.username, name: dto.name, role: dto.role, phone: dto.phone ?? null,
-      passwordHash: await bcrypt.hash(dto.password, 10) }));
+      passwordHash: await bcrypt.hash(dto.password, 10), mustChangePassword: true }));
     return this.view(u);
   }
 
@@ -103,9 +105,19 @@ export class UsersController {
     const u = await this.getOr404(id);
     u.passwordHash = await bcrypt.hash(dto.newPassword, 10);
     u.tokenVersion += 1;
+    u.mustChangePassword = true;
     await this.users.save(u);
     this.throttle.clearUser(u.username); // also unlocks login
-    return { id, ok: true };
+    return { id, ok: true, mustChangePassword: true };
+  }
+
+  /** Clears the failed-login lock of this account (all IPs). IP-wide locks (30 failures from one IP) expire on their own. */
+  @Post(':id/unlock') @HttpCode(200)
+  async unlock(@Param('id', ParseUUIDPipe) id: string) {
+    const u = await this.getOr404(id);
+    const was = this.throttle.lockedUntil(u.username);
+    this.throttle.clearUser(u.username);
+    return { id, username: u.username, wasLocked: !!was, previousLockedUntil: was?.toISOString() ?? null, locked: false, lockedUntil: null };
   }
 
   @Post(':id/deactivate') @HttpCode(200)

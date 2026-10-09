@@ -270,7 +270,7 @@ describe('PM decisions, notifications, reports, users, rate limit (e2e)', () => 
       await as('ketoan').post('/users', { username: 'x1', password: '123456', name: 'X', role: 'admin' }).expect(403);
       const list = await as('admin').get('/users?role=teacher').expect(200);
       expect(list.body.total).toBe(3);
-      expect(JSON.stringify(list.body)).not.toMatch(/password|hash/i);
+      expect(JSON.stringify(list.body)).not.toMatch(/passwordHash|password_hash|"password"|\$2[aby]\$/i);
       const u = await as('admin').post('/users', { username: 'gv4', password: 'abc123', name: 'Cô Thảo', role: 'teacher' }).expect(201);
       await as('admin').post('/users', { username: 'gv4', password: 'abc123', name: 'X', role: 'teacher' }).expect(409);
       const t1 = (await login('gv4', 'abc123').expect(200)).body.accessToken;

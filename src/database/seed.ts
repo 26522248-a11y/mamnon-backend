@@ -8,7 +8,7 @@ export const SEED_PASSWORD = '123456';
 
 /** Wipes all app tables and inserts deterministic sample data. Returns handy ids (used by e2e tests). */
 export async function seed(ds: DataSource) {
-  await ds.query('TRUNCATE notifications, announcements, credit_transactions, payments, invoice_lines, invoices, fee_items, growth_records, menus, daily_notes, pickup_requests, attendance_history, pickups, attendance, guardians, children, class_teachers, classes, users RESTART IDENTITY CASCADE');
+  await ds.query('TRUNCATE refund_payouts, meal_refunds, invoice_audit, notifications, announcements, credit_transactions, payments, invoice_lines, invoices, fee_items, growth_records, menus, daily_notes, pickup_requests, attendance_history, pickups, attendance, guardians, children, class_teachers, classes, users RESTART IDENTITY CASCADE');
   const hash = await bcrypt.hash(SEED_PASSWORD, 10);
   const mk = (username: string, name: string, role: User['role'], phone: string | null = null) =>
     ds.getRepository(User).save({ username, name, role, phone, passwordHash: hash });
@@ -68,6 +68,7 @@ export async function seed(ds: DataSource) {
 
   await ds.query('ALTER SEQUENCE invoice_no_seq RESTART WITH 1');
   await ds.query('ALTER SEQUENCE receipt_no_seq RESTART WITH 1');
+  await ds.query('ALTER SEQUENCE payout_no_seq RESTART WITH 1');
 
   // ── fees: school-wide monthly tuition + meals, class add-on, one child-specific item
   const fRepo = ds.getRepository(FeeItem);
@@ -157,6 +158,13 @@ export async function seed(ds: DataSource) {
 if (require.main === module) {
   (async () => {
     await dataSource.initialize();
+    // Safety: seeding wipes every table. Refuse on a database that already has data unless --force is given.
+    const [{ n }] = await dataSource.query('SELECT COUNT(*)::int AS n FROM users');
+    if (n > 0 && !process.argv.includes('--force')) {
+      console.error(`Database already has ${n} users. Seeding would DELETE all data. Re-run with: npm run seed -- --force`);
+      await dataSource.destroy();
+      process.exit(2);
+    }
     const r = await seed(dataSource);
     console.log(`Seeded ${Object.keys(r.users).length} users, 3 classes, ${r.kids.length} children. Password for all accounts: ${SEED_PASSWORD}`);
     await dataSource.destroy();

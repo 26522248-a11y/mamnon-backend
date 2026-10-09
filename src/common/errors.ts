@@ -8,7 +8,8 @@ const CODE_BY_STATUS: Record<number, string> = {
 
 /** Throw this to control the `code` field explicitly. */
 export class AppError extends HttpException {
-  constructor(status: number, public readonly code: string, message: string) {
+  /** details -> body.details; extra -> merged into the top level of the body (e.g. lockedUntil). */
+  constructor(status: number, public readonly code: string, message: string, public readonly details?: unknown, public readonly extra?: Record<string, unknown>) {
     super({ code, message }, status);
   }
 }
@@ -23,12 +24,12 @@ export class AllExceptionsFilter implements ExceptionFilter {
   catch(exception: unknown, host: ArgumentsHost) {
     const res = host.switchToHttp().getResponse();
     let status = HttpStatus.INTERNAL_SERVER_ERROR;
-    let body: { code: string; message: string; details?: unknown } = { code: 'INTERNAL_ERROR', message: 'Lỗi hệ thống' };
+    let body: { code: string; message: string; details?: unknown; [k: string]: unknown } = { code: 'INTERNAL_ERROR', message: 'Lỗi hệ thống' };
 
     if (exception instanceof HttpException) {
       status = exception.getStatus();
       const r: any = exception.getResponse();
-      if (exception instanceof AppError) body = { code: exception.code, message: r.message };
+      if (exception instanceof AppError) body = { code: exception.code, message: r.message, ...(exception.extra ?? {}), ...(exception.details !== undefined ? { details: exception.details } : {}) };
       else if (status === 400 && Array.isArray(r?.message)) body = { code: 'VALIDATION_ERROR', message: 'Dữ liệu không hợp lệ', details: r.message };
       else body = { code: CODE_BY_STATUS[status] ?? 'ERROR', message: typeof r === 'string' ? r : (Array.isArray(r?.message) ? r.message.join('; ') : r?.message ?? exception.message) };
     } else if (exception instanceof QueryFailedError) {

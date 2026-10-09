@@ -59,7 +59,7 @@ export class ReportsController {
       FROM classes cl LEFT JOIN children c ON c.class_id = cl.id
       GROUP BY cl.id ORDER BY cl.name`);
     const [tot] = await this.ds.query(`
-      SELECT COUNT(*) FILTER (WHERE status = 'active')::int AS active, COUNT(*) FILTER (WHERE status = 'left')::int AS "left",
+      SELECT COUNT(*) FILTER (WHERE status = 'active')::int AS active, COUNT(*) FILTER (WHERE status = 'withdrawn')::int AS withdrawn,
         COUNT(*) FILTER (WHERE status = 'active' AND class_id IS NULL)::int AS unassigned FROM children`);
     const byMonth: any[] = await this.ds.query(`
       SELECT to_char(enrolled_at, 'YYYY-MM') AS month, COUNT(*)::int AS enrolled FROM children

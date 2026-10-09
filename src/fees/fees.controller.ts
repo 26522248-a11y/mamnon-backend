@@ -15,6 +15,7 @@ import { vndInWords } from '../common/money';
 import { NotificationsService } from '../notifications/notifications.service';
 import {
   Attendance, Child, CreditTransaction, FeeItem, FeeScope, FeeType, Invoice, InvoiceAudit, InvoiceLine, LineKind, MealRefund, Payment,
+  PickupRequest, RefundPayout,
 } from '../database/entities';
 
 const PERIOD = /^\d{4}-(0[1-9]|1[0-2])$/;
@@ -83,7 +84,22 @@ export class InvoiceQuery {
   @ApiPropertyOptional({ default: 1 }) @IsOptional() @Type(() => Number) @IsInt() @Min(1) page?: number;
   @ApiPropertyOptional({ default: 20 }) @IsOptional() @Type(() => Number) @IsInt() @Min(1) @Max(300) limit?: number;
 }
-export class VoidDto { @ApiProperty({ example: 'Lập nhầm' }) @IsString() @MinLength(1) @MaxLength(500) reason!: string; }
+export class VoidDto {
+  @ApiProperty({ example: 'Lập nhầm', description: 'Bắt buộc. Nếu hoá đơn đã thu tiền, số đã thu chuyển vào số dư (credit) của trẻ.' })
+  @IsString() @MaxLength(500) reason!: string;
+}
+export class WithdrawDto {
+  @ApiProperty({ example: '2026-10-15', description: 'Ngày học cuối cùng (không được ở tương lai)' }) @IsDateString() leaveDate!: string;
+  @ApiProperty({ example: 'Chuyển nhà' }) @IsString() @MaxLength(500) reason!: string;
+}
+export class PayoutDto {
+  @ApiPropertyOptional({ example: 350000, description: 'Mặc định = toàn bộ số dư; nếu gửi phải đúng bằng số dư (số dư về 0)' }) @IsOptional() @IsInt() @Min(1) @Max(MAX_VND) amount?: number;
+  @ApiProperty({ enum: ['cash', 'transfer'] }) @IsIn(['cash', 'transfer']) method!: 'cash' | 'transfer';
+  @ApiProperty({ example: 'Nguyễn Văn Hùng', description: 'Người nhận tiền' }) @IsString() @MinLength(1) @MaxLength(120) recipientName!: string;
+  @ApiPropertyOptional({ description: 'ISO 8601, mặc định bây giờ' }) @IsOptional() @IsISO8601() paidAt?: string;
+  @ApiPropertyOptional() @IsOptional() @IsString() @MaxLength(500) note?: string;
+}
+export type CapWarning = { code: 'DISCOUNT_CAPPED'; message: string; lineId?: string; description: string; kind: LineKind; requested: number; applied: number; discarded: number };
 export class PaymentDto {
   @ApiProperty({ example: 1500000, description: 'Phần vượt số còn nợ được cộng vào số dư (credit) của trẻ' }) @IsInt() @Min(1) @Max(MAX_VND) amount!: number;
   @ApiProperty({ enum: ['cash', 'transfer'] }) @IsIn(['cash', 'transfer']) method!: 'cash' | 'transfer';
@@ -118,6 +134,11 @@ const invoiceView = (i: Invoice, detail = false) => ({
 });
 
 type DraftLine = Pick<InvoiceLine, 'feeItemId' | 'kind' | 'description' | 'quantity' | 'unitPrice' | 'amount' | 'reason'>;
+const capMsg = (requested: number, applied: number) =>
+  `Giảm trừ ${requested.toLocaleString('vi-VN')}đ vượt số phải thu; chỉ áp dụng ${applied.toLocaleString('vi-VN')}đ, phần dư ${(requested - applied).toLocaleString('vi-VN')}đ bị bỏ (không chuyển thành số dư)`;
+const leaveMonth = (c: Child) => c.leaveDate?.slice(0, 7) ?? null;
+/** Active meal refund = not reversed by a later invoice line or by a withdrawal settlement. */
+const MR_ACTIVE = 'r.reversed_by_line_id IS NULL AND r.reversed_by_credit_tx_id IS NULL';
 
 /**
  * Fees & debts. Admin + accountant manage everything; parent reads invoices/receipts/balance/credit of own children only;
@@ -209,16 +230,25 @@ export class FeesController {
     return `${prefix}${period.replace('-', '')}-${String(n).padStart(5, '0')}`;
   }
 
-  /** Caps deductions so the running total never goes below 0. */
-  private capDeductions(lines: DraftLine[]) {
+  /**
+   * PM rule (same for auto-generated and manual invoices): deductions can bring the invoice to 0đ but never below.
+   * Meal refunds are applied before discounts, so it is the discount that gets capped. The excess is discarded
+   * (NOT turned into credit) and reported back as a warning for the accountant.
+   */
+  private capDeductions(lines: DraftLine[]): { lines: DraftLine[]; warnings: CapWarning[] } {
+    const warnings: CapWarning[] = [];
     let running = lines.filter((l) => l.kind === 'charge').reduce((s, l) => s + l.amount, 0);
-    for (const l of lines.filter((x) => x.kind !== 'charge')) {
+    const order = (k: LineKind) => (k === 'refund' ? 0 : k === 'discount' ? 1 : 2);
+    for (const l of lines.filter((x) => x.kind !== 'charge').sort((a, b) => order(a.kind) - order(b.kind))) {
       const want = l.quantity * l.unitPrice;
-      if (want > running) { l.description += ' (giới hạn bằng số phải thu)'; l.quantity = 1; l.unitPrice = running; }
+      if (want > running) {
+        warnings.push({ code: 'DISCOUNT_CAPPED', message: capMsg(want, running), description: l.description, kind: l.kind, requested: want, applied: running, discarded: want - running });
+        l.description += ' (giới hạn bằng số phải thu)'; l.quantity = 1; l.unitPrice = running;
+      }
       l.amount = -l.quantity * l.unitPrice;
       running -= l.quantity * l.unitPrice;
     }
-    return lines.filter((l) => l.kind === 'charge' || l.unitPrice > 0);
+    return { lines: lines.filter((l) => l.kind === 'charge' || l.unitPrice > 0), warnings };
   }
 
   /** Inserts invoice (+ applies available credit as a 'credit' line) inside the given transaction. */
@@ -259,7 +289,7 @@ export class FeesController {
       const days: { id: string; date: string }[] = await m.query(`
         SELECT a.id, to_char(a.date, 'YYYY-MM-DD') AS date FROM attendance a
         WHERE a.child_id = $1 AND a.status = 'absent' AND a.notified_in_advance AND a.date >= $2 AND a.date < $3
-          AND NOT EXISTS (SELECT 1 FROM meal_refunds r WHERE r.attendance_id = a.id AND r.reversed_by_line_id IS NULL)
+          AND NOT EXISTS (SELECT 1 FROM meal_refunds r WHERE r.attendance_id = a.id AND ${MR_ACTIVE})
         ORDER BY a.date`, [child.id, from, `${period}-01`]);
       if (days.length) {
         const rate = meal.mealRefundPerDay!;
@@ -267,17 +297,23 @@ export class FeesController {
           quantity: days.length, unitPrice: rate, amount: -days.length * rate, reason: 'Nghỉ có báo trước' }, attendanceIds: days.map((d) => d.id), amountPerDay: rate });
       }
     }
-    const stale: { id: string; amount: number; date: string }[] = await m.query(`
-      SELECT r.id, r.amount, to_char(a.date, 'YYYY-MM-DD') AS date FROM meal_refunds r JOIN attendance a ON a.id = r.attendance_id
-      JOIN invoice_lines l ON l.id = r.invoice_line_id JOIN invoices i ON i.id = l.invoice_id
-      WHERE r.child_id = $1 AND r.reversed_by_line_id IS NULL AND i.status <> 'void' AND NOT (a.status = 'absent' AND a.notified_in_advance)
-      ORDER BY a.date`, [child.id]);
+    const stale = await this.staleRefunds(m, child.id);
     if (stale.length) {
       const total = stale.reduce((sum, r) => sum + r.amount, 0);
       out.push({ line: { feeItemId: meal?.id ?? null, kind: 'charge', description: `Thu lại tiền ăn đã hoàn ${stale.length} ngày (điểm danh đã sửa: ${stale.map((r) => fmt(r.date)).join(', ')})`,
         quantity: 1, unitPrice: total, amount: total, reason: 'Điểm danh được sửa sau khi đã hoàn tiền' }, reverseIds: stale.map((r) => r.id) });
     }
     return out;
+  }
+
+  /** Refunded days (on a live invoice or via withdrawal credit) whose attendance is no longer a notified absence. */
+  private staleRefunds(m: EntityManager, childId: string): Promise<{ id: string; amount: number; date: string }[]> {
+    return m.query(`
+      SELECT r.id, r.amount, to_char(a.date, 'YYYY-MM-DD') AS date FROM meal_refunds r JOIN attendance a ON a.id = r.attendance_id
+      LEFT JOIN invoice_lines l ON l.id = r.invoice_line_id LEFT JOIN invoices i ON i.id = l.invoice_id
+      WHERE r.child_id = $1 AND ${MR_ACTIVE} AND (r.invoice_line_id IS NULL OR i.status <> 'void')
+        AND NOT (a.status = 'absent' AND a.notified_in_advance)
+      ORDER BY a.date`, [childId]);
   }
 
   /** After the invoice is saved: link refunded days / clawbacks to the persisted line ids. */
@@ -302,6 +338,7 @@ export class FeesController {
     const fees = await this.items.find({ where: { isActive: true, type: In(['monthly', 'discount']) } });
     const existing = new Set((await this.invoices.find({ where: { period: dto.period, status: Not('void'), childId: In(kids.length ? kids.map((k) => k.id) : ['00000000-0000-0000-0000-000000000000']) } })).map((i) => i.childId));
     const created: Invoice[] = [];
+    const warnings: (CapWarning & { invoiceId: string; childId: string; childName: string })[] = [];
     await this.ds.transaction(async (m) => {
       for (const k of kids) {
         if (existing.has(k.id)) continue;
@@ -314,15 +351,17 @@ export class FeesController {
         ];
         const refunds = await this.mealRefundDrafts(m, k, dto.period, applicable);
         lines.push(...refunds.map((r) => r.line));
-        const inv = await this.insertInvoice(m, u, k, dto.period, dto.dueDate ?? this.dueDefault(dto.period), this.capDeductions(lines));
+        const capped = this.capDeductions(lines);
+        const inv = await this.insertInvoice(m, u, k, dto.period, dto.dueDate ?? this.dueDefault(dto.period), capped.lines);
         await this.recordRefunds(m, k, inv, refunds);
+        warnings.push(...capped.warnings.map((w) => ({ ...w, invoiceId: inv.id, childId: k.id, childName: k.fullName })));
         created.push(inv);
       }
     });
     await this.notifyInvoices(created);
     return {
       period: dto.period, created: created.length, skippedExisting: kids.filter((k) => existing.has(k.id)).length,
-      totalAmount: created.reduce((s, i) => s + i.totalAmount, 0), invoiceIds: created.map((i) => i.id),
+      totalAmount: created.reduce((s, i) => s + i.totalAmount, 0), invoiceIds: created.map((i) => i.id), warnings,
     };
   }
 
@@ -355,13 +394,15 @@ export class FeesController {
   @Post('invoices') @Roles('admin', 'accountant')
   async create(@CurrentUser() u: AuthUser, @Body() dto: CreateInvoiceDto) {
     const child = await this.access.getChildOr404(dto.childId);
-    const lines = await this.buildLines(dto.lines);
+    if (child.status === 'withdrawn' && dto.period > leaveMonth(child)!)
+      throw new AppError(409, 'CHILD_WITHDRAWN', `Trẻ đã nghỉ học từ ${child.leaveDate}; không lập hoá đơn cho kỳ sau tháng nghỉ`);
+    const { lines, warnings } = this.capDeductions(await this.buildLines(dto.lines));
     if (await this.invoices.exist({ where: { childId: child.id, period: dto.period, status: Not('void') } }))
       throw new AppError(409, 'INVOICE_EXISTS', 'Trẻ đã có hoá đơn kỳ này; huỷ hoá đơn cũ hoặc chọn kỳ khác');
     const inv = await this.ds.transaction((m) => this.insertInvoice(m, u, child, dto.period, dto.dueDate ?? this.dueDefault(dto.period), lines,
       { note: dto.note, applyCredit: dto.applyCredit }));
     await this.notifyInvoices([inv]);
-    return this.getInvoice(u, inv.id);
+    return { ...(await this.getInvoice(u, inv.id)), warnings };
   }
 
   @Get('invoices') @Roles('admin', 'accountant', 'parent')
@@ -403,20 +444,37 @@ export class FeesController {
       changedBy: r.changedBy, changedByName: r.changer?.name ?? null, changedAt: r.changedAt }));
   }
 
-  /** Recompute totals after a line change; total must stay ≥ paid amount. */
-  private async editLines(u: AuthUser, id: string, fn: (m: EntityManager, inv: Invoice) => Promise<void>) {
+  /**
+   * Recompute totals after a line change; total must stay ≥ paid amount.
+   * If deductions push the total below 0 they are capped (discounts first, then refunds) with a warning – same rule as new invoices.
+   */
+  private async editLines(u: AuthUser, id: string, fn: (m: EntityManager, inv: Invoice) => Promise<string | void>) {
+    const warnings: CapWarning[] = [];
     await this.ds.transaction(async (m) => {
       const inv = await m.findOne(Invoice, { where: { id }, lock: { mode: 'pessimistic_write' } });
       if (!inv) throw NotFound('Không tìm thấy hoá đơn');
       if (inv.status === 'void') throw BadRequest('Hoá đơn đã huỷ', 'INVOICE_VOID');
-      await fn(m, inv);
-      const [{ s }] = await m.query('SELECT COALESCE(SUM(amount),0)::int AS s FROM invoice_lines WHERE invoice_id = $1', [id]);
-      const total = Number(s);
+      const touched = await fn(m, inv);
+      const all = await m.find(InvoiceLine, { where: { invoiceId: id } });
+      let total = all.reduce((s, l) => s + l.amount, 0);
+      if (total < 0) {
+        const order = (k: LineKind) => (k === 'discount' ? 0 : k === 'refund' ? 1 : 2);
+        for (const l of all.filter((x) => x.kind === 'discount' || x.kind === 'refund').sort((a, b) => order(a.kind) - order(b.kind) || (a.id === touched ? -1 : b.id === touched ? 1 : 0))) {
+          if (total >= 0) break;
+          const want = l.quantity * l.unitPrice, cut = Math.min(want, -total), keep = want - cut;
+          warnings.push({ code: 'DISCOUNT_CAPPED', message: capMsg(want, keep), lineId: l.id, description: l.description, kind: l.kind, requested: want, applied: keep, discarded: cut });
+          const before = lineView(l);
+          Object.assign(l, { quantity: 1, unitPrice: keep, amount: -keep, description: l.description.endsWith('(giới hạn bằng số phải thu)') ? l.description : `${l.description} (giới hạn bằng số phải thu)` });
+          await m.save(InvoiceLine, l);
+          await this.audit(m, u, id, 'line_updated', l.id, before, { ...lineView(l), capped: true });
+          total += cut;
+        }
+      }
       if (total < 0) throw BadRequest('Tổng hoá đơn không được âm', 'NEGATIVE_TOTAL');
       if (total < inv.paidAmount) throw new AppError(409, 'TOTAL_BELOW_PAID', 'Tổng mới nhỏ hơn số đã thu; ghi nhận phần chênh vào số dư thay vì sửa dòng');
       await m.update(Invoice, id, { totalAmount: total, status: statusOf(total, inv.paidAmount) });
     });
-    return this.getInvoice(u, id);
+    return { ...(await this.getInvoice(u, id)), warnings };
   }
 
   @Post('invoices/:id/lines') @Roles('admin', 'accountant')
@@ -425,6 +483,7 @@ export class FeesController {
     return this.editLines(u, id, async (m) => {
       const l = await m.save(InvoiceLine, m.create(InvoiceLine, { ...line, invoiceId: id }));
       await this.audit(m, u, id, 'line_added', l.id, null, lineView(l));
+      return l.id;
     });
   }
 
@@ -441,6 +500,7 @@ export class FeesController {
       l.amount = signed(l.kind, l.quantity * l.unitPrice);
       await m.save(InvoiceLine, l);
       await this.audit(m, u, id, 'line_updated', l.id, before, lineView(l));
+      return l.id;
     });
   }
 
@@ -457,30 +517,189 @@ export class FeesController {
     });
   }
 
+  /**
+   * Void (admin/accountant only; teacher/parent 403). Reason required, logged in invoice history.
+   * Money already paid moves to the child's credit balance; credit used on the invoice is restored.
+   */
   @Post('invoices/:id/void') @Roles('admin', 'accountant') @HttpCode(200)
   async voidInvoice(@CurrentUser() u: AuthUser, @Param('id', ParseUUIDPipe) id: string, @Body() dto: VoidDto) {
-    await this.ds.transaction(async (m) => {
-      const i = await m.findOne(Invoice, { where: { id }, relations: { lines: true }, lock: { mode: 'pessimistic_write', tables: ['invoices'] } });
-      if (!i) throw NotFound('Không tìm thấy hoá đơn');
-      if (i.status === 'void') throw new AppError(409, 'ALREADY_VOID', 'Hoá đơn đã huỷ');
-      await m.update(Invoice, id, { status: 'void', note: `[Huỷ] ${dto.reason}${i.note ? ' | ' + i.note : ''}` });
-      await this.audit(m, u, id, 'voided', null, { status: i.status, totalAmount: i.totalAmount, paidAmount: i.paidAmount }, { status: 'void', reason: dto.reason });
-      await this.creditBalance(m, i.childId); // lock child's credit ledger
-      const usedCredit = i.lines.filter((l) => l.kind === 'credit').reduce((s, l) => s + l.unitPrice * l.quantity, 0);
-      if (usedCredit > 0) await m.save(CreditTransaction, m.create(CreditTransaction, { childId: i.childId, amount: usedCredit, type: 'restored', invoiceId: id,
-        note: `Hoàn lại số dư do huỷ hoá đơn ${i.invoiceNo}`, createdBy: u.id }));
-      // money already paid on a voided invoice is never lost: it moves to the child's credit balance (PM/QA FEE-P06)
-      if (i.paidAmount > 0) await m.save(CreditTransaction, m.create(CreditTransaction, { childId: i.childId, amount: i.paidAmount, type: 'void_refund', invoiceId: id,
-        note: `Tiền đã nộp cho hoá đơn ${i.invoiceNo} (đã huỷ) chuyển thành số dư`, createdBy: u.id }));
-      // release refunded meal days / clawbacks so the next invoice handles them again
-      const lineIds = i.lines.map((l) => l.id);
-      if (lineIds.length) {
-        await m.delete(MealRefund, { invoiceLineId: In(lineIds) });
-        await m.update(MealRefund, { reversedByLineId: In(lineIds) }, { reversedByLineId: null });
-      }
-    });
+    const reason = dto.reason?.trim();
+    if (!reason) throw BadRequest('Bắt buộc nhập lý do huỷ hoá đơn', 'REASON_REQUIRED');
+    await this.ds.transaction((m) => this.voidCore(m, u, id, reason));
     // partial unique index (status <> 'void') frees the (child, period) slot so a corrected invoice can be issued
     return this.getInvoice(u, id);
+  }
+
+  private async voidCore(m: EntityManager, u: AuthUser, id: string, reason: string) {
+    const i = await m.findOne(Invoice, { where: { id }, relations: { lines: true }, lock: { mode: 'pessimistic_write', tables: ['invoices'] } });
+    if (!i) throw NotFound('Không tìm thấy hoá đơn');
+    if (i.status === 'void') throw new AppError(409, 'ALREADY_VOID', 'Hoá đơn đã huỷ');
+    await m.update(Invoice, id, { status: 'void', note: `[Huỷ] ${reason}${i.note ? ' | ' + i.note : ''}` });
+    await this.creditBalance(m, i.childId); // lock child's credit ledger
+    const usedCredit = i.lines.filter((l) => l.kind === 'credit').reduce((s, l) => s + l.unitPrice * l.quantity, 0);
+    if (usedCredit > 0) await m.save(CreditTransaction, m.create(CreditTransaction, { childId: i.childId, amount: usedCredit, type: 'restored', invoiceId: id,
+      note: `Hoàn lại số dư do huỷ hoá đơn ${i.invoiceNo}`, createdBy: u.id }));
+    // money already paid on a voided invoice is never lost: it moves to the child's credit balance (PM decision)
+    if (i.paidAmount > 0) await m.save(CreditTransaction, m.create(CreditTransaction, { childId: i.childId, amount: i.paidAmount, type: 'void_refund', invoiceId: id,
+      note: `Tiền đã nộp cho hoá đơn ${i.invoiceNo} (đã huỷ) chuyển thành số dư`, createdBy: u.id }));
+    await this.audit(m, u, id, 'voided', null, { status: i.status, totalAmount: i.totalAmount, paidAmount: i.paidAmount },
+      { status: 'void', reason, movedToCredit: i.paidAmount, creditRestored: usedCredit });
+    // release refunded meal days / clawbacks so the next invoice (or withdrawal settlement) handles them again
+    const lineIds = i.lines.map((l) => l.id);
+    if (lineIds.length) {
+      await m.delete(MealRefund, { invoiceLineId: In(lineIds) });
+      await m.update(MealRefund, { reversedByLineId: In(lineIds) }, { reversedByLineId: null });
+    }
+    return i;
+  }
+
+  // ───── withdrawal (PM decision) ─────
+  private async settlementState(m: EntityManager | DataSource, childId: string) {
+    const [{ debt, overdue, n }] = await m.query(`SELECT COALESCE(SUM(total_amount - paid_amount),0)::int AS debt,
+      COALESCE(SUM(total_amount - paid_amount) FILTER (WHERE due_date < $2),0)::int AS overdue, COUNT(*)::int AS n
+      FROM invoices WHERE child_id = $1 AND status IN ('unpaid','partial')`, [childId, overdueCutoff()]);
+    const [{ c }] = await m.query('SELECT COALESCE(SUM(amount),0)::int AS c FROM credit_transactions WHERE child_id = $1', [childId]);
+    const outstandingDebt = Number(debt), creditBalance = Number(c), netBalance = creditBalance - outstandingDebt;
+    return {
+      outstandingDebt, overdueDebt: Number(overdue), outstandingInvoiceCount: Number(n), creditBalance, netBalance,
+      nextAction: creditBalance > 0 && outstandingDebt === 0 ? 'refund_payout' : outstandingDebt > 0 ? 'collect_debt' : 'none',
+      nextActionText: creditBalance > 0 && outstandingDebt === 0 ? `Lập phiếu chi trả lại ${creditBalance.toLocaleString('vi-VN')}đ (POST /children/:id/refund-payouts)`
+        : outstandingDebt > 0 ? `Còn nợ ${outstandingDebt.toLocaleString('vi-VN')}đ – vẫn hiện trong /debts đến khi thu đủ` : 'Đã tất toán',
+    };
+  }
+
+  /**
+   * Withdraw a child (admin/accountant). Nothing is deleted. In one transaction:
+   * 1) live invoices for periods after the leave month are voided (paid money -> credit);
+   * 2) pending meal refunds (notified absences up to leaveDate, 3-month look-back) go to the credit balance,
+   *    refunded days whose attendance was corrected are clawed back from it;
+   * 3) credit balance is applied to outstanding invoices (oldest first);
+   * 4) status 'withdrawn' + leaveDate; pending pickup requests expire.
+   * Result: positive balance -> accountant records a refund payout (phiếu chi); debt stays in /debts until paid.
+   */
+  @Post('children/:id/withdraw') @Roles('admin', 'accountant') @HttpCode(200)
+  async withdraw(@CurrentUser() u: AuthUser, @Param('id', ParseUUIDPipe) id: string, @Body() dto: WithdrawDto) {
+    const reason = dto.reason?.trim();
+    if (!reason) throw BadRequest('Bắt buộc nhập lý do nghỉ học', 'REASON_REQUIRED');
+    const leave = dto.leaveDate.slice(0, 10);
+    if (leave > todayStr()) throw BadRequest('Ngày nghỉ học không được ở tương lai; hãy thực hiện vào/sau ngày học cuối', 'LEAVE_DATE_IN_FUTURE');
+    const fmt = (d: string) => d.split('-').reverse().join('/');
+    const summary = await this.ds.transaction(async (m) => {
+      const child = await m.findOne(Child, { where: { id }, lock: { mode: 'pessimistic_write' } });
+      if (!child) throw NotFound('Không tìm thấy trẻ');
+      if (child.status === 'withdrawn') throw new AppError(409, 'ALREADY_WITHDRAWN', `Trẻ đã nghỉ học từ ${child.leaveDate}`);
+      if (child.enrolledAt && leave < child.enrolledAt) throw BadRequest('Ngày nghỉ trước ngày nhập học', 'INVALID_LEAVE_DATE');
+      const lm = leave.slice(0, 7);
+      // 1) future-period invoices
+      const future = await m.find(Invoice, { where: { childId: id, status: Not('void') } });
+      const voided: { id: string; invoiceNo: string; period: string; movedToCredit: number }[] = [];
+      for (const inv of future.filter((i) => i.period > lm)) {
+        await this.voidCore(m, u, inv.id, `Trẻ nghỉ học từ ${fmt(leave)}`);
+        voided.push({ id: inv.id, invoiceNo: inv.invoiceNo, period: inv.period, movedToCredit: inv.paidAmount });
+      }
+      // 2) meal refunds still pending up to the leave date
+      await this.creditBalance(m, id);
+      const meal = (await this.items.find({ where: { isActive: true, type: 'monthly' } }))
+        .find((f) => (f.mealRefundPerDay ?? 0) > 0 && (f.scope === 'school' || (f.scope === 'class' && f.classId === child.classId) || (f.scope === 'child' && f.childId === id)));
+      let mealRefund = { days: 0, amount: 0, dates: [] as string[] }, clawback = { days: 0, amount: 0 };
+      if (meal) {
+        const from = `${prevPeriod(prevPeriod(prevPeriod(lm)))}-01`;
+        const days: { id: string; date: string }[] = await m.query(`
+          SELECT a.id, to_char(a.date, 'YYYY-MM-DD') AS date FROM attendance a
+          WHERE a.child_id = $1 AND a.status = 'absent' AND a.notified_in_advance AND a.date >= $2 AND a.date <= $3
+            AND NOT EXISTS (SELECT 1 FROM meal_refunds r WHERE r.attendance_id = a.id AND ${MR_ACTIVE})
+          ORDER BY a.date`, [id, from, leave]);
+        if (days.length) {
+          const rate = meal.mealRefundPerDay!, amount = rate * days.length;
+          const tx = await m.save(CreditTransaction, m.create(CreditTransaction, { childId: id, amount, type: 'meal_refund',
+            note: `Hoàn tiền ăn ${days.length} ngày nghỉ có báo trước khi tất toán nghỉ học (${days.map((d) => fmt(d.date).slice(0, 5)).join(', ')})`, createdBy: u.id }));
+          await m.save(MealRefund, days.map((d) => m.create(MealRefund, { attendanceId: d.id, childId: id, invoiceLineId: null, creditTxId: tx.id, amount: rate })));
+          mealRefund = { days: days.length, amount, dates: days.map((d) => d.date) };
+        }
+      }
+      const stale = await this.staleRefunds(m, id);
+      if (stale.length) {
+        const amount = stale.reduce((s, r) => s + r.amount, 0);
+        const tx = await m.save(CreditTransaction, m.create(CreditTransaction, { childId: id, amount: -amount, type: 'meal_clawback',
+          note: `Thu lại tiền ăn đã hoàn ${stale.length} ngày (điểm danh đã sửa: ${stale.map((r) => fmt(r.date).slice(0, 5)).join(', ')})`, createdBy: u.id }));
+        await m.update(MealRefund, { id: In(stale.map((r) => r.id)) }, { reversedByCreditTxId: tx.id });
+        clawback = { days: stale.length, amount };
+      }
+      // 3) offset credit against outstanding invoices, oldest first
+      let credit = await this.creditBalance(m, id, false);
+      const applied: { invoiceId: string; invoiceNo: string; amount: number }[] = [];
+      const open = await m.find(Invoice, { where: { childId: id, status: In(['unpaid', 'partial']) }, order: { period: 'ASC' } });
+      for (const inv of open) {
+        if (credit <= 0) break;
+        const amt = Math.min(credit, inv.totalAmount - inv.paidAmount);
+        if (amt <= 0) continue;
+        const line = await m.save(InvoiceLine, m.create(InvoiceLine, { invoiceId: inv.id, feeItemId: null, kind: 'credit',
+          description: 'Trừ số dư khi tất toán nghỉ học', quantity: 1, unitPrice: amt, amount: -amt, reason: `Nghỉ học từ ${fmt(leave)}` }));
+        const total = inv.totalAmount - amt;
+        await m.update(Invoice, inv.id, { totalAmount: total, status: statusOf(total, inv.paidAmount) });
+        await m.save(CreditTransaction, m.create(CreditTransaction, { childId: id, amount: -amt, type: 'applied', invoiceId: inv.id,
+          note: `Trừ vào hoá đơn ${inv.invoiceNo} khi tất toán nghỉ học`, createdBy: u.id }));
+        await this.audit(m, u, inv.id, 'credit_applied', line.id, { totalAmount: inv.totalAmount }, { totalAmount: total, creditApplied: amt, reason: 'withdrawal' });
+        applied.push({ invoiceId: inv.id, invoiceNo: inv.invoiceNo, amount: amt });
+        credit -= amt;
+      }
+      // 4) status
+      await m.update(Child, id, { status: 'withdrawn', leaveDate: leave, withdrawalReason: reason, withdrawnAt: new Date(), withdrawnBy: u.id });
+      await m.createQueryBuilder().update(PickupRequest).set({ status: 'expired' }).where("child_id = :id AND status = 'pending'", { id }).execute();
+      return { voidedInvoices: voided, mealRefund, mealClawback: clawback, creditAppliedToInvoices: applied, ...(await this.settlementState(m, id)) };
+    });
+    return { childId: id, status: 'withdrawn', leaveDate: leave, reason, ...summary };
+  }
+
+  /** Current withdrawal / settlement state of a child (+ payouts). */
+  @Get('children/:id/withdrawal') @Roles('admin', 'accountant', 'parent')
+  async withdrawal(@CurrentUser() u: AuthUser, @Param('id', ParseUUIDPipe) id: string) {
+    const c = await this.access.getChildOr404(id);
+    this.assertFinanceChild(u, id);
+    const payouts = await this.ds.getRepository(RefundPayout).find({ where: { childId: id }, order: { paidAt: 'ASC' } });
+    return { childId: id, fullName: c.fullName, status: c.status, leaveDate: c.leaveDate, reason: c.withdrawalReason, withdrawnAt: c.withdrawnAt,
+      ...(await this.settlementState(this.ds, id)),
+      payouts: payouts.map((p) => ({ id: p.id, voucherNo: p.voucherNo, amount: p.amount, method: p.method, paidAt: p.paidAt, recipientName: p.recipientName })) };
+  }
+
+  /** Phiếu chi: pay a withdrawn child's whole remaining credit back (balance -> 0). */
+  @Post('children/:id/refund-payouts') @Roles('admin', 'accountant')
+  async payout(@CurrentUser() u: AuthUser, @Param('id', ParseUUIDPipe) id: string, @Body() dto: PayoutDto) {
+    const payoutId = await this.ds.transaction(async (m) => {
+      const child = await m.findOne(Child, { where: { id } });
+      if (!child) throw NotFound('Không tìm thấy trẻ');
+      if (child.status !== 'withdrawn') throw new AppError(409, 'CHILD_NOT_WITHDRAWN', 'Chỉ chi trả số dư cho trẻ đã làm thủ tục nghỉ học; trẻ đang học được trừ vào hoá đơn sau');
+      const bal = await this.creditBalance(m, id);
+      if (bal <= 0) throw new AppError(409, 'NO_CREDIT_BALANCE', 'Trẻ không có số dư để chi trả');
+      const st = await this.settlementState(m, id);
+      if (st.outstandingDebt > 0) throw new AppError(409, 'OUTSTANDING_DEBT', `Trẻ còn nợ ${st.outstandingDebt.toLocaleString('vi-VN')}đ; thu/đối trừ nợ trước khi chi trả`);
+      if (dto.amount !== undefined && dto.amount !== bal)
+        throw new AppError(400, 'AMOUNT_MISMATCH', `Số tiền chi phải bằng toàn bộ số dư ${bal.toLocaleString('vi-VN')}đ`, { creditBalance: bal });
+      const [{ n }] = await m.query(`SELECT nextval('payout_no_seq') AS n`);
+      const voucherNo = `PC${todayStr().slice(0, 7).replace('-', '')}-${String(n).padStart(5, '0')}`;
+      const tx = await m.save(CreditTransaction, m.create(CreditTransaction, { childId: id, amount: -bal, type: 'payout', note: `Chi trả số dư – phiếu chi ${voucherNo}`, createdBy: u.id }));
+      const p = await m.save(RefundPayout, m.create(RefundPayout, { voucherNo, childId: id, amount: bal, method: dto.method,
+        paidAt: dto.paidAt ? new Date(dto.paidAt) : new Date(), recipientName: dto.recipientName.trim(), note: dto.note ?? null, creditTxId: tx.id, paidBy: u.id }));
+      return p.id;
+    });
+    return this.voucher(u, payoutId);
+  }
+
+  /** Data for printing a refund payout voucher (phiếu chi). */
+  @Get('refund-payouts/:id/voucher') @Roles('admin', 'accountant', 'parent')
+  async voucher(@CurrentUser() u: AuthUser, @Param('id', ParseUUIDPipe) id: string) {
+    const p = await this.ds.getRepository(RefundPayout).findOne({ where: { id }, relations: { payer: true, child: { classRoom: true } } });
+    if (!p) throw NotFound('Không tìm thấy phiếu chi');
+    this.assertFinanceChild(u, p.childId);
+    const creditBalance = Number((await this.ds.query('SELECT COALESCE(SUM(amount),0)::int AS s FROM credit_transactions WHERE child_id = $1', [p.childId]))[0].s);
+    return {
+      school: { name: process.env.SCHOOL_NAME || 'Trường Mầm non', address: process.env.SCHOOL_ADDRESS || null, phone: process.env.SCHOOL_PHONE || null },
+      kind: 'refund_payout', title: 'PHIẾU CHI', voucherNo: p.voucherNo, payoutId: p.id, paidAt: p.paidAt, method: p.method,
+      recipientName: p.recipientName, amount: p.amount, amountInWords: vndInWords(p.amount),
+      reason: `Hoàn trả số dư học phí khi nghỉ học (từ ${p.child.leaveDate?.split('-').reverse().join('/') ?? ''})`, note: p.note,
+      paidByName: p.payer?.name ?? null, creditBalanceAfter: creditBalance,
+      child: { id: p.childId, fullName: p.child.fullName, className: p.child.classRoom?.name ?? null, leaveDate: p.child.leaveDate },
+    };
   }
 
   /** Pay an invoice. Any amount above the outstanding balance becomes credit for the child (applied next month). */
@@ -512,7 +731,8 @@ export class FeesController {
   /** Prepayment without an invoice: goes fully to the child's credit balance and is applied to the next invoice. */
   @Post('children/:id/prepayments') @Roles('admin', 'accountant')
   async prepay(@CurrentUser() u: AuthUser, @Param('id', ParseUUIDPipe) id: string, @Body() dto: PaymentDto) {
-    await this.access.getChildOr404(id);
+    const child = await this.access.getChildOr404(id);
+    if (child.status === 'withdrawn') throw new AppError(409, 'CHILD_WITHDRAWN', 'Trẻ đã nghỉ học; không nhận trả trước');
     const paymentId = await this.ds.transaction(async (m) => {
       await this.creditBalance(m, id);
       const paidAt = dto.paidAt ? new Date(dto.paidAt) : new Date();
@@ -578,14 +798,14 @@ export class FeesController {
   async debts(@Query() q: DebtQuery) {
     const today = overdueCutoff(); // due_date < cutoff => overdue
     const qb = this.invoices.createQueryBuilder('i').innerJoin('i.child', 'c').leftJoin('c.classRoom', 'cl')
-      .select('i.child_id', 'childId').addSelect('c.full_name', 'fullName').addSelect('c.class_id', 'classId').addSelect('cl.name', 'className')
+      .select('i.child_id', 'childId').addSelect('c.full_name', 'fullName').addSelect('c.status', 'childStatus').addSelect("to_char(c.leave_date, 'YYYY-MM-DD')", 'leaveDate').addSelect('c.class_id', 'classId').addSelect('cl.name', 'className')
       .addSelect('SUM(i.total_amount - i.paid_amount)::int', 'balance').addSelect('COUNT(*)::int', 'invoiceCount')
       .addSelect("to_char(MIN(i.due_date), 'YYYY-MM-DD')", 'oldestDueDate')
       .addSelect('COALESCE(SUM(i.total_amount - i.paid_amount) FILTER (WHERE i.due_date < :today), 0)::int', 'overdueAmount')
       .addSelect('COUNT(*) FILTER (WHERE i.due_date < :today)::int', 'overdueInvoiceCount')
       .addSelect('(SELECT COALESCE(SUM(ct.amount),0)::int FROM credit_transactions ct WHERE ct.child_id = i.child_id)', 'creditBalance')
       .where("i.status IN ('unpaid','partial')").setParameter('today', today)
-      .groupBy('i.child_id').addGroupBy('c.full_name').addGroupBy('c.class_id').addGroupBy('cl.name')
+      .groupBy('i.child_id').addGroupBy('c.full_name').addGroupBy('c.status').addGroupBy('c.leave_date').addGroupBy('c.class_id').addGroupBy('cl.name')
       .orderBy('"overdueAmount"', 'DESC').addOrderBy('balance', 'DESC');
     if (q.classId) qb.andWhere('c.class_id = :cl', { cl: q.classId });
     if (q.upToPeriod) qb.andWhere('i.period <= :p', { p: q.upToPeriod });

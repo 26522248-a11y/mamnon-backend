@@ -23,7 +23,7 @@ export class ListChildrenQuery {
   @ApiPropertyOptional({ default: 10, maximum: 100 }) @IsOptional() @Type(() => Number) @IsInt() @Min(1) @Max(100) limit?: number;
   @ApiPropertyOptional() @IsOptional() @IsUUID() classId?: string;
   @ApiPropertyOptional({ description: 'Tìm theo tên, không phân biệt dấu' }) @IsOptional() @IsString() @MaxLength(100) search?: string;
-  @ApiPropertyOptional({ enum: ['active', 'left', 'all'], default: 'active' }) @IsOptional() @IsIn(['active', 'left', 'all']) status?: string;
+  @ApiPropertyOptional({ enum: ['active', 'withdrawn', 'all'], default: 'active', description: "'left' vẫn được chấp nhận = withdrawn" }) @IsOptional() @IsIn(['active', 'withdrawn', 'left', 'all']) status?: string;
 }
 export class CreateChildDto {
   @ApiProperty({ example: 'Nguyễn Gia An' }) @IsString() @MinLength(1) @MaxLength(120) fullName!: string;
@@ -34,7 +34,6 @@ export class CreateChildDto {
   @ApiPropertyOptional() @IsOptional() @IsString() @MaxLength(2000) healthNotes?: string;
   @ApiPropertyOptional() @IsOptional() @IsString() @MaxLength(300) address?: string;
   @ApiPropertyOptional({ example: '2025-09-05' }) @IsOptional() @IsDateString() enrolledAt?: string;
-  @ApiPropertyOptional({ enum: ['active', 'left'] }) @IsOptional() @IsIn(['active', 'left']) status?: 'active' | 'left';
 }
 export class UpdateChildDto extends PartialType(CreateChildDto) {}
 class ParentAccountDto {
@@ -77,7 +76,7 @@ export class ChildrenController {
 
   /** Accountant only gets name + class (no health data). */
   private view(u: AuthUser, c: Child) {
-    const base = { id: c.id, fullName: c.fullName, classId: c.classId, className: c.classRoom?.name ?? null, status: c.status };
+    const base = { id: c.id, fullName: c.fullName, classId: c.classId, className: c.classRoom?.name ?? null, status: c.status, leaveDate: c.leaveDate };
     if (u.role === 'accountant') return base;
     return {
       ...base, dob: c.dob, gender: c.gender, allergies: c.allergies ?? undefined, healthNotes: c.healthNotes,
@@ -92,7 +91,7 @@ export class ChildrenController {
     if (u.role === 'teacher') qb.andWhere('c.class_id = ANY(:cids)', { cids: u.classIds });
     if (u.role === 'parent') qb.andWhere('c.id = ANY(:kids)', { kids: u.childIds });
     if (q.classId) qb.andWhere('c.class_id = :classId', { classId: q.classId });
-    if ((q.status ?? 'active') !== 'all') qb.andWhere('c.status = :st', { st: q.status ?? 'active' });
+    if ((q.status ?? 'active') !== 'all') qb.andWhere('c.status = :st', { st: q.status === 'left' ? 'withdrawn' : q.status ?? 'active' });
     if (q.search?.trim()) qb.andWhere('unaccent(c.full_name) ILIKE unaccent(:s)', { s: `%${q.search.trim().replace(/[%_\\]/g, '\\$&')}%` });
     qb.orderBy('cl.name', 'ASC', 'NULLS LAST').addOrderBy('c.fullName', 'ASC').skip((page - 1) * limit).take(limit);
     const [rows, total] = await qb.getManyAndCount();
@@ -217,7 +216,7 @@ export class ChildrenController {
         if (await m.exists(User, { where: { username: dto.account.username } })) throw new AppError(409, 'USERNAME_TAKEN', 'Tên đăng nhập đã tồn tại');
         const pu = await m.save(User, m.create(User, {
           username: dto.account.username, passwordHash: await bcrypt.hash(dto.account.password, 10),
-          name: dto.fullName, role: 'parent', phone: dto.phone ?? null,
+          name: dto.fullName, role: 'parent', phone: dto.phone ?? null, mustChangePassword: true,
         }));
         userId = pu.id;
       }
