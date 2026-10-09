@@ -122,6 +122,7 @@ describe('round 2 batch 1: absences, cutoff, holidays (e2e)', () => {
     expect(r.body.history).toEqual([expect.objectContaining({ action: 'created', dates: [fri, mon, tue], byName: expect.any(String), byRole: 'parent' })]);
     expect(await att(kid, mon)).toMatchObject({ status: 'absent', notified_in_advance: true, absence_reason: 'sick', absence_id: r.body.id });
     expect((await notes('gv1', 'absence_report')).length).toBe(1);
+    expect((await notes('gv1', 'absence_report'))[0].title).toMatch(new RegExp(` – 3 ngày \\(${viDayLabel(fri)} → ${viDayLabel(tue)}\\)$`)); // P14
     expect((await notes('gv2', 'absence_report')).length).toBe(0);
 
     // access + validation
