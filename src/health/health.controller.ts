@@ -173,7 +173,7 @@ export class HealthController {
       classId: id, date,
       items: kids.map((k) => {
         const n = rows.find((r) => r.childId === k.id);
-        return { fullName: k.fullName, photoConsent: k.photoConsent, recorded: !!n, ...(n ? noteView(n) : { childId: k.id, id: null, eating: null, breakfast: null, sleepMinutes: null, mood: null, toilet: null, note: null }) };
+        return { fullName: k.fullName, photoUrl: k.photoUrl ? `/api/v1/children/${k.id}/photo` : null, photoConsent: k.photoConsent, recorded: !!n, ...(n ? noteView(n) : { childId: k.id, id: null, eating: null, breakfast: null, sleepMinutes: null, mood: null, toilet: null, note: null }) };
       }),
     };
   }
