@@ -13,6 +13,7 @@ import { AuthUser, CurrentUser, Roles } from '../common/auth';
 import { AppError, BadRequest, Forbidden, NotFound } from '../common/errors';
 import { storage } from '../common/storage';
 import { decodeOriginalName, detectImage, heifToJpeg, sendKey } from '../common/upload';
+import { imageQueue } from '../common/image-queue';
 import { NotificationsService } from '../notifications/notifications.service';
 
 const MAX_FILES = 20, MAX_BYTES = 15 * 1024 * 1024;
@@ -149,13 +150,16 @@ export class PhotosController {
       const dup = p.clientId ? existing.find((x) => x.client_id === p.clientId) : null;
       if (dup) { results.push({ index: p.i, clientId: p.clientId, file: decodeOriginalName(p.f.originalname), status: 'created', duplicate: true, photoId: dup.id }); continue; }
       if (p.missing.length) { results.push({ index: p.i, clientId: p.clientId, file: decodeOriginalName(p.f.originalname), status: 'rejected', code: 'PHOTO_CONSENT_MISSING', children: p.missing }); continue; }
-      let buf = p.f.buffer;
       try {
-        if (p.kind === 'heif') buf = await heifToJpeg(buf);
-        const full = await sharp(buf).rotate().resize({ width: 2048, height: 2048, fit: 'inside', withoutEnlargement: true }).jpeg({ quality: 85 }).toBuffer({ resolveWithObject: true });
-        const thumb = await sharp(buf).rotate().resize({ width: 400, height: 400, fit: 'inside', withoutEnlargement: true }).jpeg({ quality: 78 }).toBuffer();
+        // B31: one image at a time through the shared queue (memory on Render Free); 503 when the queue is full
+        const { full, thumb } = await imageQueue().run(async () => {
+          const buf = p.kind === 'heif' ? await heifToJpeg(p.f.buffer) : p.f.buffer;
+          const full = await sharp(buf).rotate().resize({ width: 2048, height: 2048, fit: 'inside', withoutEnlargement: true }).jpeg({ quality: 85 }).toBuffer({ resolveWithObject: true });
+          const thumb = await sharp(buf).rotate().resize({ width: 400, height: 400, fit: 'inside', withoutEnlargement: true }).jpeg({ quality: 78 }).toBuffer();
+          return { full, thumb };
+        });
         toSave.push({ ...p, full: full.data, thumb, w: full.info.width, h: full.info.height });
-      } catch { results.push({ index: p.i, clientId: p.clientId, file: decodeOriginalName(p.f.originalname), status: 'rejected', code: 'UNSUPPORTED_IMAGE' }); }
+      } catch (e) { if (e instanceof AppError && e.code === 'IMAGE_QUEUE_FULL') throw e; results.push({ index: p.i, clientId: p.clientId, file: decodeOriginalName(p.f.originalname), status: 'rejected', code: 'UNSUPPORTED_IMAGE' }); }
     }
     const allMissing = (): Kid[] => { const m = new Map<string, Kid>(); plan.forEach((p) => p.missing.forEach((k) => m.set(k.childId, k))); return [...m.values()]; };
     if (!toSave.length && !results.some((r) => r.duplicate)) {

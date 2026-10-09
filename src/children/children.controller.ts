@@ -178,7 +178,7 @@ export class ChildrenController {
 
   @Post(':id/photo') @Roles('admin', 'teacher')
   @ApiConsumes('multipart/form-data')
-  @ApiBody({ schema: { type: 'object', properties: { file: { type: 'string', format: 'binary', description: 'JPG/PNG ≤ 3MB (kiểm tra nội dung thật)' } } } })
+  @ApiBody({ schema: { type: 'object', properties: { file: { type: 'string', format: 'binary', description: 'JPG/PNG/HEIC ≤ 10MB (kiểm tra nội dung thật; lưu thành JPEG ≤ 512px)' } } } })
   @UseInterceptors(FileInterceptor('file', imageUploadOptions))
   async photo(@CurrentUser() u: AuthUser, @Param('id', ParseUUIDPipe) id: string, @UploadedFile() file?: Express.Multer.File) {
     const c = await this.access.getChildOr404(id);

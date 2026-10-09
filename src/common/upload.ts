@@ -3,14 +3,16 @@ import { Response } from 'express';
 import { memoryStorage } from 'multer';
 import * as path from 'path';
 import { BadRequest, NotFound } from './errors';
+import { imageQueue } from './image-queue';
 import { storage, uploadDir } from './storage';
 
 /** Re-exported for older imports; the local driver lives in ./storage. */
 export { uploadDir };
-const MAX_BYTES = 3 * 1024 * 1024;
+/** PM (B31): 10 MB per image – everything is resized on upload, so the stored file stays small. */
+export const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
 
 /** Multer options: keep the upload in memory so the real content can be checked before anything touches disk. */
-export const imageUploadOptions = { storage: memoryStorage(), limits: { fileSize: MAX_BYTES, files: 1 } };
+export const imageUploadOptions = { storage: memoryStorage(), limits: { fileSize: MAX_IMAGE_BYTES, files: 1 } };
 
 const HEIF_BRANDS = new Set(['heic', 'heix', 'hevc', 'hevx', 'heim', 'heis', 'hevm', 'hevs', 'mif1', 'msf1', 'heif']);
 
@@ -77,7 +79,8 @@ export async function saveImage(file?: Express.Multer.File, profile: ImageProfil
   if (!file?.buffer?.length) throw BadRequest('Thiếu file ảnh', 'INVALID_FILE');
   const kind = detectImage(file.buffer);
   if (!kind) throw BadRequest('File không phải ảnh JPG/PNG/HEIC hợp lệ', 'INVALID_FILE');
-  const data = await normalizeImage(kind === 'heif' ? await heifToJpeg(file.buffer) : file.buffer, profile);
+  // one queue slot covers HEIC decode + resize (both are memory-heavy); 503 IMAGE_QUEUE_FULL when the queue is full
+  const data = await imageQueue().run(async () => normalizeImage(kind === 'heif' ? await heifToJpeg(file.buffer) : file.buffer, profile));
   const key = `${crypto.randomUUID()}.jpg`;
   await storage().put(key, data, 'image/jpeg');
   return key;

@@ -19,7 +19,7 @@ import { NotificationsService } from '../notifications/notifications.service';
 /** Expenses above this amount (VND) recorded by the accountant wait for admin (BGH) approval. */
 export const APPROVAL_LIMIT = Number(process.env.FINANCE_APPROVAL_LIMIT || 10_000_000);
 const MONTH_RE = /^\d{4}-(0[1-9]|1[0-2])$/;
-const MAX_RECEIPT = 5 * 1024 * 1024;
+const MAX_RECEIPT = 10 * 1024 * 1024; // PM (B31): same as images; image receipts are resized, PDFs kept as-is
 const receiptUpload = { storage: memoryStorage(), limits: { fileSize: MAX_RECEIPT, files: 1 } };
 const METHOD = { cash: 'tiền mặt', transfer: 'chuyển khoản' } as const;
 

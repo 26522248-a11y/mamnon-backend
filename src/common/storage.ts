@@ -86,7 +86,7 @@ export class S3Storage implements FileStorage {
 
 /**
  * B31: small in-process LRU for hot objects in front of a remote bucket (B2 free tier: 2,500 GetObject + 1 GB/day).
- * Bounded by total bytes (default 48 MB, STORAGE_CACHE_MB; 0 = off) and per-object size (2 MB) – fits Render Free 512 MB.
+ * Bounded by total bytes (default 24 MB, STORAGE_CACHE_MB; 0 = off) and per-object size (2 MB) – fits Render Free 512 MB.
  * Writes/deletes through this process keep it coherent; keys written by the app are per-upload UUIDs anyway.
  */
 export class CachedStorage implements FileStorage {
@@ -94,8 +94,8 @@ export class CachedStorage implements FileStorage {
   private map = new Map<string, Buffer>();
   private bytes = 0;
   stats = { hits: 0, misses: 0 };
-  constructor(private inner: FileStorage, private maxBytes = 48 * 1024 * 1024, private maxItem = 2 * 1024 * 1024) { this.driver = inner.driver; }
-  get size() { return { items: this.map.size, bytes: this.bytes }; }
+  constructor(private inner: FileStorage, private maxBytes = 24 * 1024 * 1024, private maxItem = 2 * 1024 * 1024) { this.driver = inner.driver; }
+  get size() { return { items: this.map.size, bytes: this.bytes, maxBytes: this.maxBytes }; }
   private drop(key: string) { const b = this.map.get(key); if (b) { this.bytes -= b.length; this.map.delete(key); } }
   private add(key: string, b: Buffer) {
     this.drop(key);
@@ -121,7 +121,7 @@ let current: FileStorage | null = null;
 export function storage(): FileStorage {
   if (current) return current;
   if ((process.env.STORAGE_DRIVER || 'local').toLowerCase() !== 's3') return (current = new LocalStorage());
-  const mb = Number(process.env.STORAGE_CACHE_MB ?? 48);
+  const mb = Number(process.env.STORAGE_CACHE_MB ?? 24); // PM: 24 MB default (Render Free 512 MB)
   const s3 = S3Storage.fromEnv();
   return (current = mb > 0 ? new CachedStorage(s3, mb * 1024 * 1024) : s3);
 }

@@ -13,6 +13,8 @@ import { AppModule, configureApp } from '../src/app.module';
 import { todayStr } from '../src/common/dates';
 import { CachedStorage, FileStorage, S3Storage, setStorage } from '../src/common/storage';
 import { cacheHeaders, etagOf, normalizeImage } from '../src/common/upload';
+import { ImageQueue, imageQueue, QUEUE_FULL_MESSAGE, setImageQueue } from '../src/common/image-queue';
+import { storage } from '../src/common/storage';
 import { seed } from '../src/database/seed';
 
 /** B31: B2 free tier (2,500 GetObject + 1 GB/day) – resize on upload, strip EXIF/GPS, immutable/ETag caching, 304 without a read. */
@@ -74,6 +76,48 @@ describe('B31 CachedStorage LRU (unit)', () => {
     m.set('big', Buffer.alloc(200)); await c.get('big'); await c.get('big'); expect(calls.get).toBe(before + 3); // > maxItem: never cached
     await c.put('a', Buffer.from('new'), 'image/jpeg'); expect((await c.get('a'))!.toString()).toBe('new');
     await c.remove('a'); expect(await c.get('a')).toBeNull();
+  });
+});
+
+describe('B31 image queue + sharp limits (unit)', () => {
+  const deferred = () => { let resolve!: () => void; const p = new Promise<void>((r) => (resolve = r)); return { p, resolve }; };
+  it('concurrency 1: tasks run one at a time, FIFO; a failing task frees its slot', async () => {
+    const q = new ImageQueue(1, 10);
+    let cur = 0, max = 0; const order: number[] = []; const gates = [deferred(), deferred(), deferred()];
+    const job = (i: number, fail = false) => q.run(async () => { cur++; max = Math.max(max, cur); order.push(i); await gates[i].p; cur--; if (fail) throw new Error('boom'); return i; });
+    const ps = [job(0), job(1, true), job(2)];
+    await new Promise((r) => setImmediate(r));
+    expect(q.stats).toEqual({ active: 1, waiting: 2 });
+    gates.forEach((g) => g.resolve());
+    const res = await Promise.allSettled(ps);
+    expect(res.map((r) => r.status)).toEqual(['fulfilled', 'rejected', 'fulfilled']);
+    expect([max, order]).toEqual([1, [0, 1, 2]]);
+    expect(q.stats).toEqual({ active: 0, waiting: 0 });
+  });
+  it('bounded queue: when full → 503 IMAGE_QUEUE_FULL (Vietnamese message, Retry-After)', async () => {
+    const q = new ImageQueue(1, 2); const g = deferred();
+    const running = [q.run(() => g.p), q.run(async () => 1), q.run(async () => 2)];
+    await expect(q.run(async () => 3)).rejects.toMatchObject({ status: 503, code: 'IMAGE_QUEUE_FULL', retryAfter: 30, message: QUEUE_FULL_MESSAGE });
+    g.resolve(); await Promise.all(running);
+    await expect(q.run(async () => 'ok')).resolves.toBe('ok');
+  });
+  it('defaults: 1 at a time / 10 waiting (env-configurable); sharp: 1 libvips thread, cache off; LRU default 24 MB', () => {
+    setImageQueue(null);
+    process.env.IMAGE_PROCESS_CONCURRENCY = '2'; process.env.IMAGE_QUEUE_MAX = '4';
+    expect([imageQueue().concurrency, imageQueue().maxQueue]).toEqual([2, 4]);
+    setImageQueue(null); delete process.env.IMAGE_PROCESS_CONCURRENCY; delete process.env.IMAGE_QUEUE_MAX;
+    expect([imageQueue().concurrency, imageQueue().maxQueue]).toEqual([1, 10]);
+    setImageQueue(null);
+    expect(sharp.concurrency()).toBe(1);
+    expect(sharp.cache()).toMatchObject({ memory: { max: 0 }, items: { max: 0 } });
+    const env = { ...process.env };
+    Object.assign(process.env, { STORAGE_DRIVER: 's3', S3_ENDPOINT: 'https://acc.r2.cloudflarestorage.com', S3_BUCKET: 'b', S3_ACCESS_KEY: 'k', S3_SECRET: 's' });
+    delete process.env.STORAGE_CACHE_MB;
+    setStorage(null);
+    const st = storage() as CachedStorage;
+    expect(st).toBeInstanceOf(CachedStorage);
+    expect(st.size.maxBytes).toBe(24 * 1024 * 1024);
+    setStorage(null); process.env = env;
   });
 });
 
@@ -171,6 +215,39 @@ describe('B31 HTTP caching on S3 (mocked client counting GetObject)', () => {
       await get('admin', `/authorized-pickers/${p.id}/photo`, r.headers.etag).expect(304);
       expect(gets.length).toBe(n0);
     }
+  });
+
+  it('upload limit 10 MB: ~8 MB photo accepted (and shrunk), >10 MB → 413 with Vietnamese message', async () => {
+    const kid = await kidOf('ph1');
+    const small = await sharp({ create: { width: 1600, height: 1200, channels: 3, background: '#a50' } }).jpeg().toBuffer();
+    const eight = Buffer.concat([small, Buffer.alloc(8 * 1024 * 1024 - small.length)]); // valid JPEG + trailing bytes, 8 MB
+    const ok = await request(http).post(`/api/v1/children/${kid.id}/photo`).set('Authorization', `Bearer ${tok.gv1}`).attach('file', eight, 'big.jpg').expect(201);
+    expect(ok.body.photoUrl).toBeTruthy();
+    const k = (await ds.query(`SELECT photo_url FROM children WHERE id = $1`, [kid.id]))[0].photo_url;
+    expect(objects.get(k)!.length).toBeLessThan(200 * 1024);
+    const tooBig = Buffer.concat([small, Buffer.alloc(10 * 1024 * 1024 + 1024)]);
+    const r = await request(http).post(`/api/v1/children/${kid.id}/photo`).set('Authorization', `Bearer ${tok.gv1}`).attach('file', tooBig, 'huge.jpg').expect(413);
+    expect(r.body).toEqual({ code: 'PAYLOAD_TOO_LARGE', message: 'File quá lớn so với giới hạn cho phép' });
+  });
+
+  it('queue: parallel uploads are processed one at a time; full queue → 503 IMAGE_QUEUE_FULL + Retry-After', async () => {
+    class Tracking extends ImageQueue { cur = 0; max = 0; n = 0;
+      run<T>(task: () => Promise<T>) { return super.run(async () => { this.cur++; this.n++; this.max = Math.max(this.max, this.cur); try { return await task(); } finally { this.cur--; } }); } }
+    const q = new Tracking(1, 10); setImageQueue(q);
+    const kid = await kidOf('ph1');
+    const img = await sharp({ create: { width: 3000, height: 2000, channels: 3, background: '#0a5' } }).jpeg().toBuffer();
+    const rs = await Promise.all([0, 1, 2].map((i) => request(http).post(`/api/v1/children/${kid.id}/authorized-pickers`).set('Authorization', `Bearer ${tok.ph1}`)
+      .field('fullName', `B31 queue ${i}`).field('phone1', `091100032${i}`).attach('photo', img, 'q.jpg')));
+    expect(rs.map((r) => r.status)).toEqual([201, 201, 201]);
+    expect([q.n, q.max]).toEqual([3, 1]);
+    // full: 1 running, 0 waiting allowed
+    let release!: () => void; const full = new ImageQueue(1, 0); setImageQueue(full);
+    const blocker = full.run(() => new Promise<void>((r) => (release = r)));
+    const busy = await request(http).post(`/api/v1/children/${kid.id}/photo`).set('Authorization', `Bearer ${tok.gv1}`).attach('file', img, 'a.jpg').expect(503);
+    expect(busy.body).toEqual({ code: 'IMAGE_QUEUE_FULL', message: QUEUE_FULL_MESSAGE });
+    expect(busy.headers['retry-after']).toBe('30');
+    release(); await blocker; setImageQueue(null);
+    await request(http).post(`/api/v1/children/${kid.id}/photo`).set('Authorization', `Bearer ${tok.gv1}`).attach('file', img, 'a.jpg').expect(201);
   });
 
   it('seed placeholder avatar (rewritable key) has no ETag; receipts stay private, no-store', async () => {
