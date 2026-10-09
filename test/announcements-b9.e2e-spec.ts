@@ -119,6 +119,24 @@ describe('B9 scheduled announcements + images (e2e)', () => {
     expect(await notifCount(now.id)).toBeGreaterThan(0);
   });
 
+  it('attachment order = attachmentIds order on create, PATCH reorder, list, parent view (not upload order)', async () => {
+    const mk = (w: number) => sharp({ create: { width: w, height: 100, channels: 3, background: '#FF8A4C' } }).png().toBuffer();
+    const ups = [];
+    for (const w of [300, 400, 500, 600]) ups.push((await as('admin').upload(await mk(w), `${w}.png`).expect(201)).body);
+    const order = [ups[2].id, ups[0].id, ups[3].id, ups[1].id]; // deliberately not upload order
+    const a = (await as('admin').post('/announcements', { title: 'Thứ tự ảnh', body: 'b', scope: 'school', scheduledAt: vnIn(3600_000), attachmentIds: order }).expect(201)).body;
+    expect(a.attachments.map((x: any) => x.id)).toEqual(order);
+    expect(a.attachments.map((x: any) => x.width)).toEqual([500, 300, 600, 400]);
+    const rows = await ds.query(`SELECT id, sort_order FROM announcement_attachments WHERE announcement_id = $1 ORDER BY sort_order`, [a.id]);
+    expect(rows.map((r: any) => r.id)).toEqual(order);
+    expect(rows.map((r: any) => r.sort_order)).toEqual([0, 1, 2, 3]);
+    const re = [order[3], order[2], order[0]]; // reorder + drop one
+    expect((await as('admin').patch(`/announcements/${a.id}`, { attachmentIds: re }).expect(200)).body.attachments.map((x: any) => x.id)).toEqual(re);
+    expect((await as('admin').get('/announcements?status=scheduled').expect(200)).body.items.find((x: any) => x.id === a.id).attachments.map((x: any) => x.id)).toEqual(re);
+    await makeDue(a.id); await svc.runDue();
+    expect((await as('ph1').get('/announcements').expect(200)).body.items.find((x: any) => x.id === a.id).attachments.map((x: any) => x.id)).toEqual(re);
+  });
+
   it('external cron endpoint: secret required, dispatches due items idempotently', async () => {
     const c = (await as('admin').post('/announcements', { title: 'Cron', body: 'b', scope: 'school', scheduledAt: vnIn(3600_000) }).expect(201)).body;
     await makeDue(c.id);
