@@ -44,12 +44,14 @@ export class PutMenuDto {
 export class DateQuery {
   @ApiPropertyOptional({ example: '2026-10-09' }) @IsOptional() @IsDateString() date?: string;
 }
+export const TOILET_OPTIONS = ['Bình thường', 'Tiêu chảy', 'Táo'];
 class DailyNoteItemDto {
   @ApiProperty() @IsUUID() childId!: string;
-  @ApiPropertyOptional({ enum: EATING }) @IsOptional() @IsIn(EATING) eating?: EatingLevel;
+  @ApiPropertyOptional({ enum: EATING, description: 'Bữa trưa' }) @IsOptional() @IsIn(EATING) eating?: EatingLevel;
+  @ApiPropertyOptional({ enum: EATING, description: 'Bữa sáng (cùng thang với eating)' }) @IsOptional() @IsIn(EATING) breakfast?: EatingLevel;
   @ApiPropertyOptional({ example: 120, description: 'Phút ngủ trưa' }) @IsOptional() @IsInt() @Min(0) @Max(300) sleepMinutes?: number;
   @ApiPropertyOptional({ example: 'Vui vẻ' }) @IsOptional() @IsString() @MaxLength(40) mood?: string;
-  @ApiPropertyOptional({ example: 'Bình thường' }) @IsOptional() @IsString() @MaxLength(40) toilet?: string;
+  @ApiPropertyOptional({ example: 'Bình thường', description: `Gợi ý: ${TOILET_OPTIONS.join(' / ')} (văn bản tự do ≤ 40 ký tự)` }) @IsOptional() @IsString() @MaxLength(40) toilet?: string;
   @ApiPropertyOptional() @IsOptional() @IsString() @MaxLength(1000) note?: string;
 }
 export class PutDailyNotesDto {
@@ -67,9 +69,9 @@ const growthView = (g: GrowthRecord) => ({
   bmi: g.heightCm && g.weightKg ? Math.round((g.weightKg / (g.heightCm / 100) ** 2) * 10) / 10 : null,
 });
 /** [dto/entity field, column] that a daily-note item may set */
-const NOTE_FIELDS: [keyof DailyNote, string][] = [['eating', 'eating'], ['sleepMinutes', 'sleep_minutes'], ['mood', 'mood'], ['toilet', 'toilet'], ['note', 'note']];
+const NOTE_FIELDS: [keyof DailyNote, string][] = [['eating', 'eating'], ['breakfast', 'breakfast'], ['sleepMinutes', 'sleep_minutes'], ['mood', 'mood'], ['toilet', 'toilet'], ['note', 'note']];
 const noteView = (n: DailyNote) => ({
-  id: n.id, childId: n.childId, classId: n.classId, date: n.date, eating: n.eating, sleepMinutes: n.sleepMinutes, mood: n.mood,
+  id: n.id, childId: n.childId, classId: n.classId, date: n.date, eating: n.eating, breakfast: n.breakfast, sleepMinutes: n.sleepMinutes, mood: n.mood,
   toilet: n.toilet, note: n.note, updatedAt: n.updatedAt,
 });
 
@@ -171,7 +173,7 @@ export class HealthController {
       classId: id, date,
       items: kids.map((k) => {
         const n = rows.find((r) => r.childId === k.id);
-        return { fullName: k.fullName, recorded: !!n, ...(n ? noteView(n) : { childId: k.id, id: null, eating: null, sleepMinutes: null, mood: null, toilet: null, note: null }) };
+        return { fullName: k.fullName, photoConsent: k.photoConsent, recorded: !!n, ...(n ? noteView(n) : { childId: k.id, id: null, eating: null, breakfast: null, sleepMinutes: null, mood: null, toilet: null, note: null }) };
       }),
     };
   }

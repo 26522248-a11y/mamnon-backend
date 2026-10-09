@@ -1,3 +1,5 @@
+import { doseLate } from '../messages/parent-messages.controller';
+import { vnNowHM } from '../common/school';
 import { confirmedHolidays } from '../absences/absences.service';
 import { Controller, Get, Query } from '@nestjs/common';
 import { ApiBearerAuth, ApiPropertyOptional, ApiTags } from '@nestjs/swagger';
@@ -70,8 +72,23 @@ export class DashboardController {
     // confirmed school holiday: nothing to mark
     const notMarked = holiday ? [] : byClass.filter((c) => c.classId && c.totalChildren > 0 && c.unmarked === c.totalChildren);
     const partly = holiday ? [] : byClass.filter((c) => c.classId && c.unmarked > 0 && c.unmarked < c.totalChildren);
+    // medicine doses due (time + MEDICINE_LATE_MINUTES passed) and not given; child not absent that day
+    const doses: any[] = holiday ? [] : await this.ds.query(`
+      SELECT c.id AS "childId", c.full_name AS "fullName", c.class_id AS "classId", cl.name AS "className",
+             m.id AS "medicineId", m.name AS "medicineName", d.id AS "doseId", d.time
+      FROM medicine_doses d JOIN medicines m ON m.id = d.medicine_id JOIN children c ON c.id = m.child_id
+      LEFT JOIN classes cl ON cl.id = c.class_id
+      LEFT JOIN attendance a ON a.child_id = c.id AND a.date = m.date
+      WHERE m.date = $1 AND m.cancelled_at IS NULL AND d.given_at IS NULL AND c.status = 'active' AND (a.status IS NULL OR a.status <> 'absent')
+      ORDER BY d.time, cl.name, c.full_name`, [date]);
+    const today = todayStr(), nowHM = vnNowHM();
+    const toMin = (hm: string) => Number(hm.slice(0, 2)) * 60 + Number(hm.slice(3));
+    const due = doses.filter((d) => doseLate(date, d.time, null, today, nowHM)).map((d) => ({
+      ...d, minutesLate: date < today ? null : toMin(nowHM) - toMin(d.time) }));
     return {
       holiday: holiday ? { id: holiday.id, name: holiday.name } : null,
+      /** today's medicine doses not given MEDICINE_LATE_MINUTES after their time */
+      medicinesNotGiven: due, medicinesNotGivenCount: due.length,
       /** classes with active children and no attendance at all for the day */
       classesNotMarked: notMarked.map((c) => ({ classId: c.classId, className: c.className, totalChildren: c.totalChildren })),
       classesNotMarkedCount: notMarked.length,

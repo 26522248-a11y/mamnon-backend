@@ -17,7 +17,9 @@ timestamps ISO-8601 UTC. Names follow `mamnon-web/src/lib/messages-api.ts`; diff
 | `MEDICINE_LATE_MINUTES` | `30` | `medicineLateMinutes` | dose counts as "not given" this long after its time |
 | `KITCHEN_NOTIFY_ROLES` | `admin,accountant` | – | who gets "kitchen" notices (meal count changes) |
 
-`GET /settings/school` → `{name, address, phone, absenceCutoff, latestPickupTime, latestPickup, schoolOpenTime, medicineLateMinutes}`.
+`GET /settings/school` → `{name, address, phone, absenceCutoff, latestPickupTime, latestPickup, schoolOpenTime, medicineLateMinutes, todayClosure}`
+where `todayClosure = {date, id, name, kind: 'national'|'school'|'emergency', reason: string|null} | null` = today's **confirmed** holiday/closure (parent banner, e.g. "Trường nghỉ đột xuất: <reason>").
+Other env: `HOLIDAY_REMINDER_LAST_DAY` (default 7), `HOLIDAY_REMINDER_DISABLED=true` to switch the December reminder off.
 
 ## 1. Absence reports (`Báo vắng`)
 
@@ -55,7 +57,7 @@ type Absence = { id; childId; childName; classId; className; from; to; reason: A
 ## 2. Holiday calendar (`Lịch nghỉ`)
 
 ```ts
-type Holiday = { id; date; name; kind: 'national' | 'school'; status: 'pending' | 'confirmed';
+type Holiday = { id; date; name; kind: 'national' | 'school' | 'emergency'; status: 'pending' | 'confirmed'; reason: string | null;
   createdBy; createdByName; createdAt; confirmedBy: { id: string; name: string } | null; confirmedByName: string | null; confirmedAt: string | null };
 ```
 **Only `confirmed` holidays have any effect.** `pending` = national lunar holiday from the template, waiting for admin confirmation: no `SCHOOL_HOLIDAY` block, absence days / attendance / meals behave as a normal school day.
@@ -70,24 +72,39 @@ type Holiday = { id; date; name; kind: 'national' | 'school'; status: 'pending' 
 | POST | `/holidays/confirm` `{year}` | admin | confirms all pending holidays of that year → `{year, confirmed: Holiday[]}` |
 | POST | `/holidays/template` `{year, dryRun?}` | admin | Vietnamese national holidays. **Solar** (Tết dương lịch 1/1, 30/4, 1/5, Quốc khánh 1/9 + 2/9) are inserted as `confirmed`; **lunar** (Tết Nguyên đán 5 ngày: 29/30 tháng Chạp → mùng 4, Giỗ Tổ 10/3 âm lịch) are inserted as `pending`. Existing dates are skipped. → `{year, created: Holiday[], skipped: [{date,name}]}`; `dryRun:true` → `{year, items[{date,name,status,exists}]}` without writing. Bundled years 2025–2030 (lunar dates computed with a lunar calendar); other years → 400 `TEMPLATE_YEAR_UNSUPPORTED`. |
 
+| POST | `/holidays/emergency` `{date, reason*, name?, dryRun?}` | admin | **Emergency closure** (2b), see below |
+| POST | `/holidays/reminder` `{force?}` | admin | run the December reminder now (normally automatic) → `{sent, year, reason?, admins?, confirmed?, pending?}` |
+
 `POST /holidays/:id/confirm` → `Holiday` with `confirmedBy: {id, name}`, `confirmedAt` (also `confirmedByName`).
 Effects of a **confirmed** holiday (attendance `holiday` is set only for confirmed ones): attendance sheet returns `holiday: {id, name}` with every item `status:null`, `PUT` attendance for that date → 400 `SCHOOL_HOLIDAY`; dates are skipped in absence reports (`skippedDates` reason `HOLIDAY`); medicine / late-pickup requests → 400 `SCHOOL_HOLIDAY` (batch 2); no meal refund (no attendance rows). Monthly meal fee itself is unchanged (flat monthly price). Dashboard does not report "classes not marked" on a holiday.
-Planned (batch 2b): early-December reminder to admins to confirm next year's pending holidays.
+### Emergency closure (`Nghỉ đột xuất`, batch 2b)
+`POST /holidays/emergency {date, reason, name?, dryRun?}` (admin). `reason` required (non-blank, ≤ 500) else 400 `VALIDATION_ERROR`; weekend → 400 `NOT_SCHOOL_DAY`; a holiday already on that date → 409 `HOLIDAY_EXISTS`.
+Unlike `POST /holidays` it works **even when attendance exists** (default `POST /holidays` still → 409 `HOLIDAY_HAS_ATTENDANCE`).
+- `dryRun: true` → `{dryRun: true, date, name, reason, parentsToNotify, childrenRefunded, childrenPresent, childrenTotal}` (counts only, nothing written) for the confirm dialog.
+- Otherwise (201): creates a **confirmed** holiday `kind:'emergency'` with `reason` (default name "Nghỉ đột xuất") → `{holiday: Holiday, parentsNotified, childrenRefunded, childrenPresent, absentRowsCreated}`.
+- Existing attendance rows are **kept unchanged**; enrolled children without a row get an `absent` row (note "Trường nghỉ đột xuất: …").
+- **Meal refund**: every child NOT present that day (absent, or no row) gets that day's meal refunded on the next invoice; children marked present/late ate → no refund. (Refund rule = parent report before cutoff **or** absent on a confirmed emergency day.)
+- `audit_events` gets `holiday.emergency` with the `reason` and counts.
+- All active parents get an **important** push/inbox `school_closure` (title "Nghỉ đột xuất ngày dd/mm/yyyy", body = reason).
+- After that the date behaves like any confirmed holiday (attendance PUT → 400 `SCHOOL_HOLIDAY`, banner via `todayClosure`). Deleting the holiday re-opens attendance; refunds already on an invoice for children still absent stay, and days that are no longer refundable are clawed back by the existing clawback rule.
+
+### Early-December reminder (batch 2b)
+Once a year, between 1 Dec and `HOLIDAY_REMINDER_LAST_DAY` (default 7 Dec, VN time), all admins get an important `holiday_reminder` ("Chốt lịch nghỉ năm <next year>") with the number of confirmed / pending holidays of next year (or a hint to apply the template if there are none). Checked hourly by the server; sent once per year (deduplicated). `POST /holidays/reminder {force:true}` sends it on demand.
 
 ## 3. Medicine instructions (`Dặn thuốc`)
 
 ```ts
-type Dose = { id; time: 'HH:MM'; label: string | null; givenAt: string | null; givenBy: string | null; givenByName: string | null; late: boolean };
+type Dose = { id; time: 'HH:MM'; label: string | null; givenAt: string | null; givenBy: string | null; givenByName: string | null; givenNote: string | null; late: boolean };
 type Medicine = { id; childId; childName; classId; date; name; dose; note: string | null; photoUrl: string | null;
   doses: Dose[]; status: 'active' | 'cancelled'; createdBy; createdByName; createdAt; cancelledAt: string | null };
 ```
 | Method | Path | Who | Notes |
 |---|---|---|---|
-| POST | `/children/:id/medicines` (multipart or JSON) | parent of child; admin | `date` (default today; ≥ today, not holiday/weekend), `name*`, `dose*` (e.g. "5 ml"), `doses*` = JSON `[{time:"11:30", label?}]` **or** repeated `times` fields; 1–6 doses, distinct times; `note?`, `photo?` (JPG/PNG/HEIC→JPEG). Missing dose/doses → 400 `VALIDATION_ERROR`. 201 `Medicine`. Class teachers notified. |
+| POST | `/children/:id/medicines` (multipart or JSON) | parent of child; admin | `date` (default today; ≥ today else 400 `DATE_IN_PAST`, ≤ today + 30 else 400 `DATE_TOO_FAR`; weekend → 400 `NOT_SCHOOL_DAY`, confirmed holiday → 400 `SCHOOL_HOLIDAY`), `name*`, `dose*` (e.g. "5 ml"), `doses*` = JSON `[{time:"11:30", label?}]` **or** `times` (repeated fields, array, or comma list `"08:30,15:30"`); 1–6 doses, distinct times; `note?`, `photo?` (JPG/PNG/HEIC→JPEG). Missing dose/doses → 400 `VALIDATION_ERROR`. 201 `Medicine`. Class teachers notified. |
 | GET | `/children/:id/medicines?date=` | parent of child, class teacher, admin | → `{items: Medicine[]}`; default today (or `?from&to`) |
 | GET | `/medicines/:id/photo` | same | |
-| DELETE | `/medicines/:id` | parent of child; admin | only while no dose given → else 409 `DOSE_ALREADY_GIVEN`; 200 `Medicine` (status cancelled) |
-| POST | `/medicine-doses/:id/given` `{note?}` | class teacher; admin | atomic; second mark → **409 `ALREADY_GIVEN`** (`details.givenAt/givenByName`); other class → 403; cancelled medicine → 409 `MEDICINE_CANCELLED`; only on the medicine's date (else 400 `NOT_TODAY`). Returns `Medicine`. Parents notified "Bé đã được cho uống thuốc X lúc HH:MM (Cô Y)". |
+| DELETE | `/medicines/:id` | parent of child; admin | only while no dose given → else 409 `DOSE_ALREADY_GIVEN`; 200 `Medicine` (status cancelled); teachers notified (`medicine_cancelled`) |
+| POST | `/medicine-doses/:id/given` `{note?}` | class teacher; admin | atomic (concurrent marks: exactly one wins); second mark → **409 `ALREADY_GIVEN`** (`details: {givenAt, givenBy, givenByName}`); other class → 403; cancelled medicine → 409 `MEDICINE_CANCELLED`; only on the medicine's date (else 400 `NOT_TODAY`). Returns `Medicine`. Parents notified "Bé đã được cho uống thuốc X lúc HH:MM (Cô Y)". |
 
 Parent sees `givenAt` + `givenByName` per dose. `late` = not given and now > time + `medicineLateMinutes`.
 
@@ -99,9 +116,9 @@ type LatePickup = { id; childId; childName; classId; date; time; pickerName: str
 ```
 | Method | Path | Who | Notes |
 |---|---|---|---|
-| POST | `/children/:id/late-pickups` `{date, time, pickerName?, note?}` | parent of child; admin | `date ≥ today`, school day; `schoolOpenTime ≤ time ≤ latestPickupTime` else 400 `OUTSIDE_SCHOOL_HOURS`; today: time must be in the future (400 `TIME_PASSED`). One active per child+date → 409 `LATE_PICKUP_EXISTS`. Teachers notified. |
+| POST | `/children/:id/late-pickups` `{date, time, pickerName?, note?}` | parent of child; admin | `date ≥ today` (400 `DATE_IN_PAST`), ≤ today + 30 (400 `DATE_TOO_FAR`), school day (400 `NOT_SCHOOL_DAY` / `SCHOOL_HOLIDAY`); `time` must be `HH:MM` (400 `VALIDATION_ERROR`); `schoolOpenTime ≤ time ≤ latestPickupTime` else 400 `OUTSIDE_SCHOOL_HOURS`; today: time must be in the future (400 `TIME_PASSED`). One active per child+date → 409 `LATE_PICKUP_EXISTS`. Teachers notified. |
 | GET | `/children/:id/late-pickups?from&to` | parent, class teacher, admin | → `{items: LatePickup[]}`; default from = today − 30 |
-| DELETE | `/late-pickups/:id` | parent of child; admin | 200 `LatePickup` (cancelled) |
+| DELETE | `/late-pickups/:id` | parent of child; admin | 200 `LatePickup` (cancelled; idempotent); teachers notified (`late_pickup_cancelled`); a new request for the date can then be sent |
 
 `pickerName` is information only – the hand-over still follows the pickup-safety rules (guardian / approved picker / two-step request).
 
@@ -118,29 +135,29 @@ type LatePickup = { id; childId; childName; classId; date; time; pickerName: str
 ## 6. Class message feed (pinned on top of Điểm danh)
 
 `GET /classes/:id/parent-messages?date=` (class teacher, admin) →
-`{date, holiday: Holiday|null, absences: Absence[] (active on that date), medicines: Medicine[] (that date, active), latePickups: LatePickup[] (that date, active), counts: {absences, medicines, dosesPending, latePickups}}`.
+`{date, holiday: {id, name, kind, reason}|null, absences: Absence[] (active on that date), medicines: Medicine[] (that date, active), latePickups: LatePickup[] (that date, active), counts: {absences, medicines, dosesPending, latePickups}}`.
 
 ## 7. Daily notes
 
-Item fields: `eating` (lunch), **`breakfast`** (same scale `all|most|half|little|none`), `sleepMinutes`, `mood`, `toilet` (recommended values `Bình thường`, `Tiêu chảy`, `Táo`; free text ≤ 40 kept for compatibility), `note`. Partial update: absent = unchanged, `null` = clear (PUT and PATCH).
+Item fields: `eating` (lunch), **`breakfast`** (same scale `all|most|half|little|none`), `sleepMinutes`, `mood`, `toilet` (recommended values `Bình thường`, `Tiêu chảy`, `Táo`; free text ≤ 40 kept for compatibility), `note`. Partial update: absent = unchanged, `null` = clear (PUT and PATCH). Class list items (`GET /classes/:id/daily-notes`) also carry `photoConsent`. Swagger: `DailyNoteItemDto.properties.breakfast` (FE feature detection).
 
 ## 8. Dashboard
 
 `attention.medicinesNotGiven: MedicineDue[]` and `attention.medicinesNotGivenCount`, where
-`MedicineDue = {childId, fullName, classId, className, medicineId, medicineName, doseId, time, minutesLate}` – today's active doses not given, `now > time + medicineLateMinutes`, child not absent.
+`MedicineDue = {childId, fullName, classId, className, medicineId, medicineName, doseId, time, minutesLate}` – active doses of that day not given, `now ≥ time + medicineLateMinutes`, child not marked absent; empty on a confirmed holiday. `attention.holiday: {id, name}|null`.
 
 ## 9. Photo consent (`Đồng ý chụp/đăng ảnh`) – batch 2b
 
 - `children.photoConsent: boolean`, **default false** (existing children too).
-- `photoConsent` is included in child lists (`GET /children`, child detail) and in the class roster / attendance sheet items teachers see, so the UI can show a badge.
+- `photoConsent` (+ `photoConsentUpdatedAt`) is included in child lists (`GET /children`, child detail; not for accountant) and `photoConsent` in the class roster items teachers see (attendance sheet, daily-notes list), so the UI can show a badge.
 - Parents see `photoConsent` only for their own children; another child → 403.
 - `GET /children/:id/photo-consent` (parent of own child, class teacher, admin) →
-  `{childId, consent: boolean, updatedBy: {id, name} | null, updatedAt: string | null, history: [{before, after, by: {id, name, role}, at, note, source}]}`.
-- `PUT /children/:id/photo-consent` `{consent: boolean, note?}` (parent of child, admin) → same shape. Every change goes to `audit_events` (`child.photo_consent`) + jsonl.
-- Excel import: new optional column `Đồng ý chụp ảnh` (Có / Không, default Không) → stored as initial consent, history entry `source: import`.
+  `{childId, consent: boolean, photoConsent: boolean (alias), updatedBy: {id, name} | null, updatedAt: string | null, history: [{before, after, by: {id, name, role} | null, at, note, source: 'api'|'import'}]}` (history newest first).
+- `PUT /children/:id/photo-consent` `{consent: boolean, note?}` (alias `photoConsent`; parent of own child, admin; teacher/other parent → 403; missing value → 400) → same shape. Only a real change is recorded: `audit_events` (`child.photo_consent`, before/after, `reason` = note, ip) + jsonl; class teachers notified (`photo_consent`).
+- Excel import: new optional column `Đồng ý chụp ảnh` (Có / Không, default Không) → stored as initial consent; `Có` writes a history/audit entry with `source: import`; other values → row error on that column.
 
 ## 10. Notifications (types)
-`absence_report`, `absence_cancelled`, `absence_overridden`, `kitchen_change`, `medicine_request`, `medicine_given`, `late_pickup`. Inbox + push (if subscribed).
+`absence_report`, `absence_cancelled`, `absence_overridden`, `kitchen_change`, `medicine_request`, `medicine_given`, `medicine_cancelled`, `late_pickup`, `late_pickup_cancelled`, `photo_consent`, `school_closure` (important), `holiday_reminder` (important). Inbox + push (if subscribed).
 
 ## 11. Password change enforcement
 If the logged-in user has `mustChangePassword=true`, every authenticated endpoint returns **403 `PASSWORD_CHANGE_REQUIRED`** except: `GET /auth/me`, `POST /auth/logout`, `POST /auth/change-password`, (public: `/auth/login`, `/auth/refresh`, `/settings/school`, `/push/vapid-public-key`, `/push/actions`), `GET /pickup-requests/feed`, `POST /pickup-requests/:id/confirm|reject`, `GET /pickup-requests/:id/photo`, `POST|GET|DELETE /push/subscriptions`.

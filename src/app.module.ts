@@ -4,7 +4,12 @@ import { JwtModule } from '@nestjs/jwt';
 import { ApiTags, DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import { AbsencesController } from './absences/absences.controller';
 import { AbsencesService } from './absences/absences.service';
+import { HolidayReminderService } from './calendar/holiday-reminder.service';
+import { ParentMessagesController } from './messages/parent-messages.controller';
+import { PhotoConsentController } from './children/photo-consent.controller';
 import { HolidaysController } from './calendar/holidays.controller';
+import { DataSource } from 'typeorm';
+import { todayStr } from './common/dates';
 import { schoolSettings } from './common/school';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import cookieParser from 'cookie-parser';
@@ -43,8 +48,13 @@ class HealthController {
 @ApiTags('settings')
 @Controller('settings')
 class SettingsController {
-  /** Public (login page / print headers): school name, address, phone from env. */
-  @Public() @Get('school') school() { return schoolSettings(); }
+  constructor(private ds: DataSource) {}
+  /** Public (login page / print headers / parent banner): school info + round-2 settings + today's confirmed closure. */
+  @Public() @Get('school') async school() {
+    const today = todayStr();
+    const [h] = await this.ds.query(`SELECT id, name, kind, reason FROM holidays WHERE date = $1 AND status = 'confirmed'`, [today]);
+    return { ...schoolSettings(), todayClosure: h ? { date: today, id: h.id, name: h.name, kind: h.kind, reason: h.reason } : null };
+  }
 }
 
 @Module({
@@ -53,9 +63,9 @@ class SettingsController {
     TypeOrmModule.forFeature(ENTITIES),
     JwtModule.register({}),
   ],
-  controllers: [HealthController, SettingsController, AuthController, ClassesController, ChildrenController, AttendanceController, DashboardController, FeesController, HealthNutritionController, NotificationsController, ReportsController, UsersController, ImportsController, AuthorizedPickersController, ContactPhonesController, PickupDutiesController, PushController, AuditController, AbsencesController, HolidaysController],
+  controllers: [HealthController, SettingsController, AuthController, ClassesController, ChildrenController, AttendanceController, DashboardController, FeesController, HealthNutritionController, NotificationsController, ReportsController, UsersController, ImportsController, AuthorizedPickersController, ContactPhonesController, PickupDutiesController, PushController, AuditController, AbsencesController, HolidaysController, ParentMessagesController, PhotoConsentController],
   providers: [
-    AccessService, UserContextService, AbsencesService, NotificationsService, NotificationDispatcher, PickupSafetyService, LoginThrottleService,
+    AccessService, UserContextService, AbsencesService, HolidayReminderService, NotificationsService, NotificationDispatcher, PickupSafetyService, LoginThrottleService,
     { provide: APP_GUARD, useClass: JwtAuthGuard },
     { provide: APP_FILTER, useClass: AllExceptionsFilter },
   ],

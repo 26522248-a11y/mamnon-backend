@@ -85,6 +85,7 @@ export class ChildrenController {
     return {
       ...base, dob: c.dob, gender: c.gender, allergies: c.allergies ?? undefined, healthNotes: c.healthNotes,
       address: c.address, photoUrl: c.photoUrl ? `/api/v1/children/${c.id}/photo` : null, enrolledAt: c.enrolledAt,
+      photoConsent: c.photoConsent, photoConsentUpdatedAt: c.photoConsentUpdatedAt,
     };
   }
 

@@ -12,7 +12,7 @@ export const MAX_IMPORT_BYTES = 5 * 1024 * 1024;
 export const XLSX_MIME = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
 
 export type Field = 'fullName' | 'dob' | 'gender' | 'className' | 'allergies' | 'healthNotes' | 'address' | 'enrolledAt'
-  | 'g1Name' | 'g1Relation' | 'g1Phone' | 'g1CanPickup' | 'g2Name' | 'g2Relation' | 'g2Phone' | 'g2CanPickup';
+  | 'g1Name' | 'g1Relation' | 'g1Phone' | 'g1CanPickup' | 'g2Name' | 'g2Relation' | 'g2Phone' | 'g2CanPickup' | 'photoConsent';
 
 /** Template columns, in order. `required` = must be filled on every row. */
 export const COLUMNS: { field: Field; header: string; required?: boolean; width: number; note: string; list?: string[]; text?: boolean }[] = [
@@ -32,6 +32,7 @@ export const COLUMNS: { field: Field; header: string; required?: boolean; width:
   { field: 'g2Relation', header: 'PH2 - Quan hệ', width: 12, note: 'như PH1', list: ['Bố', 'Mẹ', 'Ông', 'Bà', 'Anh', 'Chị', 'Cô', 'Dì', 'Chú', 'Bác', 'Người giám hộ'] },
   { field: 'g2Phone', header: 'PH2 - SĐT', width: 14, note: 'như PH1', text: true },
   { field: 'g2CanPickup', header: 'PH2 - Được đón', width: 12, note: 'Có / Không (mặc định Có)', list: ['Có', 'Không'] },
+  { field: 'photoConsent', header: 'Đồng ý chụp ảnh', width: 14, note: 'Phụ huynh đồng ý chụp/đăng ảnh của bé: Có / Không (mặc định Không)', list: ['Có', 'Không'] },
 ];
 
 export const norm = (s: string) => s.normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/đ/g, 'd').replace(/Đ/g, 'd')
@@ -134,7 +135,7 @@ export interface GuardianIn { slot: 1 | 2; fullName: string; relation: string; p
  */
 export interface ParsedRow {
   row: number; fullName: string; dob: string | null; gender: 'M' | 'F' | null; className: string; allergies: string | null; healthNotes: string | null;
-  address: string | null; enrolledAt: string | null; guardians: GuardianIn[];
+  address: string | null; enrolledAt: string | null; photoConsent: boolean; guardians: GuardianIn[];
 }
 
 const EXTRA_SHEET_PARTS = /\/(comments|vmlDrawing|drawing|table|printerSettings|threadedComment|person|ctrlProp|image|oleObject|package|pivotTable|queryTable|customProperty|webExtension)$/i;
@@ -228,6 +229,9 @@ export async function parseWorkbook(buf: Buffer, today: string): Promise<{ rows:
     const allergies = txt('allergies', 500) || null, healthNotes = txt('healthNotes', 1000) || null, address = txt('address', 300) || null;
     const enRaw = get('enrolledAt'); let enrolledAt: string | null = null;
     if (cellText(enRaw)) { enrolledAt = parseDate(enRaw); if (!enrolledAt) err('enrolledAt', 'Ngày không hợp lệ (dd/mm/yyyy)', enRaw); else if (dob && enrolledAt < dob) err('enrolledAt', 'Ngày nhập học trước ngày sinh', enRaw); }
+    const pcRaw = cellText(get('photoConsent'));
+    const photoConsent = pcRaw ? yesNo(pcRaw) : false;
+    if (photoConsent === null) err('photoConsent', 'Chỉ nhận Có / Không', pcRaw);
     const guardians: GuardianIn[] = [];
     for (const slot of [1, 2] as const) {
       const f = (k: 'Name' | 'Relation' | 'Phone' | 'CanPickup') => `g${slot}${k}` as Field;
@@ -241,7 +245,7 @@ export async function parseWorkbook(buf: Buffer, today: string): Promise<{ rows:
       if (phone) guardians.push({ slot, fullName: name, relation: rel || 'Phụ huynh', phone, canPickup: canPickup ?? true });
     }
     if (guardians.length === 2 && guardians[0].phone === guardians[1].phone) err('g2Phone', 'PH2 trùng SĐT với PH1', guardians[1].phone);
-    rows.push({ row, fullName, dob: dob && dob <= today && dob >= minDob ? dob : null, gender: g, className, allergies, healthNotes, address, enrolledAt, guardians });
+    rows.push({ row, fullName, dob: dob && dob <= today && dob >= minDob ? dob : null, gender: g, className, allergies, healthNotes, address, enrolledAt, photoConsent: !!photoConsent, guardians });
   }
   return { rows, errors, totalRows: raw.length, sheet: ws.name };
 }

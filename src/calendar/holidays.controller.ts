@@ -7,7 +7,13 @@ import { AbsencesService } from '../absences/absences.service';
 import { AuthUser, CurrentUser, Roles } from '../common/auth';
 import { addDays, dayDiff } from '../common/dates';
 import { AppError, BadRequest, NotFound } from '../common/errors';
-import { Holiday, User } from '../database/entities';
+import { Attendance, AttendanceHistory, Holiday, User } from '../database/entities';
+import { Req } from '@nestjs/common';
+import { Request } from 'express';
+import { recordAudit } from '../common/audit';
+import { isWeekend } from '../absences/absences.service';
+import { NotificationsService } from '../notifications/notifications.service';
+import { HolidayReminderService } from './holiday-reminder.service';
 
 /** Lunar new year (mùng 1 Tết) and Giỗ Tổ (10/3 âm lịch), solar dates computed with a lunar calendar. */
 const LUNAR: Record<number, { tet: string; gioTo: string }> = {
@@ -49,6 +55,15 @@ export class UpdateHolidayDto {
   @ApiPropertyOptional() @IsOptional() @IsString() @IsNotEmpty() @MaxLength(120) name?: string;
   @ApiPropertyOptional({ enum: ['national', 'school'] }) @IsOptional() @IsIn(['national', 'school']) kind?: 'national' | 'school';
 }
+export class EmergencyDto {
+  @ApiProperty({ example: '2026-10-09' }) @IsDateString() date!: string;
+  @ApiProperty({ example: 'Mất điện toàn khu vực' }) @IsString() @IsNotEmpty() @MaxLength(500) reason!: string;
+  @ApiPropertyOptional({ example: 'Nghỉ đột xuất' }) @IsOptional() @IsString() @IsNotEmpty() @MaxLength(120) name?: string;
+  @ApiPropertyOptional({ default: false }) @IsOptional() @IsBoolean() dryRun?: boolean;
+}
+export class ReminderDto {
+  @ApiPropertyOptional({ default: false, description: 'Gửi ngay cả khi không phải đầu tháng 12 / đã gửi' }) @IsOptional() @IsBoolean() force?: boolean;
+}
 export class YearDto {
   @ApiProperty({ example: 2027 }) @IsInt() @Min(2000) @Max(2100) year!: number;
 }
@@ -60,14 +75,14 @@ export class TemplateDto extends YearDto {
 @ApiBearerAuth()
 @Controller('holidays')
 export class HolidaysController {
-  constructor(private ds: DataSource, private absences: AbsencesService) {}
+  constructor(private ds: DataSource, private absences: AbsencesService, private notify: NotificationsService, private reminder: HolidayReminderService) {}
 
   private async views(rows: Holiday[]) {
     const ids = [...new Set(rows.flatMap((h) => [h.createdBy, h.confirmedBy]).filter(Boolean) as string[])];
     const us = ids.length ? await this.ds.getRepository(User).find({ where: { id: In(ids) }, select: { id: true, name: true } }) : [];
     const n = new Map(us.map((x) => [x.id, x.name]));
     return rows.map((h) => ({
-      id: h.id, date: h.date, name: h.name, kind: h.kind, status: h.status,
+      id: h.id, date: h.date, name: h.name, kind: h.kind, status: h.status, reason: h.reason,
       createdBy: h.createdBy, createdByName: h.createdBy ? n.get(h.createdBy) ?? null : null, createdAt: h.createdAt,
       confirmedBy: h.confirmedBy ? { id: h.confirmedBy, name: n.get(h.confirmedBy) ?? null } : null,
       confirmedByName: h.confirmedBy ? n.get(h.confirmedBy) ?? null : null, confirmedAt: h.confirmedAt,
@@ -161,6 +176,61 @@ export class HolidaysController {
     });
     for (const c of cancelled) await this.absences.notifyHolidayCancellations([c], c.name);
     return { year: dto.year, created: await this.views(rows), skipped: items.filter((i) => existing.has(i.date)).map(({ date, name }) => ({ date, name })) };
+  }
+
+  /**
+   * Emergency closure: confirmed holiday kind=emergency even if attendance exists. Existing attendance rows are kept;
+   * children without a row get an 'absent' row; every absent child gets the meal refunded (present/late ones ate → no refund).
+   * All parents get an important push. dryRun → counts only (for the confirm dialog).
+   */
+  @Post('emergency') @Roles('admin')
+  async emergency(@CurrentUser() u: AuthUser, @Body() dto: EmergencyDto, @Req() req: Request) {
+    const date = dto.date, reason = dto.reason.trim(), name = dto.name?.trim() || 'Nghỉ đột xuất';
+    if (!reason) throw new AppError(400, 'VALIDATION_ERROR', 'Cần nhập lý do', { details: ['reason should not be empty'] });
+    if (isWeekend(date)) throw BadRequest('Ngày cuối tuần – trường vốn đã nghỉ', 'NOT_SCHOOL_DAY');
+    const count = async (m: { query: DataSource['query'] }) => {
+      const kids: { id: string; class_id: string; status: string | null }[] = await m.query(`
+        SELECT c.id, c.class_id, a.status::text AS status FROM children c LEFT JOIN attendance a ON a.child_id = c.id AND a.date = $1
+        WHERE c.class_id IS NOT NULL AND (c.enrolled_at IS NULL OR c.enrolled_at <= $1)
+          AND (c.status = 'active' OR (c.status = 'withdrawn' AND c.leave_date >= $1))`, [date]);
+      const parents: { id: string }[] = await m.query(`
+        SELECT DISTINCT u.id FROM users u JOIN guardians g ON g.user_id = u.id JOIN children c ON c.id = g.child_id
+        WHERE u.is_active AND u.role = 'parent' AND c.status = 'active'`);
+      const present = kids.filter((k) => k.status === 'present' || k.status === 'late');
+      return { kids, parents: parents.map((p) => p.id), present, refunded: kids.filter((k) => !present.includes(k)), missing: kids.filter((k) => !k.status) };
+    };
+    const existing = await this.ds.getRepository(Holiday).findOne({ where: { date } });
+    if (existing) throw new AppError(409, 'HOLIDAY_EXISTS', 'Ngày này đã là ngày nghỉ', { dates: [date], id: existing.id, status: existing.status });
+    if (dto.dryRun) {
+      const c = await count(this.ds);
+      return { dryRun: true, date, name, reason, parentsToNotify: c.parents.length, childrenRefunded: c.refunded.length, childrenPresent: c.present.length, childrenTotal: c.kids.length };
+    }
+    const { h, c } = await this.ds.transaction(async (m) => {
+      const h = await m.save(Holiday, m.create(Holiday, { date, name, kind: 'emergency', status: 'confirmed', reason, createdBy: u.id, confirmedBy: u.id, confirmedAt: new Date() }));
+      const c = await count(m);
+      const note = `Trường nghỉ đột xuất: ${reason}`.slice(0, 500);
+      for (const k of c.missing) {
+        const a = await m.save(Attendance, m.create(Attendance, { childId: k.id, classId: k.class_id, date, status: 'absent', note, notifiedInAdvance: false, recordedBy: u.id }));
+        await m.save(AttendanceHistory, m.create(AttendanceHistory, { attendanceId: a.id, action: 'create', oldStatus: null, oldNote: null, oldNotified: null,
+          newStatus: 'absent', newNote: note, newNotified: false, changedBy: u.id }));
+      }
+      await recordAudit(m, u, { action: 'holiday.emergency', entityType: 'holiday', entityId: h.id, before: null,
+        after: { date, name, kind: 'emergency' }, reason, ip: req.ip,
+        data: { childrenRefunded: c.refunded.length, childrenPresent: c.present.length, absentRowsCreated: c.missing.length, parentsNotified: c.parents.length } });
+      return { h, c };
+    }).catch((e) => {
+      if (e?.driverError?.code === '23505') throw new AppError(409, 'HOLIDAY_EXISTS', 'Ngày này đã là ngày nghỉ', { dates: [date] });
+      throw e;
+    });
+    await this.notify.send(c.parents, { type: 'school_closure', important: true, title: `${name} ngày ${date.split('-').reverse().join('/')}`, body: reason,
+      data: { holidayId: h.id, date, reason }, refId: h.id, push: { requireInteraction: true, tag: `closure-${date}` } });
+    return { holiday: (await this.views([h]))[0], parentsNotified: c.parents.length, childrenRefunded: c.refunded.length, childrenPresent: c.present.length, absentRowsCreated: c.missing.length };
+  }
+
+  /** Early-December reminder to admins to finalize next year's holidays (normally automatic, Dec 1–7). */
+  @Post('reminder') @Roles('admin') @HttpCode(200)
+  async runReminder(@Body() dto: ReminderDto) {
+    return this.reminder.run(new Date(), !!dto.force);
   }
 
   @Post(':id/confirm') @Roles('admin') @HttpCode(200)

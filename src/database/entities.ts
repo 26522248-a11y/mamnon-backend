@@ -493,7 +493,8 @@ export class Announcement {
 }
 
 export type NotificationType = 'announcement' | 'pickup_request' | 'pickup_decision' | 'invoice' | 'payment' | 'picked_up' | 'picker_registration' | 'picker_decision' | 'contact_change'
-  | 'absence_report' | 'absence_cancelled' | 'absence_overridden' | 'kitchen_change' | 'medicine_request' | 'medicine_given' | 'late_pickup';
+  | 'absence_report' | 'absence_cancelled' | 'absence_overridden' | 'kitchen_change' | 'medicine_request' | 'medicine_given' | 'late_pickup'
+  | 'late_pickup_cancelled' | 'medicine_cancelled' | 'school_closure' | 'holiday_reminder' | 'photo_consent';
 @Entity('notifications')
 @Index('ix_notifications_user_read', ['userId', 'readAt'])
 @Index('ix_notifications_announcement', ['announcementId'])
@@ -666,7 +667,9 @@ export class Holiday {
   @PrimaryGeneratedColumn('uuid') id!: string;
   @Index({ unique: true }) @Column({ type: 'date' }) date!: string;
   @Column({ length: 120 }) name!: string;
-  @Column({ type: 'varchar', length: 10, default: 'school' }) kind!: 'national' | 'school';
+  /** emergency = sudden closure on a day that may already have attendance (POST /holidays/emergency). */
+  @Column({ type: 'varchar', length: 10, default: 'school' }) kind!: 'national' | 'school' | 'emergency';
+  @Column({ type: 'text', nullable: true }) reason!: string | null;
   /** pending = template lunar holiday awaiting admin confirmation: NO effect until confirmed. */
   @Column({ type: 'varchar', length: 10, default: 'confirmed' }) status!: 'pending' | 'confirmed';
   @Column({ name: 'confirmed_by', type: 'uuid', nullable: true }) confirmedBy!: string | null;

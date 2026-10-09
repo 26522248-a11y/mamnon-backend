@@ -9,6 +9,7 @@ import { memoryStorage } from 'multer';
 import { DataSource, EntityManager } from 'typeorm';
 import { AuthUser, CurrentUser, Roles } from '../common/auth';
 import { todayStr } from '../common/dates';
+import { recordAudit } from '../common/audit';
 import { AppError } from '../common/errors';
 import { Child, ClassRoom, Guardian, User } from '../database/entities';
 import {
@@ -42,7 +43,7 @@ const TEMP_HASH_COST = 8;
 
 interface Plan {
   row: number; action: 'create' | 'skip_duplicate'; existingChildId?: string; existingChildStatus?: string;
-  child: { fullName: string; dob: string; gender: 'M' | 'F'; className: string; classAction: 'existing' | 'create'; allergies: string | null; healthNotes: string | null; address: string | null; enrolledAt: string };
+  child: { fullName: string; dob: string; gender: 'M' | 'F'; className: string; classAction: 'existing' | 'create'; allergies: string | null; healthNotes: string | null; address: string | null; enrolledAt: string; photoConsent: boolean };
   guardians: { slot: 1 | 2; fullName: string; relation: string; phone: string; canPickup: boolean; account: 'create' | 'existing' | 'existing_inactive' | 'skip'; username: string; accountName?: string; linkConfirmed?: boolean }[];
 }
 
@@ -125,7 +126,10 @@ export class ImportsController {
       for (const p of a.plans) {
         if (p.action === 'skip_duplicate') { results.push({ row: p.row, result: 'skipped_duplicate', childId: p.existingChildId!, fullName: p.child.fullName, className: p.child.className, guardians: [] }); continue; }
         const c = await m.save(Child, m.create(Child, { fullName: p.child.fullName, dob: p.child.dob, gender: p.child.gender, classId: classId.get(nameKey(p.child.className))!,
-          allergies: p.child.allergies, healthNotes: p.child.healthNotes, address: p.child.address, enrolledAt: p.child.enrolledAt, status: 'active' }));
+          allergies: p.child.allergies, healthNotes: p.child.healthNotes, address: p.child.address, enrolledAt: p.child.enrolledAt, status: 'active',
+          photoConsent: p.child.photoConsent, ...(p.child.photoConsent ? { photoConsentUpdatedAt: new Date(), photoConsentUpdatedBy: u.id } : {}) }));
+        if (p.child.photoConsent) await recordAudit(m, u, { action: 'child.photo_consent', entityType: 'child', entityId: c.id, childId: c.id,
+          before: { consent: false }, after: { consent: true, source: 'import' }, reason: `Nhập Excel dòng ${p.row}` });
         for (const g of p.guardians) {
           await m.save(Guardian, m.create(Guardian, { childId: c.id, fullName: g.fullName, relation: g.relation, phone: g.phone, canPickup: g.canPickup, userId: accounts.get(g.phone)!.userId }));
           guardiansCreated++;
@@ -264,7 +268,7 @@ export class ImportsController {
       plans.push({
         row: r.row, action: existing ? 'skip_duplicate' : 'create', ...(existing ? { existingChildId: existing.id, existingChildStatus: existing.status } : {}),
         child: { fullName: r.fullName, dob: r.dob, gender: r.gender, className: classAction === 'existing' ? classRows.find((c) => nameKey(c.name) === ck)!.name : r.className, classAction,
-          allergies: r.allergies, healthNotes: r.healthNotes, address: r.address, enrolledAt: r.enrolledAt ?? today },
+          allergies: r.allergies, healthNotes: r.healthNotes, address: r.address, enrolledAt: r.enrolledAt ?? today, photoConsent: r.photoConsent },
         // skipped duplicate: nothing is created or linked for its guardians
         guardians: r.guardians.map((g) => {
           const ex = users.get(g.phone);

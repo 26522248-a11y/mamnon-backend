@@ -19,6 +19,13 @@ import {
   PickupRequest, RefundPayout,
 } from '../database/entities';
 
+/**
+ * Attendance row whose meal is refunded: a parent-reported (before cutoff) absence, or any absence on a confirmed
+ * EMERGENCY closure day (children not present that day; present ones eat → no refund).
+ */
+export const MEAL_REFUNDABLE = `a.status = 'absent' AND (a.notified_in_advance OR EXISTS (
+  SELECT 1 FROM holidays h WHERE h.date = a.date AND h.kind = 'emergency' AND h.status = 'confirmed'))`;
+
 const PERIOD = /^\d{4}-(0[1-9]|1[0-2])$/;
 const MAX_VND = 1_000_000_000;
 export const DUE_DAY = 10;
@@ -321,7 +328,7 @@ export class FeesController {
       const from = `${prevPeriod(prevPeriod(prevPeriod(period)))}-01`;
       const days: { id: string; date: string }[] = await m.query(`
         SELECT a.id, to_char(a.date, 'YYYY-MM-DD') AS date FROM attendance a
-        WHERE a.child_id = $1 AND a.status = 'absent' AND a.notified_in_advance AND a.date >= $2 AND a.date < $3
+        WHERE a.child_id = $1 AND ${MEAL_REFUNDABLE} AND a.date >= $2 AND a.date < $3
           AND NOT EXISTS (SELECT 1 FROM meal_refunds r WHERE r.attendance_id = a.id AND ${MR_ACTIVE})
         ORDER BY a.date`, [child.id, from, `${period}-01`]);
       if (days.length) {
@@ -345,7 +352,7 @@ export class FeesController {
       SELECT r.id, r.amount, to_char(a.date, 'YYYY-MM-DD') AS date FROM meal_refunds r JOIN attendance a ON a.id = r.attendance_id
       LEFT JOIN invoice_lines l ON l.id = r.invoice_line_id LEFT JOIN invoices i ON i.id = l.invoice_id
       WHERE r.child_id = $1 AND ${MR_ACTIVE} AND (r.invoice_line_id IS NULL OR i.status <> 'void')
-        AND NOT (a.status = 'absent' AND a.notified_in_advance)
+        AND NOT (${MEAL_REFUNDABLE})
       ORDER BY a.date`, [childId]);
   }
 
@@ -639,7 +646,7 @@ export class FeesController {
         const from = `${prevPeriod(prevPeriod(prevPeriod(lm)))}-01`;
         const days: { id: string; date: string }[] = await m.query(`
           SELECT a.id, to_char(a.date, 'YYYY-MM-DD') AS date FROM attendance a
-          WHERE a.child_id = $1 AND a.status = 'absent' AND a.notified_in_advance AND a.date >= $2 AND a.date <= $3
+          WHERE a.child_id = $1 AND ${MEAL_REFUNDABLE} AND a.date >= $2 AND a.date <= $3
             AND NOT EXISTS (SELECT 1 FROM meal_refunds r WHERE r.attendance_id = a.id AND ${MR_ACTIVE})
           ORDER BY a.date`, [id, from, addDays(lmFrom, -1)]);
         if (days.length) {
