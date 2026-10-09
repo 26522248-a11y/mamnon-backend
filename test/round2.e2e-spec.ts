@@ -13,6 +13,7 @@ import { AppModule, configureApp } from '../src/app.module';
 import { addDays, todayStr } from '../src/common/dates';
 import { seed } from '../src/database/seed';
 import { refundEligibleFor } from '../src/absences/absences.service';
+import { parentReported } from './helpers/absence';
 
 const dow = (d: string) => new Date(d + 'T00:00:00Z').getUTCDay();
 /** first date >= d with the given weekday (1 = Monday … 5 = Friday) */
@@ -72,6 +73,35 @@ describe('round 2 batch 1: absences, cutoff, holidays (e2e)', () => {
     await as('admin').put(`/classes/${s.classes.c1.id}/attendance`, { date: d, items: [{ childId: kid, status: 'present' }] }).expect(200);
     await as('admin').put(`/classes/${s.classes.c1.id}/attendance`, { date: d, items: [{ childId: kid, status: 'absent', notifiedInAdvance: true, absenceReason: 'sick' }] }).expect(200);
     expect(await att(kid, d)).toMatchObject({ status: 'absent', notified_in_advance: false, absence_reason: 'sick' });
+  });
+
+  it('P1 absence reason: missing = unchanged, null = clear, switch to present/plain absent clears; excused = parent report OR teacher reason; refund independent', async () => {
+    const c1 = s.classes.c1.id, kid = s.kids[6].id, d = addDays(todayStr(), -1);
+    const row = async (childId = kid, date = d) => (await as('admin').get(`/classes/${c1}/attendance?date=${date}`).expect(200)).body.items.find((x: any) => x.childId === childId);
+    const put = (item: any, date = d) => as('admin').put(`/classes/${c1}/attendance`, { date, items: [{ childId: kid, ...item }] }).expect(200);
+    await put({ status: 'absent', absenceReason: 'sick' });
+    expect(await row()).toMatchObject({ status: 'absent', absenceReason: 'sick', excused: true, excusedBy: 'teacher', refundEligible: false, notifiedInAdvance: false });
+    await put({ status: 'absent', note: 'gọi điện' }); // reason missing → unchanged
+    expect(await row()).toMatchObject({ absenceReason: 'sick', excused: true, note: 'gọi điện' });
+    await put({ status: 'absent', absenceReason: null }); // null → cleared
+    expect(await row()).toMatchObject({ status: 'absent', absenceReason: null, excused: false, excusedBy: null });
+    expect(await att(kid, d)).toMatchObject({ absence_reason: null });
+    await put({ status: 'absent', absenceReason: 'family' });
+    await put({ status: 'present' }); // switch to present clears
+    expect(await row()).toMatchObject({ status: 'present', absenceReason: null, excused: false });
+    await put({ status: 'absent' }); // switch to plain absent: no reason
+    expect(await row()).toMatchObject({ status: 'absent', absenceReason: null, excused: false });
+    await put({ status: 'late', absenceReason: 'other' }); // reason ignored unless absent
+    expect(await row()).toMatchObject({ status: 'late', absenceReason: null });
+    expect((await as('admin').put(`/classes/${c1}/attendance`, { date: d, items: [{ childId: kid, status: 'absent', absenceReason: 'bored' }] }).expect(400)).body.code).toBe('VALIDATION_ERROR');
+
+    // parent report before cutoff: excused (by parent) + refundable, independent of the teacher's reason
+    const k2 = s.kids[12].id, d2 = addDays(todayStr(), -2);
+    await parentReported(ds, k2, [d2], 'sick');
+    await as('admin').put(`/classes/${c1}/attendance`, { date: d2, items: [{ childId: k2, status: 'absent', absenceReason: null }] }).expect(200);
+    expect(await row(k2, d2)).toMatchObject({ status: 'absent', absenceReason: null, excused: true, excusedBy: 'parent', refundEligible: true });
+    await as('admin').put(`/classes/${c1}/attendance`, { date: d2, items: [{ childId: k2, status: 'absent', absenceReason: 'family' }] }).expect(200);
+    expect(await row(k2, d2)).toMatchObject({ absenceReason: 'family', excused: true, excusedBy: 'parent', refundEligible: true });
   });
 
   it('multi-day report skips weekends, writes excused attendance, notifies teachers; access + validation; partial and full cancel with history', async () => {

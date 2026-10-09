@@ -4,7 +4,7 @@ Delivery: **batch 1** = §0, §1, §2, §5, §11 (+ audit_events). **batch 2** =
 
 Scope: parent messages, holidays, medicine, late pickup, photo consent.
 
-Base `/api/v1`. Errors `{code, message, details?}`. Dates `YYYY-MM-DD` (VN calendar), times `HH:MM` (VN wall clock),
+Base `/api/v1`. Errors `{code, message, details?}`. **All list endpoints return an object `{items: [...]}`** (never a bare array). Dates `YYYY-MM-DD` (VN calendar), times `HH:MM` (VN wall clock),
 timestamps ISO-8601 UTC. Names follow `mamnon-web/src/lib/messages-api.ts`; differences are marked **≠ FE guess**.
 
 ## 0. Config (env → `GET /settings/school`, public)
@@ -39,7 +39,7 @@ type Absence = { id; childId; childName; classId; className; from; to; reason: A
 | Method | Path | Who | Notes |
 |---|---|---|---|
 | POST | `/children/:id/absences` `{from, to?, reason, note?}` | parent of child; admin | `to` defaults to `from`; `from ≥ today` (else 400 `DATE_IN_PAST`), `to ≥ from`, ≤ 31 days. Days that are weekend / holiday / already marked present are skipped (`skippedDates`); none left → 400 `NO_SCHOOL_DAYS`. A day already covered by another active report → 409 `ABSENCE_OVERLAP` (`details` = dates). Withdrawn child → 400 `CHILD_WITHDRAWN`. 201 `Absence`. Class teachers + kitchen roles notified. |
-| GET | `/children/:id/absences?from&to` | parent of child, class teacher, admin | default `from` = today − 30, all reports overlapping the range (incl. cancelled), newest first |
+| GET | `/children/:id/absences?from&to` | parent of child, class teacher, admin | → `{items: Absence[]}`; default `from` = today − 30, all reports overlapping the range (incl. cancelled), newest first |
 | GET | `/absences/:id` | same | |
 | DELETE | `/absences/:id` (optional body/query `dates[]`) | parent of child; admin | cancels the cancellable days (all, or the given ones). 200 `Absence`. Nothing cancellable → 409 `CANCEL_AFTER_CUTOFF`. |
 | GET | `/absences/config` | public | `{cutoff, latestPickup}` (FE fallback) |
@@ -62,7 +62,7 @@ type Holiday = { id; date; name; kind: 'national' | 'school'; status: 'pending' 
 
 | Method | Path | Who | Notes |
 |---|---|---|---|
-| GET | `/holidays?year=` or `?from&to` (`&status=pending|confirmed`) | any logged-in user | sorted by date, includes `status` |
+| GET | `/holidays?year=` or `?from&to` (`&status=pending|confirmed`) | any logged-in user | → `{items: Holiday[]}` sorted by date, includes `status` |
 | POST | `/holidays` `{date, to?, name, kind?}` | admin | range `date..to` (≤ 60 days) → one **confirmed** row per day; existing dates → 409 `HOLIDAY_EXISTS` (`details.dates`). Recorded attendance (not from a parent report) on a date → 409 `HOLIDAY_HAS_ATTENDANCE`. Active parent absence days on those dates are cancelled automatically (parents notified). |
 | PATCH | `/holidays/:id` `{name?, kind?}` | admin | |
 | DELETE | `/holidays/:id` | admin | 204 |
@@ -84,7 +84,7 @@ type Medicine = { id; childId; childName; classId; date; name; dose; note: strin
 | Method | Path | Who | Notes |
 |---|---|---|---|
 | POST | `/children/:id/medicines` (multipart or JSON) | parent of child; admin | `date` (default today; ≥ today, not holiday/weekend), `name*`, `dose*` (e.g. "5 ml"), `doses*` = JSON `[{time:"11:30", label?}]` **or** repeated `times` fields; 1–6 doses, distinct times; `note?`, `photo?` (JPG/PNG/HEIC→JPEG). Missing dose/doses → 400 `VALIDATION_ERROR`. 201 `Medicine`. Class teachers notified. |
-| GET | `/children/:id/medicines?date=` | parent of child, class teacher, admin | default today |
+| GET | `/children/:id/medicines?date=` | parent of child, class teacher, admin | → `{items: Medicine[]}`; default today (or `?from&to`) |
 | GET | `/medicines/:id/photo` | same | |
 | DELETE | `/medicines/:id` | parent of child; admin | only while no dose given → else 409 `DOSE_ALREADY_GIVEN`; 200 `Medicine` (status cancelled) |
 | POST | `/medicine-doses/:id/given` `{note?}` | class teacher; admin | atomic; second mark → **409 `ALREADY_GIVEN`** (`details.givenAt/givenByName`); other class → 403; cancelled medicine → 409 `MEDICINE_CANCELLED`; only on the medicine's date (else 400 `NOT_TODAY`). Returns `Medicine`. Parents notified "Bé đã được cho uống thuốc X lúc HH:MM (Cô Y)". |
@@ -100,15 +100,17 @@ type LatePickup = { id; childId; childName; classId; date; time; pickerName: str
 | Method | Path | Who | Notes |
 |---|---|---|---|
 | POST | `/children/:id/late-pickups` `{date, time, pickerName?, note?}` | parent of child; admin | `date ≥ today`, school day; `schoolOpenTime ≤ time ≤ latestPickupTime` else 400 `OUTSIDE_SCHOOL_HOURS`; today: time must be in the future (400 `TIME_PASSED`). One active per child+date → 409 `LATE_PICKUP_EXISTS`. Teachers notified. |
-| GET | `/children/:id/late-pickups?from&to` | parent, class teacher, admin | default from = today − 30 |
+| GET | `/children/:id/late-pickups?from&to` | parent, class teacher, admin | → `{items: LatePickup[]}`; default from = today − 30 |
 | DELETE | `/late-pickups/:id` | parent of child; admin | 200 `LatePickup` (cancelled) |
 
 `pickerName` is information only – the hand-over still follows the pickup-safety rules (guardian / approved picker / two-step request).
 
 ## 5. Attendance changes
 
-- Sheet item (GET/PUT `/classes/:id/attendance`) gains: `excused: boolean`, `absenceReason: AbsenceReason|null`, `absenceId: string|null`, `absenceNote`, `refundEligible: boolean`. Response gains `holiday: {id,name}|null` and `skipped: [{childId, reason}]` (PUT only).
-- PUT item gains `absenceReason?` (`sick|family|other`, for `absent`) and `overrideAbsence?: boolean`.
+- Sheet item (GET/PUT `/classes/:id/attendance`) gains: `excused: boolean`, `excusedBy: 'parent'|'teacher'|null`, `absenceReason: AbsenceReason|null`, `absenceId: string|null`, `absenceNote`, `refundEligible: boolean`. Response gains `holiday: {id,name}|null` and `skipped: [{childId, reason}]` (PUT only).
+- PUT item gains `absenceReason?` (`sick|family|other|null`, for `absent`) and `overrideAbsence?: boolean`.
+- **absenceReason semantics** (hotfix): sent value wins, `null` = clear; **missing = unchanged** while the status stays `absent`. Switching to `present`/`late` clears the reason; switching to `absent` without a reason = plain absent (no reason).
+- **Excused ("Vắng có phép") = active parent report OR a teacher-given reason** (`excusedBy`). `refundEligible` is independent: only a parent report before the cutoff (a teacher reason never makes a day refundable).
 - **Refund eligibility is computed by the server.** `notifiedInAdvance` is still accepted (compatibility) but ignored: an absence is refundable only when a parent report made before the cutoff exists for that day. A teacher marking "absent" (even "có phép") = no refund. Rows saved before round 2 keep their stored flag while they stay absent. Response `notifiedInAdvance`/`refundEligible` show the computed value.
 - **"Tất cả có mặt" never overrides an excused absence**: an item `present|late` for a child with an excused day is skipped (`skipped[{childId, reason:'EXCUSED_ABSENCE'}]`) unless `overrideAbsence: true` (explicit per-child action) → see §1 override rule.
 - Confirmed holiday → 400 `SCHOOL_HOLIDAY` (pending holidays: no effect).

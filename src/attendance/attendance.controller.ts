@@ -33,7 +33,9 @@ class AttendanceItemDto {
   @ApiPropertyOptional({ example: 'Ốm, mẹ xin nghỉ' }) @IsOptional() @IsString() @MaxLength(500) note?: string;
   @ApiPropertyOptional({ deprecated: true, description: 'Bỏ qua (giữ để tương thích): máy chủ tự tính – chỉ báo vắng của phụ huynh trước giờ chốt mới được hoàn tiền ăn' })
   @IsOptional() @IsBoolean() notifiedInAdvance?: boolean;
-  @ApiPropertyOptional({ enum: ABSENCE_REASONS, description: 'Lý do vắng (status=absent)' }) @IsOptional() @IsIn(ABSENCE_REASONS) absenceReason?: AbsenceReason;
+  @ApiPropertyOptional({ enum: ABSENCE_REASONS, nullable: true,
+    description: 'Lý do vắng (status=absent) → "Vắng có phép". Không gửi = giữ nguyên (nếu trạng thái không đổi); null = xóa lý do. Chuyển sang có mặt/muộn, hoặc chuyển sang vắng mà không kèm lý do = không lý do.' })
+  @IsOptional() @IsIn(ABSENCE_REASONS) absenceReason?: AbsenceReason | null;
   @ApiPropertyOptional({ default: false, description: 'Chủ động ghi đè báo vắng của phụ huynh (có mặt): không hoàn tiền, báo bếp. "Tất cả có mặt" KHÔNG gửi cờ này.' })
   @IsOptional() @IsBoolean() overrideAbsence?: boolean;
 }
@@ -156,10 +158,12 @@ export class AttendanceController {
         attendanceId: r?.id ?? null, childId: k.id, fullName: k.fullName, allergies: k.allergies ?? undefined,
         status: r?.status ?? null, note: r?.note ?? null, notifiedInAdvance: r?.notifiedInAdvance ?? false, recorded: !!r,
         photoConsent: k.photoConsent,
-        excused: !!exBy.get(k.id) && !exBy.get(k.id)!.overridden && r?.status === 'absent',
+        // excused ("có phép") = active parent report OR teacher-given reason; refundEligible is independent
+        excused: r?.status === 'absent' && ((!!exBy.get(k.id) && !exBy.get(k.id)!.overridden) || !!r?.absenceReason),
+        excusedBy: r?.status !== 'absent' ? null : exBy.get(k.id) && !exBy.get(k.id)!.overridden ? 'parent' : r?.absenceReason ? 'teacher' : null,
         excusedOverridden: !!exBy.get(k.id)?.overridden,
         absenceId: exBy.get(k.id)?.absenceId ?? r?.absenceId ?? null,
-        absenceReason: r?.absenceReason ?? (exBy.get(k.id) && !exBy.get(k.id)!.overridden ? exBy.get(k.id)!.absence.reason : null),
+        absenceReason: r ? r.absenceReason : null,
         absenceNote: exBy.get(k.id)?.absence.note ?? null,
         refundEligible: r?.status === 'absent' && !!r?.notifiedInAdvance,
         pickup: r?.pickup ? pickupView(r.pickup) : null,
@@ -213,13 +217,19 @@ export class AttendanceController {
         // Refund eligibility is computed by the server (client notifiedInAdvance is ignored): only a parent report made before
         // the cutoff makes an absence refundable. Legacy rows (before round 2) keep their stored flag while they stay absent.
         let notified = i.status === 'absent' && !!old && old.status === 'absent' && !old.absenceId && old.notifiedInAdvance;
-        let absenceReason: AbsenceReason | null = i.status === 'absent' ? i.absenceReason ?? old?.absenceReason ?? null : null;
+        // reason: only for absent. Sent value (incl. null = clear) wins; missing = unchanged while the status stays absent,
+        // a switch to absent without a reason = plain absent (no reason).
+        const statusChanged = !old || old.status !== i.status;
+        let absenceReason: AbsenceReason | null = i.status !== 'absent' ? null
+          : i.absenceReason !== undefined ? i.absenceReason ?? null
+          : statusChanged ? null : old?.absenceReason ?? null;
         let absenceId: string | null = old?.absenceId ?? null;
         if (day && !day.overridden) {
           if (i.status !== 'absent' && !i.overrideAbsence) { skipped.push({ childId: i.childId, reason: 'EXCUSED_ABSENCE' }); continue; }
           if (i.status === 'absent') {
             // excused day stays excused: refund flag comes from the report, not from the sheet
-            notified = day.refundEligible; absenceReason = i.absenceReason ?? reasons.get(day.absenceId) ?? null; absenceId = day.absenceId;
+            notified = day.refundEligible; absenceId = day.absenceId;
+            if (i.absenceReason === undefined && !old) absenceReason = reasons.get(day.absenceId) ?? null;
             if (i.note === undefined) note = old?.note ?? null;
           } else {
             await this.absences.override(m, day, u.id);
