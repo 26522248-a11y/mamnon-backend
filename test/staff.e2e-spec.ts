@@ -166,10 +166,20 @@ describe('Staff module (e2e)', () => {
       classes: [{ id: s.classes.c1.id }] });
     expect(['full', 'late']).toContain(r.status);
     expect(r.week).toHaveLength(5);
-    expect((await as('gv1').post('/staff/me/check-in', {}).expect(409)).body.code).toBe('ALREADY_CHECKED_IN');
-    const o = (await as('gv1').post('/staff/me/check-out', {}).expect(200)).body;
-    expect(o).toMatchObject({ canCheckOut: false, checkOutAt: expect.any(String) });
-    expect((await as('gv1').post('/staff/me/check-out', {}).expect(409)).body.code).toBe('ALREADY_CHECKED_OUT');
+    // G11: second tap is idempotent (same time), checkout right after check-in is refused
+    const again = (await as('gv1').post('/staff/me/check-in', {}).expect(200)).body;
+    expect(again).toMatchObject({ alreadyCheckedIn: true, checkInAt: r.checkInAt, canCheckOut: true });
+    const soon = (await as('gv1').post('/staff/me/check-out', {}).expect(409)).body;
+    expect(soon.code).toBe('CHECKOUT_TOO_SOON'); expect(soon.message).toContain('vừa vào ca');
+    await ds.query(`UPDATE staff_checkins SET check_in_at = check_in_at - interval '2 hours' WHERE user_id = $1 AND date = $2`, [s.users.gv1.id, T]);
+    const [o, o2] = await Promise.all([as('gv1').post('/staff/me/check-out', {}), as('gv1').post('/staff/me/check-out', {})]);
+    expect([o.status, o2.status]).toEqual([200, 200]);
+    expect(o.body).toMatchObject({ canCheckOut: false, checkOutAt: expect.any(String) });
+    expect(o.body.checkOutAt).toBe(o2.body.checkOutAt);
+    expect(new Date(o.body.checkOutAt).getTime()).toBeGreaterThan(new Date(o.body.checkInAt).getTime());
+    const o3 = (await as('gv1').post('/staff/me/check-out', {}).expect(200)).body;
+    expect(o3).toMatchObject({ alreadyCheckedOut: true, checkOutAt: o.body.checkOutAt });
+    expect((await ds.query(`SELECT count(*)::int n FROM staff_checkins WHERE user_id = $1 AND date = $2`, [s.users.gv1.id, T]))[0].n).toBe(1);
     // accountant can check in too (no shift → full)
     expect((await as('ketoan').post('/staff/me/check-in', {}).expect(200)).body).toMatchObject({ status: 'full', shifts: [] });
     // own report only

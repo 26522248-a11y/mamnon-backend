@@ -125,6 +125,9 @@ const annualAllowance = () => Number(process.env.ANNUAL_LEAVE_DAYS ?? 12) || 12;
 /** Monday..Friday of the week containing `d` */
 const weekOf = (d: string) => { const mon = addDays(d, 1 - isoWeekday(d)); return { from: mon, to: addDays(mon, 4) }; };
 
+/** G11: Ra ca phải sau Vào ca ít nhất 1 phút (chặn bấm 2 lần liền tay). */
+const MIN_SHIFT_MS = 60_000;
+
 /**
  * Quản lý giáo viên (đợt 3): ca làm, xếp ca, chấm công vào/ra ca, nghỉ phép, trông thay.
  * Admin quản lý; giáo viên / kế toán xem của mình và tự chấm công. Kế toán không xếp ca.
@@ -234,23 +237,30 @@ export class StaffController {
   async checkIn(@CurrentUser() u: AuthUser, @Body() dto: CheckDto, @Req() req: Request) {
     const now = new Date(), date = vnDate(now);
     const repo = this.ds.getRepository(StaffCheckin);
-    const ex = await repo.findOneBy({ userId: u.id, date });
-    if (ex?.checkInAt) throw new AppError(409, 'ALREADY_CHECKED_IN', `Đã vào ca lúc ${vnHm(ex.checkInAt)}`);
-    if (ex) await repo.update(ex.id, { checkInAt: now, checkInIp: req.ip?.slice(0, 64) ?? null, note: dto.note ?? ex.note });
-    else await repo.createQueryBuilder().insert().values({ userId: u.id, date, checkInAt: now, checkInIp: req.ip?.slice(0, 64) ?? null, note: dto.note ?? null }).orIgnore().execute();
-    return this.today(u);
+    // G11: idempotent – a second tap / retry returns the current state (200, alreadyCheckedIn) and never moves the time.
+    const before = await repo.findOneBy({ userId: u.id, date });
+    const already = !!before?.checkInAt;
+    if (!already) {
+      await repo.createQueryBuilder().insert().values({ userId: u.id, date, checkInAt: now, checkInIp: req.ip?.slice(0, 64) ?? null, note: dto.note ?? null }).orIgnore().execute();
+      await this.ds.query(`UPDATE staff_checkins SET check_in_at = $3, check_in_ip = $4 WHERE user_id = $1 AND date = $2 AND check_in_at IS NULL`, [u.id, date, now, req.ip?.slice(0, 64) ?? null]);
+    }
+    return { ...(await this.today(u)), alreadyCheckedIn: already };
   }
 
   @Post('me/check-out') @Roles('admin', 'teacher', 'accountant') @HttpCode(200)
-  @ApiOperation({ summary: 'Ra ca. Chưa vào ca → 409 NOT_CHECKED_IN; đã ra → 409 ALREADY_CHECKED_OUT.' })
+  @ApiOperation({ summary: 'Ra ca. Chưa vào ca → 409 NOT_CHECKED_IN; vừa vào ca chưa đủ 1 phút → 409 CHECKOUT_TOO_SOON; đã ra ca → 200 (alreadyCheckedOut, giờ ra giữ nguyên).' })
   async checkOut(@CurrentUser() u: AuthUser, @Body() dto: CheckDto, @Req() req: Request) {
     const now = new Date(), date = vnDate(now);
     const repo = this.ds.getRepository(StaffCheckin);
     const ex = await repo.findOneBy({ userId: u.id, date });
-    if (!ex?.checkInAt) throw new AppError(409, 'NOT_CHECKED_IN', 'Chưa vào ca hôm nay');
-    if (ex.checkOutAt) throw new AppError(409, 'ALREADY_CHECKED_OUT', `Đã ra ca lúc ${vnHm(ex.checkOutAt)}`);
-    await repo.update(ex.id, { checkOutAt: now, checkOutIp: req.ip?.slice(0, 64) ?? null, ...(dto.note ? { note: dto.note } : {}) });
-    return this.today(u);
+    if (!ex?.checkInAt) throw new AppError(409, 'NOT_CHECKED_IN', 'Chưa vào ca hôm nay, bấm "Vào ca" trước');
+    if (ex.checkOutAt) return { ...(await this.today(u)), alreadyCheckedOut: true };
+    if (now.getTime() - ex.checkInAt.getTime() < MIN_SHIFT_MS)
+      throw new AppError(409, 'CHECKOUT_TOO_SOON', `Cô vừa vào ca lúc ${vnHm(ex.checkInAt)}, chưa ra ca được ngay. Nếu bấm nhầm thì không sao, giờ vào ca vẫn được giữ.`);
+    // conditional update: two concurrent taps record one checkout only
+    await this.ds.query(`UPDATE staff_checkins SET check_out_at = $2, check_out_ip = $3${dto.note ? ', note = $4' : ''} WHERE id = $1 AND check_out_at IS NULL`,
+      dto.note ? [ex.id, now, req.ip?.slice(0, 64) ?? null, dto.note] : [ex.id, now, req.ip?.slice(0, 64) ?? null]);
+    return { ...(await this.today(u)), alreadyCheckedOut: false };
   }
 
   @Get('me/today') @Roles('admin', 'teacher', 'accountant')
