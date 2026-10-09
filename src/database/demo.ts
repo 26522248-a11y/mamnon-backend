@@ -177,7 +177,7 @@ export async function demoLoad(ds: DataSource) {
       await m.save(StaffCheckin, { date: d, userId: uid, checkInAt: new Date(`${d}T${late ? '07:18' : '06:5' + ci}:00+07:00`),
         checkOutAt: d < today ? new Date(`${d}T16:4${ci}:00+07:00`) : null, source: 'self' } as any);
     }
-    await m.save(StaffLeave, { userId: t2.id, fromDate: tomorrow, toDate: tomorrow, reason: 'Việc gia đình', status: 'approved', requestedBy: t2.id, decidedBy: admin.id, decidedAt: new Date() } as any);
+    await m.save(StaffLeave, { userId: t2.id, fromDate: tomorrow, toDate: tomorrow, reason: 'Việc gia đình', type: 'personal', session: 'full', days: 1, handoverNote: 'Bé Bống ngủ trưa hay khóc, cho ôm gấu', status: 'approved', requestedBy: t2.id, decidedBy: admin.id, decidedAt: new Date() } as any);
     await m.save(StaffSubstitution, { date: tomorrow, shiftId: shift.id, classId: classes[2].id, absentUserId: t2.id, substituteUserId: t1.id, reason: 'Cô Mai nghỉ phép', createdBy: admin.id } as any);
 
     // ── finance entries (one pending > 10M)

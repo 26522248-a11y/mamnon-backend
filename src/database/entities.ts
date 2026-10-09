@@ -518,7 +518,7 @@ export class AnnouncementAttachment {
 export type NotificationType = 'announcement' | 'pickup_request' | 'pickup_decision' | 'invoice' | 'payment' | 'picked_up' | 'picker_registration' | 'picker_decision' | 'contact_change'
   | 'absence_report' | 'absence_cancelled' | 'absence_overridden' | 'kitchen_change' | 'medicine_request' | 'medicine_given' | 'late_pickup'
   | 'late_pickup_cancelled' | 'medicine_cancelled' | 'school_closure' | 'holiday_reminder' | 'photo_consent'
-  | 'transfer_claim' | 'transfer_claim_rejected' | 'staff_leave' | 'staff_leave_decision' | 'substitution' | 'finance_approval' | 'finance_decision';
+  | 'transfer_claim' | 'transfer_claim_rejected' | 'staff_leave' | 'staff_leave_decision' | 'substitution' | 'finance_approval' | 'finance_decision' | 'substitute_teacher';
 @Entity('notifications')
 @Index('ix_notifications_user_read', ['userId', 'readAt'])
 @Index('ix_notifications_announcement', ['announcementId'])
@@ -854,6 +854,8 @@ export class StaffCheckin {
   @UpdateDateColumn({ name: 'updated_at', type: 'timestamptz' }) updatedAt!: Date;
 }
 
+export type StaffLeaveType = 'sick' | 'annual' | 'personal';
+export type LeaveSession = 'full' | 'morning' | 'afternoon';
 export type StaffLeaveStatus = 'pending' | 'approved' | 'rejected' | 'cancelled';
 /** Nghỉ phép (date range, whole days). */
 @Entity('staff_leaves')
@@ -864,6 +866,14 @@ export class StaffLeave {
   @Column({ name: 'from_date', type: 'date' }) fromDate!: string;
   @Column({ name: 'to_date', type: 'date' }) toDate!: string;
   @Column({ type: 'text' }) reason!: string;
+  /** G6: sick | annual | personal */
+  @Column({ type: 'varchar', length: 10, default: 'personal' }) type!: StaffLeaveType;
+  /** G6: full | morning | afternoon (half-day only for a single date) */
+  @Column({ type: 'varchar', length: 10, default: 'full' }) session!: LeaveSession;
+  /** Work days deducted (Mon–Fri minus confirmed school holidays; half day = 0.5) */
+  @Column({ type: 'numeric', precision: 5, scale: 1, default: 0, transformer: { to: (v: number) => v, from: (v: string | null) => (v === null ? 0 : Number(v)) } }) days!: number;
+  /** G7: handover note for the substitute teacher */
+  @Column({ name: 'handover_note', type: 'text', nullable: true }) handoverNote!: string | null;
   @Index() @Column({ length: 12, default: 'pending' }) status!: StaffLeaveStatus;
   @Column({ name: 'requested_by', type: 'uuid', nullable: true }) requestedBy!: string | null;
   @Column({ name: 'decided_by', type: 'uuid', nullable: true }) decidedBy!: string | null;
@@ -889,6 +899,9 @@ export class StaffSubstitution {
   @ManyToOne(() => User, { onDelete: 'CASCADE' }) @JoinColumn({ name: 'substitute_user_id' }) substituteUser!: User;
   @Column({ type: 'text', nullable: true }) reason!: string | null;
   @Column({ type: 'text', nullable: true }) note!: string | null;
+  /** G7/G8: full | morning | afternoon */
+  @Column({ type: 'varchar', length: 10, default: 'full' }) session!: LeaveSession;
+  @Index() @Column({ name: 'leave_id', type: 'uuid', nullable: true }) leaveId!: string | null;
   @Column({ name: 'created_by', type: 'uuid', nullable: true }) createdBy!: string | null;
   @CreateDateColumn({ name: 'created_at', type: 'timestamptz' }) createdAt!: Date;
 }

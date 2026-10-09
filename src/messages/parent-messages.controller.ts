@@ -73,9 +73,16 @@ export class ParentMessagesController {
 
   private async childFor(u: AuthUser, id: string, write: boolean) {
     const c = await this.access.getChildOr404(id);
-    const ok = u.role === 'admin' || (u.role === 'parent' && u.childIds.includes(id)) || (!write && u.role === 'teacher' && !!c.classId && u.classIds.includes(c.classId));
+    const ok = u.role === 'admin' || (u.role === 'parent' && u.childIds.includes(id)) || (!write && u.role === 'teacher' && !!c.classId && u.classIds.includes(c.classId))
+      || (!write && await this.substituteToday(u, c.classId));
     if (!ok) throw Forbidden('Không có quyền với trẻ này');
     return c;
+  }
+  /** G8: a teacher covering the class today (staff_substitutions) acts as class teacher for medicines / parent messages, today only. */
+  private async substituteToday(u: AuthUser, classId: string | null) {
+    if (u.role !== 'teacher' || !classId) return false;
+    const [{ n }] = await this.ds.query(`SELECT COUNT(*)::int AS n FROM staff_substitutions WHERE substitute_user_id = $1 AND class_id = $2 AND date = $3`, [u.id, classId, todayStr()]);
+    return Number(n) > 0;
   }
   private async assertSchoolDay(date: string) {
     if (isWeekend(date)) throw BadRequest('Ngày nghỉ cuối tuần', 'NOT_SCHOOL_DAY');
@@ -178,7 +185,8 @@ export class ParentMessagesController {
     if (!dose) throw NotFound('Không tìm thấy lần uống thuốc');
     const med = dose.medicine;
     const child = await this.access.getChildOr404(med.childId);
-    if (!this.access.canOperateClass(u, child.classId)) throw Forbidden('Không có quyền với lớp này');
+    const covering = !this.access.canOperateClass(u, child.classId) && await this.substituteToday(u, child.classId);
+    if (!this.access.canOperateClass(u, child.classId) && !covering) throw Forbidden('Không có quyền với lớp này');
     if (med.cancelledAt) throw new AppError(409, 'MEDICINE_CANCELLED', 'Phụ huynh đã hủy dặn thuốc này');
     if (med.date !== todayStr()) throw BadRequest('Chỉ đánh dấu cho bé uống trong ngày dặn thuốc', 'NOT_TODAY');
     const now = new Date();
@@ -191,8 +199,8 @@ export class ParentMessagesController {
         { givenAt: cur.givenAt, givenBy: cur.givenBy, givenByName: cur.givenBy ? n.get(cur.givenBy) ?? null : null });
     }
     await this.notify.send(await this.notify.parentIdsOfChildren([med.childId]), {
-      type: 'medicine_given', title: `${child.fullName} đã được cho uống thuốc ${med.name} lúc ${vnNowHM(now)}`,
-      body: `${u.name}${dose.label ? ` – ${dose.label}` : ''} (${med.dose})`, data: { medicineId: med.id, doseId: id, childId: med.childId, givenAt: now }, refId: med.id,
+      type: 'medicine_given', title: `Bé ${child.fullName.split(' ').pop()} đã được cho uống thuốc lúc ${vnNowHM(now)}`,
+      body: `${med.name}, ${med.dose}${dose.label ? ` – ${dose.label}` : ''} · ${u.name}${covering ? ' (cô trông thay)' : ''}`, data: { medicineId: med.id, doseId: id, childId: med.childId, givenAt: now }, refId: med.id,
     });
     return (await this.medicineViews([med]))[0];
   }
@@ -259,7 +267,7 @@ export class ParentMessagesController {
   @Get('classes/:id/parent-messages') @Roles('teacher', 'admin')
   async feed(@CurrentUser() u: AuthUser, @Param('id', ParseUUIDPipe) id: string, @Query() q: DateQ) {
     await this.access.getClassOr404(id);
-    this.access.assertOperateClass(u, id);
+    if (!this.access.canOperateClass(u, id) && !((!q.date || q.date === todayStr()) && await this.substituteToday(u, id))) this.access.assertOperateClass(u, id);
     const date = q.date ?? todayStr();
     const kidIds: string[] = (await this.ds.query(`SELECT id FROM children WHERE class_id = $1`, [id])).map((r: any) => r.id);
     const holiday = (await confirmedHolidays(this.ds.manager, date, date)).get(date) ?? null;

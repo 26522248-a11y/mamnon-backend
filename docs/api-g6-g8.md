@@ -21,7 +21,7 @@ Nhãn: `sick` "Ốm", `annual` "Phép năm", `personal` "Việc riêng". Buổi:
 { "type": "sick", "fromDate": "2026-10-12", "toDate": "2026-10-12", "session": "morning",
   "reason": "Sốt", "handoverNote": "Bé Na dị ứng sữa; 10h cho cả lớp tập văn nghệ" }
 ```
-- `type` bắt buộc → 400 `VALIDATION_ERROR` nếu thiếu/sai. `session` mặc định `full`; `morning/afternoon` với nhiều ngày → 400 `HALF_DAY_SINGLE_DATE`.
+- `type` sai → 400 `VALIDATION_ERROR`; thiếu → `personal` (tương thích đơn cũ; web luôn gửi). `session` mặc định `full`; `morning/afternoon` với nhiều ngày → 400 `HALF_DAY_SINGLE_DATE`.
 - `annual` vượt số ngày còn lại → 409 `ANNUAL_EXCEEDED` (`details: { remaining }`).
 - Trùng đơn chờ/đã duyệt cùng buổi → 409 `LEAVE_OVERLAP` (sáng + chiều cùng ngày không trùng nhau).
 - 201 → `LeaveView` (dưới). Thông báo BGH (G7).
