@@ -226,6 +226,34 @@ describe('PM round 3: void rules, withdrawal & payout, discount cap, account sec
     });
   });
 
+  describe('reports: thu chi + Excel export', () => {
+    const bin = (req: any) => req.buffer(true).parse((res: any, cb: any) => { const d: Buffer[] = []; res.on('data', (c: Buffer) => d.push(c)); res.on('end', () => cb(null, Buffer.concat(d))); });
+    it('finance has income/expense by month (payout counted as chi); low attendance flagged', async () => {
+      const f = (await as('ketoan').get(`/reports/finance?fromMonth=${thisMonth}&toMonth=${thisMonth}`).expect(200)).body;
+      const row = f.cashFlowByMonth.find((x: any) => x.month === thisMonth);
+      expect(row.expense).toBeGreaterThan(0); // payout made in the withdrawal test
+      expect(row.net).toBe(row.income - row.expense);
+      const a = (await as('admin').get(`/reports/attendance?fromMonth=${thisMonth}`).expect(200)).body;
+      expect(a.lowThreshold).toBe(80);
+      for (const it of a.items) expect(it.low).toBe(it.attendanceRate !== null && it.attendanceRate < 80);
+    });
+    it('xlsx exports with the same permissions as the reports', async () => {
+      for (const [who, url, code] of [['admin', '/reports/attendance/export', 200], ['admin', '/reports/enrollment/export', 200], ['ketoan', '/reports/finance/export', 200],
+        ['admin', '/reports/finance/export', 200], ['ketoan', '/reports/attendance/export', 403], ['ketoan', '/reports/enrollment/export', 403], ['gv1', '/reports/finance/export', 403], ['ph1', '/reports/finance/export', 403]] as const) {
+        const r = await bin(request(http).get('/api/v1' + url).set('Authorization', `Bearer ${tokens[who]}`)).expect(code);
+        if (code === 200) {
+          expect(r.headers['content-type']).toMatch(/spreadsheetml/);
+          expect(r.headers['content-disposition']).toMatch(/attachment; filename=".+\.xlsx"/);
+          expect(r.body.subarray(0, 2).toString()).toBe('PK');
+          const ExcelJS = require('exceljs'); const wb = new ExcelJS.Workbook(); await wb.xlsx.load(r.body);
+          expect(wb.worksheets.length).toBeGreaterThan(0);
+          expect(String(wb.worksheets[0].getCell(1, 1).value)).toMatch(/Báo cáo/);
+        }
+      }
+      await request(http).get('/api/v1/reports/finance/export').expect(401);
+    });
+  });
+
   describe('account security', () => {
     it('mustChangePassword: admin-created and admin-reset accounts; cleared by change-password', async () => {
       const u = await as('admin').post('/users', { username: 'kt2', password: 'abc123', name: 'Kế toán 2', role: 'accountant' }).expect(201);
