@@ -11,7 +11,7 @@ import { recordAudit } from '../common/audit';
 import { AuthUser, CurrentUser, Roles } from '../common/auth';
 import { todayStr } from '../common/dates';
 import { AppError, BadRequest, Forbidden, NotFound } from '../common/errors';
-import { contentTypeOf, detectImage, keyOf, removeImage, saveImage, sendStored } from '../common/upload';
+import { contentDisposition, contentTypeOf, decodeOriginalName, detectImage, keyOf, removeImage, saveImage, sendStored } from '../common/upload';
 import { storage } from '../common/storage';
 import { FinanceCategory, FinanceEntry, User } from '../database/entities';
 import { NotificationsService } from '../notifications/notifications.service';
@@ -65,7 +65,7 @@ class DecisionDto {
 /** Receipt: JPG/PNG/HEIC (stored as image) or PDF, checked by content. */
 async function saveReceipt(file?: Express.Multer.File): Promise<{ key: string; name: string }> {
   if (!file?.buffer?.length) throw BadRequest('Thiếu file hoá đơn', 'INVALID_FILE');
-  const name = (file.originalname || 'hoa-don').slice(0, 200);
+  const name = (decodeOriginalName(file.originalname) || 'hoa-don').slice(0, 200); // B29: UTF-8, not latin1
   if (file.buffer.subarray(0, 5).toString('latin1') === '%PDF-') {
     const key = `${crypto.randomUUID()}.pdf`;
     await storage().put(key, file.buffer, contentTypeOf(key)); // B27
@@ -249,7 +249,7 @@ export class FinanceController {
     const e = await this.load(this.ds.manager, id);
     if (!e.receiptKey) throw NotFound('Khoản này chưa có hoá đơn');
     const name = e.receiptName || keyOf(e.receiptKey);
-    await sendStored(res, e.receiptKey, 'Không tìm thấy file hoá đơn', { 'Content-Disposition': `inline; filename*=UTF-8''${encodeURIComponent(name)}` });
+    await sendStored(res, e.receiptKey, 'Không tìm thấy file hoá đơn', { 'Content-Disposition': contentDisposition('inline', name) });
   }
 
   @Post('entries/:id/approve') @Roles('admin') @HttpCode(200)

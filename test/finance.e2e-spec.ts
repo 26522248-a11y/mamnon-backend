@@ -11,6 +11,7 @@ import { DataSource } from 'typeorm';
 import { AppModule, configureApp } from '../src/app.module';
 import { todayStr } from '../src/common/dates';
 import { seed } from '../src/database/seed';
+import { asciiFileName, contentDisposition, decodeOriginalName } from '../src/common/upload';
 
 /** Thu chi tổng: học phí tự cộng từ phiếu thu, chi theo nhóm + hoá đơn, chi > 10tr chờ BGH duyệt; chỉ BGH + kế toán. */
 describe('Finance (e2e)', () => {
@@ -74,11 +75,34 @@ describe('Finance (e2e)', () => {
     expect((await as('ketoan').upload(`/finance/entries/${e2.id}/receipt`).attach('receipt', pdf, 'dien.pdf').expect(200)).body).toMatchObject({ hasReceipt: true, receiptName: 'dien.pdf' });
     expect((await as('ketoan').get(`/finance/entries/${e2.id}/receipt`).expect(200)).headers['content-type']).toMatch(/application\/pdf/);
     expect((await as('ketoan').upload(`/finance/entries/${e2.id}/receipt`).attach('receipt', Buffer.from('hello'), 'x.pdf').expect(400)).body.code).toBe('INVALID_FILE');
+    // B29: Vietnamese file name survives upload (UTF-8, not latin1 mojibake) and download (RFC 5987 + ASCII fallback)
+    const vn = 'hóa đơn điện.pdf';
+    const up = (await as('ketoan').upload(`/finance/entries/${e2.id}/receipt`).attach('receipt', pdf, vn).expect(200)).body;
+    expect(up).toMatchObject({ hasReceipt: true, receiptName: vn });
+    expect((await ds.query(`SELECT receipt_name FROM finance_entries WHERE id = $1`, [e2.id]))[0].receipt_name).toBe(vn);
+    expect((await as('admin').get('/finance/transactions').expect(200)).body.items.find((x: any) => x.id === e2.id)?.receiptName ?? vn).toBe(vn);
+    const dl = await as('ketoan').get(`/finance/entries/${e2.id}/receipt`).expect(200);
+    expect(dl.headers['content-type']).toMatch(/application\/pdf/);
+    expect(dl.headers['content-disposition']).toBe(`inline; filename="hoa don dien.pdf"; filename*=UTF-8''h%C3%B3a%20%C4%91%C6%A1n%20%C4%91i%E1%BB%87n.pdf`);
+    expect(decodeURIComponent(dl.headers['content-disposition'].split("UTF-8''")[1])).toBe(vn);
     // validation
     await as('ketoan').post('/finance/entries', { date: T, title: 'X', amount: -5, categoryId: cat['Tiền ăn'] }).expect(400);
     expect((await as('ketoan').post('/finance/entries', { date: '2999-01-01', title: 'Tương lai', amount: 100000, categoryId: cat['Tiền ăn'] }).expect(400)).body.code).toBe('DATE_IN_FUTURE');
     expect((await as('ketoan').post('/finance/entries', { kind: 'in', date: T, title: 'Sai nhóm', amount: 100000, categoryId: cat['Tiền ăn'] }).expect(400)).body.code).toBe('INVALID_CATEGORY');
     await as('ketoan').get(`/finance/entries/${e.id}/receipt`).expect(200);
+  });
+
+  it('B29 helpers: latin1→UTF-8 decode is idempotent; ASCII fallback never breaks the header', () => {
+    const vn = 'Hoá đơn tháng 9 – Đức.pdf';
+    expect(decodeOriginalName(Buffer.from(vn, 'utf8').toString('latin1'))).toBe(vn); // what multer hands over
+    expect(decodeOriginalName(vn)).toBe(vn); // already UTF-8 → unchanged
+    expect(decodeOriginalName('plain.pdf')).toBe('plain.pdf');
+    expect(decodeOriginalName('caf\u00e9.pdf')).toBe('caf\u00e9.pdf'); // real latin1 (invalid UTF-8) → unchanged
+    expect(decodeOriginalName(undefined)).toBe('');
+    expect(asciiFileName(vn)).toBe('Hoa don thang 9 _ Duc.pdf');
+    expect(asciiFileName('"a";b\\c.pdf')).toBe('_a__b_c.pdf');
+    expect(asciiFileName('漢字')).toBe('__');
+    expect(contentDisposition('attachment', "it's (1).pdf")).toBe(`attachment; filename="it_s _1_.pdf"; filename*=UTF-8''it%27s%20%281%29.pdf`);
   });
 
   it('expenses > 10M by the accountant wait for admin approval; excluded from totals until approved', async () => {
