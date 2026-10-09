@@ -1,5 +1,5 @@
 import {
-  Body, Controller, Delete, Get, HttpCode, Param, ParseUUIDPipe, Patch, Post, Query, Res, UploadedFile, UseInterceptors,
+  Body, Controller, Delete, Get, HttpCode, Param, ParseUUIDPipe, Patch, Post, Query, Req, Res, UploadedFile, UseInterceptors,
 } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { ApiBearerAuth, ApiBody, ApiConsumes, ApiProperty, ApiPropertyOptional, ApiTags, PartialType } from '@nestjs/swagger';
@@ -9,10 +9,10 @@ import { Type } from 'class-transformer';
 import {
   IsBoolean, IsDateString, IsIn, IsInt, IsOptional, IsString, IsUUID, Matches, Max, MaxLength, Min, MinLength, ValidateNested,
 } from 'class-validator';
-import { Response } from 'express';
+import { Request, Response } from 'express';
 import { Between, DataSource, Repository } from 'typeorm';
 import { AccessService } from '../common/access';
-import { audit } from '../common/audit';
+import { recordAudit } from '../common/audit';
 import { AuthUser, CurrentUser, Roles } from '../common/auth';
 import { AppError, BadRequest, Forbidden, NotFound } from '../common/errors';
 import { Attendance, Child, ClassRoom, Guardian, User } from '../database/entities';
@@ -236,7 +236,7 @@ export class ChildrenController {
    * even when it has no child left (reported as accountHasNoChildren). Audit-logged with the reason.
    */
   @Delete(':id/guardians/:guardianId') @Roles('admin') @HttpCode(200)
-  async removeGuardian(@CurrentUser() u: AuthUser, @Param('id', ParseUUIDPipe) id: string, @Param('guardianId', ParseUUIDPipe) guardianId: string, @Body() dto: RemoveGuardianDto) {
+  async removeGuardian(@CurrentUser() u: AuthUser, @Param('id', ParseUUIDPipe) id: string, @Param('guardianId', ParseUUIDPipe) guardianId: string, @Body() dto: RemoveGuardianDto, @Req() req: Request) {
     const child = await this.access.getChildOr404(id);
     return this.ds.transaction(async (m) => {
       const g = await m.findOne(Guardian, { where: { id: guardianId, childId: id }, relations: { user: true }, lock: { mode: 'pessimistic_write', tables: ['guardians'] } });
@@ -252,7 +252,8 @@ export class ChildrenController {
         removed: { guardianId: g.id, childId: id, childName: child.fullName, fullName: g.fullName, relation: g.relation, phone: g.phone, canPickup: g.canPickup },
         account, reason: dto.reason.trim(),
       };
-      audit('guardian.remove', u, result);
+      await recordAudit(m, u, { action: 'guardian.remove', entityType: 'guardian', entityId: g.id, childId: id, before: result.removed, after: null,
+        reason: result.reason, ip: req.ip ?? null, data: { account, removed: result.removed } }); // 'removed' kept for the jsonl format of 4ff7386
       return result;
     });
   }

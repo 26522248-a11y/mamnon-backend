@@ -17,7 +17,7 @@ import { Response } from 'express';
 import { Attendance, AttendanceHistory, AttStatus, AuthorizedPicker, Child, ClassRoom, Guardian, Pickup, PickupCallAttempt, PickupRequest, User } from '../database/entities';
 import { ESCALATE_MINUTES, maskId, PickupSafetyService } from '../pickup/pickup-safety.service';
 import { cleanName, parsePhone } from '../imports/children-import';
-import { audit } from '../common/audit';
+import { recordAudit } from '../common/audit';
 import { Request } from 'express';
 import { isExpired, requestBlockers } from '../pickup/request-rules';
 
@@ -346,7 +346,8 @@ export class AttendanceController {
       out = { fullName: r.pickerName, relation: r.relation, idNumber: r.pickerIdNumber, photoUrl: r.photoUrl ? `/api/v1/pickup-requests/${r.id}/photo` : null, phones: [r.pickerPhone] };
     }
     await this.safety.logSensitive(u, q.kind, q.id, a.childId, 'handover', a.id, req.ip ?? null);
-    audit('pickup.identity_view', u, { kind: q.kind, entityId: q.id, childId: a.childId, attendanceId: a.id, ip: req.ip ?? null });
+    await recordAudit(this.ds, u, { action: 'pickup.identity_view', entityType: q.kind, entityId: q.id, childId: a.childId, ip: req.ip ?? null,
+      data: { field: 'id_number', purpose: 'handover', attendanceId: a.id } });
     return { kind: q.kind, id: q.id, attendanceId: a.id, childId: a.childId, ...out, audited: true };
   }
 
@@ -459,7 +460,8 @@ export class AttendanceController {
   @Post('pickup-requests/:id/parent-decision') @Roles('admin') @HttpCode(200)
   async parentOnBehalf(@CurrentUser() u: AuthUser, @Param('id', ParseUUIDPipe) id: string, @Body() dto: OnBehalfDto) {
     const done = await this.safety.decideStep(u, id, 'parent', dto.decision === 'approve' ? 'approved' : 'rejected', { note: dto.note, channel: 'on_behalf', onBehalf: true });
-    audit('pickup_request.parent_on_behalf', u, { pickupRequestId: id, childId: done.childId, decision: dto.decision, note: dto.note });
+    await recordAudit(this.ds, u, { action: 'pickup_request.parent_on_behalf', entityType: 'pickup_request', entityId: id, childId: done.childId,
+      after: { parentStatus: done.parentStatus, status: done.status }, reason: dto.note });
     return this.staffView(done);
   }
 

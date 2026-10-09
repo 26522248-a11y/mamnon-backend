@@ -6,7 +6,7 @@ import { AuthUser, CurrentUser, Roles } from '../common/auth';
 import { addDays, todayStr } from '../common/dates';
 import { BadRequest, NotFound } from '../common/errors';
 import { PickupDuty, User } from '../database/entities';
-import { audit } from '../common/audit';
+import { recordAudit } from '../common/audit';
 
 export class AssignDutyDto {
   @ApiProperty() @IsUUID() userId!: string;
@@ -35,7 +35,7 @@ export class PickupDutiesController {
     await this.ds.createQueryBuilder().insert().into(PickupDuty).values(dates.map((date) => ({ date, userId: user.id, assignedBy: u.id, note: dto.note ?? null })))
       .orIgnore().execute();
     const rows = await this.ds.getRepository(PickupDuty).find({ where: { userId: user.id, date: In(dates) }, relations: { user: true }, order: { date: 'ASC' } });
-    audit('pickup_duty.assign', u, { userId: user.id, username: user.username, dates, note: dto.note ?? null });
+    await recordAudit(this.ds, u, { action: 'pickup_duty.assign', entityType: 'user', entityId: user.id, after: { dates, note: dto.note ?? null }, data: { username: user.username } });
     return rows.map(view);
   }
 
@@ -61,6 +61,6 @@ export class PickupDutiesController {
     const d = await this.ds.getRepository(PickupDuty).findOne({ where: { id } });
     if (!d) throw NotFound('Không tìm thấy lịch trực');
     await this.ds.getRepository(PickupDuty).delete(id);
-    audit('pickup_duty.remove', u, { dutyId: id, userId: d.userId, date: d.date });
+    await recordAudit(this.ds, u, { action: 'pickup_duty.remove', entityType: 'pickup_duty', entityId: id, before: { userId: d.userId, date: d.date }, after: null });
   }
 }

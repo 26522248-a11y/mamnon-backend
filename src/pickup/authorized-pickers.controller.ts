@@ -10,7 +10,7 @@ import { AppError, BadRequest, Forbidden, NotFound } from '../common/errors';
 import { imageUploadOptions, removeImage, saveImage, sendImage } from '../common/upload';
 import { AuthorizedPicker, AuthorizedPickerHistory, Child, ChildContactHistory, Guardian, User } from '../database/entities';
 import { cleanName, parsePhone, personKey } from '../imports/children-import';
-import { audit } from '../common/audit';
+import { recordAudit } from '../common/audit';
 import { NotificationsService } from '../notifications/notifications.service';
 import { ID_NUMBER_RE, maskId, PickupSafetyService } from './pickup-safety.service';
 
@@ -161,7 +161,7 @@ export class AuthorizedPickersController {
     await this.assertWrite(u, p.childId);
     await this.repo().update(id, { deletedAt: new Date(), deletedBy: u.id });
     await this.history(id, 'delete', snap(p), u.id);
-    audit('authorized_picker.delete', u, { pickerId: id, childId: p.childId, fullName: p.fullName, idNumber: maskId(p.idNumber) });
+    await recordAudit(this.ds, u, { action: 'authorized_picker.delete', entityType: 'authorized_picker', entityId: id, childId: p.childId, before: snap(p), after: null });
   }
 
   @Get('authorized-pickers/:id/history') @Roles('admin', 'teacher', 'parent')
@@ -192,7 +192,8 @@ export class AuthorizedPickersController {
     if (p.status !== 'pending') throw new AppError(409, 'ALREADY_DECIDED', 'Người đón hộ này đã được duyệt/từ chối');
     await this.repo().update(id, { status, decidedBy: u.id, decidedAt: new Date(), decisionNote: note?.trim() || null });
     await this.history(id, status === 'approved' ? 'approve' : 'reject', { note: note?.trim() || null }, u.id);
-    audit(`authorized_picker.${status === 'approved' ? 'approve' : 'reject'}`, u, { pickerId: id, childId: p.childId, fullName: p.fullName, idNumber: maskId(p.idNumber), note: note?.trim() || null });
+    await recordAudit(this.ds, u, { action: `authorized_picker.${status === 'approved' ? 'approve' : 'reject'}`, entityType: 'authorized_picker', entityId: id, childId: p.childId,
+      before: { status: p.status }, after: { status, fullName: p.fullName, relation: p.relation, idNumber: maskId(p.idNumber) }, reason: note?.trim() || null });
     const parents = await this.notify.parentIdsOfChildren([p.childId]);
     await this.notify.send(parents, { type: 'picker_decision', refId: id, title: `Người đón hộ ${p.fullName} ${status === 'approved' ? 'đã được duyệt' : 'bị từ chối'}`,
       body: status === 'approved' ? `${p.fullName} (${p.relation}) có thể đón bé ${p.child.fullName}.` : `Lý do: ${note}`, data: { authorizedPickerId: id, childId: p.childId, status } });
@@ -256,8 +257,8 @@ export class ContactPhonesController {
     await this.ds.transaction(async (m) => {
       await m.getRepository(Child).update(id, { contactPhone1: phone1, contactPhone2: phone2, contactPhonesUpdatedBy: u.id, contactPhonesUpdatedAt: new Date() });
       await m.getRepository(ChildContactHistory).insert({ childId: id, before, after: { phone1, phone2 }, changedBy: u.id });
+      await recordAudit(m, u, { action: 'child.contact_phones', entityType: 'child', entityId: id, childId: id, before, after: { phone1, phone2 } });
     });
-    audit('child.contact_phones', u, { childId: id, before, after: { phone1, phone2 } });
     if (u.role === 'parent') {
       const admins = await this.ds.getRepository(User).find({ where: { role: 'admin', isActive: true }, select: { id: true } });
       await this.notify.send(admins.map((a) => a.id), { type: 'contact_change', refId: id, title: `PH đổi số liên hệ đón bé ${c.fullName}`,

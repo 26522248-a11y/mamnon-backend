@@ -22,3 +22,32 @@ export function audit(action: string, actor: { id: string; username: string }, d
   }
   return entry;
 }
+
+export interface AuditInput {
+  action: string;
+  entityType: string;
+  entityId?: string | null;
+  childId?: string | null;
+  before?: Record<string, unknown> | null;
+  after?: Record<string, unknown> | null;
+  reason?: string | null;
+  ip?: string | null;
+  data?: Record<string, unknown> | null;
+}
+type Actor = { id: string; username: string; role?: string };
+
+/**
+ * Persist an audit event in `audit_events` (primary; pass the transaction's EntityManager so it commits/rolls back with
+ * the change) and append it to logs/audit.jsonl (secondary). A DB failure propagates (the action must not happen unaudited).
+ */
+export async function recordAudit(db: { query: (sql: string, params?: unknown[]) => Promise<unknown> }, actor: Actor, ev: AuditInput) {
+  const j = (v: unknown) => (v === undefined || v === null ? null : JSON.stringify(v));
+  await db.query(
+    `INSERT INTO audit_events (actor_id, actor_username, actor_role, action, entity_type, entity_id, child_id, before, after, reason, ip, data, source)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,'api')`,
+    [actor.id, actor.username, actor.role ?? null, ev.action, ev.entityType, ev.entityId ?? null, ev.childId ?? null, j(ev.before), j(ev.after),
+      ev.reason ?? null, ev.ip?.slice(0, 64) ?? null, j(ev.data)]);
+  return audit(ev.action, actor, { persisted: true, entityType: ev.entityType, entityId: ev.entityId ?? null, childId: ev.childId ?? null,
+    ...(ev.before ? { before: ev.before } : {}), ...(ev.after ? { after: ev.after } : {}), ...(ev.reason ? { reason: ev.reason } : {}),
+    ...(ev.ip ? { ip: ev.ip } : {}), ...(ev.data ?? {}) });
+}

@@ -570,8 +570,39 @@ export class RefundPayout {
   @CreateDateColumn({ name: 'created_at', type: 'timestamptz' }) createdAt!: Date;
 }
 
+/**
+ * Generic audit trail for sensitive actions (guardian unlink, contact phone edits, CCCD views, authorized-picker decisions,
+ * duty roster, on-behalf decisions…). Written together with logs/audit.jsonl (secondary copy).
+ */
+@Entity('audit_events')
+@Index('ix_audit_events_child_created', ['childId', 'createdAt'])
+@Index('ix_audit_events_action_created', ['action', 'createdAt'])
+@Index('ix_audit_events_actor_created', ['actorId', 'createdAt'])
+export class AuditEvent {
+  @PrimaryGeneratedColumn('uuid') id!: string;
+  /** no FK: kept even if the user is deleted; actorUsername / actorRole are snapshots */
+  @Column({ name: 'actor_id', type: 'uuid', nullable: true }) actorId!: string | null;
+  @Column({ name: 'actor_username', type: 'varchar', length: 60, nullable: true }) actorUsername!: string | null;
+  @Column({ name: 'actor_role', type: 'varchar', length: 20, nullable: true }) actorRole!: string | null;
+  @Column({ length: 60 }) action!: string;
+  @Column({ name: 'entity_type', type: 'varchar', length: 40 }) entityType!: string;
+  @Column({ name: 'entity_id', type: 'varchar', length: 64, nullable: true }) entityId!: string | null;
+  @Column({ name: 'child_id', type: 'uuid', nullable: true }) childId!: string | null;
+  @Column({ type: 'jsonb', nullable: true }) before!: Record<string, unknown> | null;
+  @Column({ type: 'jsonb', nullable: true }) after!: Record<string, unknown> | null;
+  @Column({ type: 'text', nullable: true }) reason!: string | null;
+  @Column({ type: 'varchar', length: 64, nullable: true }) ip!: string | null;
+  /** other context (account info, dates…) */
+  @Column({ type: 'jsonb', nullable: true }) data!: Record<string, unknown> | null;
+  /** api | backfill_jsonl | backfill_sensitive_log */
+  @Column({ type: 'varchar', length: 30, default: 'api' }) source!: string;
+  /** idempotent backfill key (sha256 of the jsonl line / sensitive_access_logs id) */
+  @Index('uq_audit_events_dedupe', { unique: true }) @Column({ name: 'dedupe_key', type: 'varchar', length: 80, nullable: true }) dedupeKey!: string | null;
+  @Index() @CreateDateColumn({ name: 'created_at', type: 'timestamptz' }) createdAt!: Date;
+}
+
 export const ENTITIES = [
-  AuthorizedPicker, AuthorizedPickerHistory, ChildContactHistory, SensitiveAccessLog, PickupDuty, PickupCallAttempt, PushSubscription, NotificationDelivery,
+  AuthorizedPicker, AuthorizedPickerHistory, ChildContactHistory, AuditEvent, SensitiveAccessLog, PickupDuty, PickupCallAttempt, PushSubscription, NotificationDelivery,
   RefundPayout,
   MealRefund, InvoiceAudit,
   CreditTransaction,

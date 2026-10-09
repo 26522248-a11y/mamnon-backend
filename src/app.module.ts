@@ -19,6 +19,7 @@ import { AuthorizedPickersController, ContactPhonesController } from './pickup/a
 import { PickupDutiesController } from './pickup/duties.controller';
 import { PickupSafetyService } from './pickup/pickup-safety.service';
 import { PushController } from './pickup/push.controller';
+import { AuditController } from './audit/audit.controller';
 import { ImportsController } from './imports/imports.controller';
 import { ReportsController } from './reports/reports.controller';
 import { UsersController } from './users/users.controller';
@@ -49,7 +50,7 @@ class SettingsController {
     TypeOrmModule.forFeature(ENTITIES),
     JwtModule.register({}),
   ],
-  controllers: [HealthController, SettingsController, AuthController, ClassesController, ChildrenController, AttendanceController, DashboardController, FeesController, HealthNutritionController, NotificationsController, ReportsController, UsersController, ImportsController, AuthorizedPickersController, ContactPhonesController, PickupDutiesController, PushController],
+  controllers: [HealthController, SettingsController, AuthController, ClassesController, ChildrenController, AttendanceController, DashboardController, FeesController, HealthNutritionController, NotificationsController, ReportsController, UsersController, ImportsController, AuthorizedPickersController, ContactPhonesController, PickupDutiesController, PushController, AuditController],
   providers: [
     AccessService, UserContextService, NotificationsService, NotificationDispatcher, PickupSafetyService, LoginThrottleService,
     { provide: APP_GUARD, useClass: JwtAuthGuard },
