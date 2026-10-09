@@ -222,10 +222,20 @@ describe('round 2 batch 2/2b: medicine, late pickup, feed, notes, attention, pho
       expect((await as('admin').post('/holidays/emergency', { date: P }).expect(400)).body.code).toBe('VALIDATION_ERROR');
       expect((await as('admin').post('/holidays/emergency', { date: P, reason: '   ' }).expect(400)).body.code).toBe('VALIDATION_ERROR');
       await as('gv1').post('/holidays/emergency', { date: P, reason: 'x' }).expect(403);
+      // a child withdrawn today (last day >= P, no parent account) must not be counted anywhere
+      const gone = s.kids[29].id;
+      await as('admin').post(`/children/${gone}/withdraw`, { leaveDate: today, reason: 'Chuyển trường' }).expect(200);
       const [{ present }] = await ds.query(`SELECT COUNT(*) FILTER (WHERE a.status IN ('present','late'))::int AS present FROM attendance a JOIN children c ON c.id = a.child_id WHERE a.date = $1 AND c.status = 'active'`, [P]);
       const dry = (await as('admin').post('/holidays/emergency', { date: P, reason: 'Mất điện', dryRun: true }).expect(201)).body;
-      expect(dry).toMatchObject({ dryRun: true, childrenPresent: present, childrenTotal: 30 });
-      expect(dry.childrenRefunded).toBe(30 - present);
+      const [{ n: active, classed }] = await ds.query(`SELECT COUNT(*)::int n, COUNT(class_id)::int classed FROM children WHERE status = 'active'`);
+      expect(dry).toMatchObject({ dryRun: true, childrenPresent: present, childrenTotal: active });
+      expect(dry.childrenRefunded).toBe(classed - present);
+      expect(dry.childrenWithoutParent.map((x: any) => x.childId)).not.toContain(gone);
+      // total == dashboard's active-children total for that day; every number is active-only
+      const dash = (await as('admin').get(`/dashboard/summary?date=${P}`).expect(200)).body;
+      expect(dry.childrenTotal).toBe(dash.totalChildren);
+      expect(dry.childrenPresent).toBe(dash.present + dash.late);
+      expect(dry.childrenPresent + dry.childrenRefunded).toBeLessThanOrEqual(dash.totalChildren); // classless children get no attendance row
       expect(dry.parentsToNotify).toBeGreaterThanOrEqual(2);
       expect((await ds.query(`SELECT COUNT(*)::int n FROM holidays WHERE date = $1`, [P]))[0].n).toBe(0); // nothing written
       // children whose family has no parent account → must be phoned
@@ -246,7 +256,9 @@ describe('round 2 batch 2/2b: medicine, late pickup, feed, notes, attention, pho
       expect(r).toMatchObject({ childrenPresent: dry.childrenPresent, childrenRefunded: dry.childrenRefunded, parentsNotified: dry.parentsToNotify });
       const after = await ds.query(`SELECT child_id, status, notified_in_advance, note FROM attendance WHERE date = $1 ORDER BY child_id`, [P]);
       for (const b0 of before) expect(after.find((a: any) => a.child_id === b0.child_id)).toEqual(b0); // existing rows unchanged
-      expect(after).toHaveLength(30);
+      expect(after.filter((a: any) => a.child_id !== gone)).toHaveLength(classed);
+      expect(after.find((a: any) => a.child_id === gone)?.note ?? '').not.toContain('Trường nghỉ đột xuất'); // withdrawn child untouched
+      expect(r.childrenWithoutParentCount).toBe(noAcc);
       expect((await as('admin').post('/holidays/emergency', { date: P, reason: 'again' }).expect(409)).body.code).toBe('HOLIDAY_EXISTS');
       // audit + push
       const ev = (await as('admin').get(`/audit-events?action=holiday.emergency`).expect(200)).body.items;

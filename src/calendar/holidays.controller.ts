@@ -191,8 +191,7 @@ export class HolidaysController {
     const count = async (m: { query: DataSource['query'] }) => {
       const kids: { id: string; class_id: string; status: string | null }[] = await m.query(`
         SELECT c.id, c.class_id, a.status::text AS status FROM children c LEFT JOIN attendance a ON a.child_id = c.id AND a.date = $1
-        WHERE c.class_id IS NOT NULL AND (c.enrolled_at IS NULL OR c.enrolled_at <= $1)
-          AND (c.status = 'active' OR (c.status = 'withdrawn' AND c.leave_date >= $1))`, [date]);
+        WHERE c.status = 'active'`, [date]); // same population as /dashboard/summary totalChildren: active children only (withdrawn excluded, even if leave_date = that day)
       const parents: { id: string }[] = await m.query(`
         SELECT DISTINCT u.id FROM users u JOIN guardians g ON g.user_id = u.id JOIN children c ON c.id = g.child_id
         WHERE u.is_active AND u.role = 'parent' AND c.status = 'active'`);
@@ -205,7 +204,8 @@ export class HolidaysController {
           SELECT 1 FROM guardians g JOIN users u ON u.id = g.user_id WHERE g.child_id = c.id AND u.is_active AND u.role = 'parent')
         ORDER BY cl.name NULLS LAST, c.full_name`, [kids.map((k) => k.id)]);
       const present = kids.filter((k) => k.status === 'present' || k.status === 'late');
-      return { kids, noParent, parents: parents.map((p) => p.id), present, refunded: kids.filter((k) => !present.includes(k)), missing: kids.filter((k) => !k.status) };
+      // a child without a class cannot get an attendance row → no refund row either
+      return { kids, noParent, parents: parents.map((p) => p.id), present, refunded: kids.filter((k) => !present.includes(k) && (k.status || k.class_id)), missing: kids.filter((k) => !k.status && k.class_id) };
     };
     const existing = await this.ds.getRepository(Holiday).findOne({ where: { date } });
     if (existing) throw new AppError(409, 'HOLIDAY_EXISTS', 'Ngày này đã là ngày nghỉ', { dates: [date], id: existing.id, status: existing.status });
