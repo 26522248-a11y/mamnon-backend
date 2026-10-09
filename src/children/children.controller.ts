@@ -12,6 +12,7 @@ import {
 import { Response } from 'express';
 import { Between, DataSource, Repository } from 'typeorm';
 import { AccessService } from '../common/access';
+import { audit } from '../common/audit';
 import { AuthUser, CurrentUser, Roles } from '../common/auth';
 import { AppError, BadRequest, Forbidden, NotFound } from '../common/errors';
 import { Attendance, Child, ClassRoom, Guardian, User } from '../database/entities';
@@ -49,6 +50,9 @@ export class CreateGuardianDto {
   @ApiPropertyOptional({ description: 'Liên kết với tài khoản phụ huynh có sẵn' }) @IsOptional() @IsUUID() userId?: string;
   @ApiPropertyOptional({ type: ParentAccountDto, description: 'Tạo mới tài khoản phụ huynh (nhà trường cấp)' })
   @IsOptional() @ValidateNested() @Type(() => ParentAccountDto) account?: ParentAccountDto;
+}
+export class RemoveGuardianDto {
+  @ApiProperty({ example: 'Nhập Excel gắn nhầm SĐT của người khác' }) @IsString() @Matches(/\S/, { message: 'reason không được để trống' }) @MaxLength(500) reason!: string;
 }
 export class AttendanceSummaryQuery {
   @ApiProperty({ example: '2026-10', description: 'Tháng YYYY-MM' }) @Matches(/^\d{4}-(0[1-9]|1[0-2])$/) month!: string;
@@ -223,6 +227,33 @@ export class ChildrenController {
       const { account, ...rest } = dto;
       const g = await m.save(Guardian, m.create(Guardian, { ...rest, childId: id, userId, canPickup: dto.canPickup ?? true }));
       return { ...g, username: dto.account?.username ?? null };
+    });
+  }
+
+  /**
+   * Remove a guardian from a child (admin). Deletes the guardian record, so its parent account (if any) immediately loses
+   * access to this child (parent access = guardians.user_id, re-read on every request). The account itself is kept,
+   * even when it has no child left (reported as accountHasNoChildren). Audit-logged with the reason.
+   */
+  @Delete(':id/guardians/:guardianId') @Roles('admin') @HttpCode(200)
+  async removeGuardian(@CurrentUser() u: AuthUser, @Param('id', ParseUUIDPipe) id: string, @Param('guardianId', ParseUUIDPipe) guardianId: string, @Body() dto: RemoveGuardianDto) {
+    const child = await this.access.getChildOr404(id);
+    return this.ds.transaction(async (m) => {
+      const g = await m.findOne(Guardian, { where: { id: guardianId, childId: id }, relations: { user: true }, lock: { mode: 'pessimistic_write', tables: ['guardians'] } });
+      if (!g) throw NotFound('Không tìm thấy người giám hộ của trẻ này');
+      await m.delete(Guardian, { id: g.id });
+      let account: { userId: string; username: string; name: string; remainingChildren: string[]; accountHasNoChildren: boolean } | null = null;
+      if (g.userId) {
+        const rest: { full_name: string }[] = await m.query(
+          `SELECT DISTINCT c.full_name FROM guardians gg JOIN children c ON c.id = gg.child_id WHERE gg.user_id = $1 ORDER BY c.full_name`, [g.userId]);
+        account = { userId: g.userId, username: g.user?.username ?? '', name: g.user?.name ?? '', remainingChildren: rest.map((x) => x.full_name), accountHasNoChildren: rest.length === 0 };
+      }
+      const result = {
+        removed: { guardianId: g.id, childId: id, childName: child.fullName, fullName: g.fullName, relation: g.relation, phone: g.phone, canPickup: g.canPickup },
+        account, reason: dto.reason.trim(),
+      };
+      audit('guardian.remove', u, result);
+      return result;
     });
   }
 

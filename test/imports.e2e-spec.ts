@@ -2,6 +2,7 @@ process.env.DATABASE_URL = process.env.TEST_DATABASE_URL || 'postgres://mamnon:m
 process.env.JWT_ACCESS_SECRET = 'test-access';
 process.env.JWT_REFRESH_SECRET = 'test-refresh';
 process.env.UPLOAD_DIR = require('path').join(require('os').tmpdir(), 'mamnon-test-uploads');
+process.env.AUDIT_LOG_DIR = require('fs').mkdtempSync(require('path').join(require('os').tmpdir(), 'mamnon-audit-'));
 
 import { NestExpressApplication } from '@nestjs/platform-express';
 import { Test } from '@nestjs/testing';
@@ -274,6 +275,112 @@ describe('Excel import: children + guardians (e2e)', () => {
       ]);
       expect(ex.flat().some((x) => typeof x === 'string' && /^[A-Za-z2-9]{10}$/.test(x) && !x.startsWith('0'))).toBe(false);
     } finally { await ds.query(`UPDATE users SET is_active = true WHERE username = '0977111333'`); }
+  });
+
+  // ---- P0: phone of an existing parent account with a DIFFERENT name must never be linked silently ----
+  describe('P0 phone/name mismatch (never link a child to another person\'s account)', () => {
+    const upC = (buf: Buffer, qs: string, confirmLinks?: any, name = 'p0.xlsx') => {
+      const req = request(http).post(`/api/v1/imports/children${qs}`).set({ Authorization: `Bearer ${tokens.admin}` });
+      if (confirmLinks !== undefined) req.field('confirmLinks', typeof confirmLinks === 'string' ? confirmLinks : JSON.stringify(confirmLinks));
+      return req.attach('file', buf, name);
+    };
+    let boMot: { id: string };
+    beforeAll(async () => {
+      await up(fx('ok_openpyxl.xlsx')).expect(200); // creates 'QA Bố Một' 0987000001 (+ child QA Nhập Một)
+      [boMot] = await ds.query(`SELECT id FROM users WHERE username = '0987000001'`);
+    });
+    const kidsOf = async (uid: string) => (await ds.query(`SELECT c.full_name FROM guardians g JOIN children c ON c.id = g.child_id WHERE g.user_id = $1 ORDER BY 1`, [uid])).map((x: any) => x.full_name);
+
+    it('p0_sdt_trung_khac_ten: different name -> PHONE_NAME_MISMATCH in dryRun, 422 on import, nothing written', async () => {
+      const f = fx('p0_sdt_trung_khac_ten.xlsx');
+      const d = await upC(f, '?dryRun=true').expect(200);
+      expect(d.body.ok).toBe(false);
+      expect(d.body.errors).toEqual([expect.objectContaining({ row: 2, field: 'g1Phone', code: 'PHONE_NAME_MISMATCH', value: '0987000001',
+        message: expect.stringContaining('đang thuộc tài khoản phụ huynh "QA Bố Một", khác tên "QA Người Lạ"'),
+        existingAccount: { userId: boMot.id, name: 'QA Bố Một', childrenCount: 1 } })]);
+      const before = await count('guardians');
+      expect((await upC(f, '').expect(422)).body.details.errors[0].code).toBe('PHONE_NAME_MISMATCH');
+      expect(await count('guardians')).toBe(before);
+      expect(await kidsOf(boMot.id)).toEqual(['QA Nhập Một']);
+    });
+
+    it('exact regression: PH2 "QA Bà Hai" with the phone of "QA Bố Một" is an error (was silently linked)', async () => {
+      const r = await up(await xlsx([base({ fullName: 'QA Nhập Bốn', dob: '01/05/2022', g1Name: 'QA Mẹ Bốn', g1Phone: '0987000012', g2Name: 'QA Bà Hai', g2Relation: 'Bà', g2Phone: '0987000001' })]), '?dryRun=true').expect(200);
+      expect(r.body.errors).toEqual([expect.objectContaining({ row: 2, field: 'g2Phone', code: 'PHONE_NAME_MISMATCH' })]);
+      expect(r.body.preview).toEqual([]);
+    });
+
+    it('diacritics are significant ("QA Bo Mot" != "QA Bố Một"), and NFD input is normalised to NFC', async () => {
+      const noAccent = await up(await xlsx([base({ fullName: 'QA Dấu', g1Name: 'QA Bo Mot', g1Phone: '0987000001' })]), '?dryRun=true').expect(200);
+      expect(noAccent.body.errors[0]).toMatchObject({ code: 'PHONE_NAME_MISMATCH' });
+      const nfd = await up(await xlsx([base({ fullName: 'QA NFD', g1Name: '  QA  Bố Một '.normalize('NFD'), g1Phone: '0987000001' })]), '?dryRun=true').expect(200);
+      expect(nfd.body).toMatchObject({ ok: true, errors: [] });
+    });
+
+    it('confirmLinks overrides only the listed (row, guardian); dryRun shows ok + warning; import links', async () => {
+      const f = fx('p0_sdt_trung_khac_ten.xlsx');
+      expect((await upC(f, '?dryRun=true', [{ row: 2, guardian: 2 }]).expect(200)).body.ok).toBe(false); // other slot: still blocked
+      expect((await upC(f, '?dryRun=true', [{ row: 3, guardian: 1 }]).expect(200)).body.ok).toBe(false); // other row: still blocked
+      const d = await upC(f, '?dryRun=true', [{ row: 2, guardian: 1 }]).expect(200);
+      expect(d.body).toMatchObject({ ok: true, errors: [] });
+      expect(d.body.preview[0].guardians[0]).toMatchObject({ account: 'existing', accountName: 'QA Bố Một', linkConfirmed: true });
+      expect(d.body.warnings.find((w: any) => w.row === 2).message).toMatch(/khác tên "QA Người Lạ", đã xác nhận gắn.*QA Nhập Một/);
+      for (const bad of ['not json', '{"row":2}', '[{"row":2,"guardian":3}]', '[{"row":"2","guardian":1}]'])
+        expect((await upC(f, '?dryRun=true', bad).expect(400)).body.code).toBe('VALIDATION_ERROR');
+      await upC(f, '', [{ row: 2, guardian: 1 }]).expect(200);
+      expect(await kidsOf(boMot.id)).toEqual(['QA Nhập Một', 'QA P0 Một']);
+    });
+
+    it('p0_sdt_trung_dung_ten + p0_ten_khac_dau_hoa: same name (case / spacing only) -> link, warning lists the existing children', async () => {
+      for (const f of ['p0_sdt_trung_dung_ten.xlsx', 'p0_ten_khac_dau_hoa.xlsx']) {
+        const d = await upC(fx(f), '?dryRun=true').expect(200);
+        expect(d.body).toMatchObject({ ok: true, errors: [], summary: { parentAccountsToCreate: 0, parentAccountsToLink: 1 } });
+        expect(d.body.preview[0].guardians[0]).toMatchObject({ account: 'existing', accountName: 'QA Bố Một' });
+        expect(d.body.preview[0].guardians[0].linkConfirmed).toBeUndefined();
+        expect(d.body.warnings.find((w: any) => w.row === 2).message).toContain('Tài khoản đang có bé: QA Nhập Một, QA P0 Một');
+      }
+      await upC(fx('p0_ten_khac_dau_hoa.xlsx'), '').expect(200);
+      expect(await kidsOf(boMot.id)).toEqual(['QA Nhập Một', 'QA P0 Một', 'QA P0 Năm']);
+    });
+
+    it('p0_cung_file_2_ten: same new phone, two names in one file -> error on the 2nd row (conflictRow), override possible', async () => {
+      const f = fx('p0_cung_file_2_ten.xlsx');
+      const d = await upC(f, '?dryRun=true').expect(200);
+      expect(d.body.ok).toBe(false);
+      expect(d.body.errors).toEqual([expect.objectContaining({ row: 3, field: 'g1Phone', code: 'PHONE_NAME_MISMATCH', existingAccount: null, conflictRow: 2 })]);
+      await upC(f, '').expect(422);
+      expect(await count('users WHERE username = \'0987000021\'')).toBe(0);
+      const ok = await upC(f, '?dryRun=true', [{ row: 3, guardian: 1 }]).expect(200);
+      expect(ok.body).toMatchObject({ ok: true, summary: { parentAccountsToCreate: 1 } });
+    });
+
+    it('DELETE /children/:id/guardians/:guardianId: admin + reason, revokes the parent\'s access at once, audit-logged', async () => {
+      const [g] = await ds.query(`SELECT g.id, g.child_id FROM guardians g JOIN children c ON c.id = g.child_id WHERE g.user_id = $1 AND c.full_name = 'QA P0 Một'`, [boMot.id]);
+      const pw = 'Abc12345';
+      await ds.query(`UPDATE users SET password_hash = $2, must_change_password = false WHERE id = $1`, [boMot.id, require('bcryptjs').hashSync(pw, 4)]);
+      const parent = (await request(http).post('/api/v1/auth/login').send({ username: '0987000001', password: pw }).expect(200)).body.accessToken;
+      const asParent = (url: string) => request(http).get('/api/v1' + url).set({ Authorization: `Bearer ${parent}` });
+      await asParent(`/children/${g.child_id}`).expect(200);
+      const url = `/children/${g.child_id}/guardians/${g.id}`;
+      await as('gv1').del(url).send({ reason: 'x' }).expect(403);
+      await request(http).delete('/api/v1' + url).set({ Authorization: `Bearer ${parent}` }).send({ reason: 'x' }).expect(403);
+      for (const body of [{}, { reason: '' }, { reason: '   ' }]) await request(http).delete('/api/v1' + url).set({ Authorization: `Bearer ${tokens.admin}` }).send(body).expect(400);
+      await request(http).delete(`/api/v1/children/${s.kids[0].id}/guardians/${g.id}`).set({ Authorization: `Bearer ${tokens.admin}` }).send({ reason: 'x' }).expect(404); // guardian of another child
+      const r = await request(http).delete('/api/v1' + url).set({ Authorization: `Bearer ${tokens.admin}` }).send({ reason: 'Gắn nhầm khi nhập Excel' }).expect(200);
+      expect(r.body).toMatchObject({ removed: { guardianId: g.id, childId: g.child_id, childName: 'QA P0 Một', fullName: 'QA Người Lạ', phone: '0987000001' },
+        account: { userId: boMot.id, username: '0987000001', name: 'QA Bố Một', remainingChildren: ['QA Nhập Một', 'QA P0 Năm'], accountHasNoChildren: false }, reason: 'Gắn nhầm khi nhập Excel' });
+      await asParent(`/children/${g.child_id}`).expect(403); // same token, access gone immediately
+      expect((await asParent('/children?limit=50').expect(200)).body.items.map((x: any) => x.fullName).sort()).toEqual(['QA Nhập Một', 'QA P0 Năm']);
+      await request(http).delete('/api/v1' + url).set({ Authorization: `Bearer ${tokens.admin}` }).send({ reason: 'x' }).expect(404);
+      const lines = fs.readFileSync(path.join(process.env.AUDIT_LOG_DIR!, 'audit.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l));
+      expect(lines.at(-1)).toMatchObject({ action: 'guardian.remove', actorUsername: 'admin', reason: 'Gắn nhầm khi nhập Excel', removed: { guardianId: g.id }, account: { userId: boMot.id } });
+      // last child removed -> account kept, reported
+      const rest = await ds.query(`SELECT id, child_id FROM guardians WHERE user_id = $1`, [boMot.id]);
+      let last: any;
+      for (const x of rest) last = (await request(http).delete(`/api/v1/children/${x.child_id}/guardians/${x.id}`).set({ Authorization: `Bearer ${tokens.admin}` }).send({ reason: 'test' }).expect(200)).body;
+      expect(last.account).toMatchObject({ remainingChildren: [], accountHasNoChildren: true });
+      expect(await count(`users WHERE id = '${boMot.id}'`)).toBe(1);
+    });
   });
   const login_ = (u: string) => login(u);
 });

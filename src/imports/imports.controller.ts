@@ -1,4 +1,4 @@
-import { Controller, Get, HttpCode, Post, Query, Res, UploadedFile, UseInterceptors } from '@nestjs/common';
+import { Body, Controller, Get, HttpCode, Post, Query, Res, UploadedFile, UseInterceptors } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { ApiBearerAuth, ApiBody, ApiConsumes, ApiPropertyOptional, ApiTags } from '@nestjs/swagger';
 import * as bcrypt from 'bcryptjs';
@@ -12,7 +12,7 @@ import { todayStr } from '../common/dates';
 import { AppError } from '../common/errors';
 import { Child, ClassRoom, Guardian, User } from '../database/entities';
 import {
-  buildTemplate, guessAgeGroup, MAX_IMPORT_BYTES, MAX_IMPORT_ROWS, nameKey, parseWorkbook, ParsedRow, RowError, schoolYearOf, tempPassword, XLSX_MIME,
+  buildTemplate, guessAgeGroup, MAX_IMPORT_BYTES, MAX_IMPORT_ROWS, nameKey, parseWorkbook, personKey, ParsedRow, RowError, schoolYearOf, tempPassword, XLSX_MIME,
 } from './children-import';
 
 export class ImportQuery {
@@ -21,13 +21,29 @@ export class ImportQuery {
   @IsOptional() @IsIn(['true', 'false']) createClasses?: string;
 }
 
+/** Multipart field `confirmLinks` = JSON array of {row, guardian: 1|2} -> Set "row:guardian". 400 when malformed. */
+export function parseConfirmLinks(raw: unknown): Set<string> {
+  const out = new Set<string>();
+  if (raw == null || raw === '') return out;
+  let v: unknown;
+  try { v = typeof raw === 'string' ? JSON.parse(raw) : raw; } catch { v = undefined; }
+  const bad = () => new AppError(400, 'VALIDATION_ERROR', 'confirmLinks phải là JSON dạng [{"row": 5, "guardian": 1}]');
+  if (!Array.isArray(v) || v.length > 2 * MAX_IMPORT_ROWS) throw bad();
+  for (const x of v) {
+    const row = (x as any)?.row, guardian = (x as any)?.guardian;
+    if (!Number.isInteger(row) || row < 2 || (guardian !== 1 && guardian !== 2)) throw bad();
+    out.add(`${row}:${guardian}`);
+  }
+  return out;
+}
+
 /** Temp passwords for imported parents: cost 8 (they are single-use, mustChangePassword re-hashes at cost 10). */
 const TEMP_HASH_COST = 8;
 
 interface Plan {
   row: number; action: 'create' | 'skip_duplicate'; existingChildId?: string; existingChildStatus?: string;
   child: { fullName: string; dob: string; gender: 'M' | 'F'; className: string; classAction: 'existing' | 'create'; allergies: string | null; healthNotes: string | null; address: string | null; enrolledAt: string };
-  guardians: { slot: 1 | 2; fullName: string; relation: string; phone: string; canPickup: boolean; account: 'create' | 'existing' | 'existing_inactive' | 'skip'; username: string }[];
+  guardians: { slot: 1 | 2; fullName: string; relation: string; phone: string; canPickup: boolean; account: 'create' | 'existing' | 'existing_inactive' | 'skip'; username: string; accountName?: string; linkConfirmed?: boolean }[];
 }
 
 @ApiTags('imports') @ApiBearerAuth()
@@ -48,21 +64,23 @@ export class ImportsController {
    * Otherwise everything is written in ONE transaction, only if there is no row error (else 422 with the same report).
    */
   @Post('children') @Roles('admin') @HttpCode(200)
-  @ApiConsumes('multipart/form-data') @ApiBody({ schema: { type: 'object', required: ['file'], properties: { file: { type: 'string', format: 'binary' } } } })
+  @ApiConsumes('multipart/form-data') @ApiBody({ schema: { type: 'object', required: ['file'], properties: { file: { type: 'string', format: 'binary' },
+    confirmLinks: { type: 'string', example: '[{"row":5,"guardian":2}]', description: 'JSON: các cặp (dòng Excel, PH1|PH2) được phép gắn vào tài khoản có sẵn dù khác tên (lỗi PHONE_NAME_MISMATCH)' } } } })
   @UseInterceptors(FileInterceptor('file', { storage: memoryStorage(), limits: { fileSize: MAX_IMPORT_BYTES, files: 1 } }))
-  async importChildren(@CurrentUser() u: AuthUser, @Query() q: ImportQuery, @UploadedFile() file?: Express.Multer.File) {
+  async importChildren(@CurrentUser() u: AuthUser, @Query() q: ImportQuery, @UploadedFile() file?: Express.Multer.File, @Body() body?: Record<string, unknown>) {
     const today = todayStr();
+    const confirm = parseConfirmLinks(body?.confirmLinks);
     const dryRun = q.dryRun === 'true';
     const createClasses = (q.createClasses ?? process.env.IMPORT_CREATE_CLASSES ?? 'false') === 'true';
     const parsed = await parseWorkbook(file?.buffer as Buffer, today);
     const options = { dryRun, createClasses, maxRows: MAX_IMPORT_ROWS };
 
     if (dryRun) {
-      const a = await this.analyze(this.ds.manager, parsed.rows, parsed.errors, createClasses, today);
+      const a = await this.analyze(this.ds.manager, parsed.rows, parsed.errors, createClasses, today, confirm);
       return { ...options, sheet: parsed.sheet, totalRows: parsed.totalRows, ok: a.errors.length === 0, ...this.report(a) };
     }
     // hash temp passwords BEFORE the transaction (bcrypt dominates: ~20 ms each) so the serializable transaction stays short
-    const pre = await this.analyze(this.ds.manager, parsed.rows, parsed.errors, createClasses, today);
+    const pre = await this.analyze(this.ds.manager, parsed.rows, parsed.errors, createClasses, today, confirm);
     if (pre.errors.length) throw new AppError(422, 'IMPORT_INVALID', `Có ${pre.errors.length} lỗi; chưa nhập gì. Sửa file rồi thử lại (dùng dryRun=true để kiểm tra).`,
       { ...options, sheet: parsed.sheet, totalRows: parsed.totalRows, ok: false, ...this.report(pre) });
     const hashed = new Map<string, { password: string; hash: string }>();
@@ -71,7 +89,7 @@ export class ImportsController {
       hashed.set(g.phone, { password, hash: await bcrypt.hash(password, TEMP_HASH_COST) });
     }
     return this.ds.transaction('SERIALIZABLE', async (m) => {
-      const a = await this.analyze(m, parsed.rows, parsed.errors, createClasses, today);
+      const a = await this.analyze(m, parsed.rows, parsed.errors, createClasses, today, confirm);
       if (a.errors.length) throw new AppError(422, 'IMPORT_INVALID', `Có ${a.errors.length} lỗi; chưa nhập gì. Sửa file rồi thử lại (dùng dryRun=true để kiểm tra).`,
         { ...options, sheet: parsed.sheet, totalRows: parsed.totalRows, ok: false, ...this.report(a) });
       // classes
@@ -151,7 +169,7 @@ export class ImportsController {
   }
 
   /** DB-aware validation + plan (dedupe children by name+dob, parents by phone, classes by name). */
-  private async analyze(m: EntityManager, rows: ParsedRow[], parseErrors: RowError[], createClasses: boolean, today: string) {
+  private async analyze(m: EntityManager, rows: ParsedRow[], parseErrors: RowError[], createClasses: boolean, today: string, confirm: Set<string> = new Set()) {
     const errors: RowError[] = [...parseErrors];
     const warnings: { row: number | null; message: string }[] = [];
     const classRows: { id: string; name: string; capacity: number | null; active: number }[] = await m.query(
@@ -177,6 +195,12 @@ export class ImportsController {
       else if (parents.length === 1) users.set(p, { id: parents[0].id, name: parents[0].name, active: parents[0].is_active });
       else if (parents.length > 1) staffPhones.set(p, 'nhiều tài khoản phụ huynh');
     }
+    // children already linked to the existing parent accounts (shown in the "will be linked" warning)
+    const linkedKids = new Map<string, string[]>();
+    const exIds = [...users.values()].map((x) => x.id);
+    if (exIds.length) for (const k of await m.query(`SELECT g.user_id, c.full_name FROM guardians g JOIN children c ON c.id = g.child_id WHERE g.user_id = ANY($1) ORDER BY c.full_name`, [exIds]) as { user_id: string; full_name: string }[]) {
+      const l = linkedKids.get(k.user_id) ?? []; if (!l.includes(k.full_name)) l.push(k.full_name); linkedKids.set(k.user_id, l);
+    }
     const seenKids = new Map<string, number>();
     const phoneName = new Map<string, { name: string; row: number }>();
     const newPerClass = new Map<string, number>();
@@ -186,7 +210,7 @@ export class ImportsController {
     // + class / duplicate / staff-phone). Only rows without any error get a plan (preview).
     for (const r of rows) {
       let bad = badRows.has(r.row);
-      const err = (column: string | null, field: any, message: string, value?: string) => { errors.push({ row: r.row, column, field, value, message }); bad = true; };
+      const err = (column: string | null, field: any, message: string, value?: string, extra?: Partial<RowError>) => { errors.push({ row: r.row, column, field, value, message, ...extra }); bad = true; };
       const key = r.fullName && r.dob ? kidKey(r.fullName, r.dob) : null;
       if (key) {
         const dupInFile = seenKids.get(key);
@@ -201,7 +225,24 @@ export class ImportsController {
       }
       for (const g of r.guardians) {
         const col = `PH${g.slot} - SĐT ${g.slot === 1 ? '*' : ''}`.trim();
-        if (staffPhones.has(g.phone)) err(col, `g${g.slot}Phone`, `SĐT ${g.phone} trùng tài khoản ${staffPhones.get(g.phone)}; không dùng làm tài khoản phụ huynh được`, g.phone);
+        if (staffPhones.has(g.phone)) { err(col, `g${g.slot}Phone`, `SĐT ${g.phone} trùng tài khoản ${staffPhones.get(g.phone)}; không dùng làm tài khoản phụ huynh được`, g.phone); continue; }
+        if (!g.fullName) continue; // name missing: already a field error
+        if (g.slot === 2 && r.guardians.some((o) => o.slot === 1 && o.phone === g.phone)) continue; // PH2 = PH1 phone: already a field error
+        // SECURITY: never silently link a child to an account of a different person (that parent would see the child)
+        const ex = users.get(g.phone);
+        const confirmed = confirm.has(`${r.row}:${g.slot}`);
+        if (ex) {
+          if (personKey(ex.name) !== personKey(g.fullName) && !confirmed)
+            err(col, `g${g.slot}Phone`, `SĐT ${g.phone} đang thuộc tài khoản phụ huynh "${ex.name}", khác tên "${g.fullName}". Kiểm tra lại SĐT; nếu đúng là cùng một người thì xác nhận gắn (confirmLinks)`, g.phone,
+              { code: 'PHONE_NAME_MISMATCH', existingAccount: { userId: ex.id, name: ex.name, childrenCount: (linkedKids.get(ex.id) ?? []).length } });
+          continue;
+        }
+        // same new phone, different names across rows -> one account would be shared by two people
+        const seen = phoneName.get(g.phone);
+        if (!seen) phoneName.set(g.phone, { name: g.fullName, row: r.row });
+        else if (seen.row !== r.row && personKey(seen.name) !== personKey(g.fullName) && !confirmed)
+          err(col, `g${g.slot}Phone`, `SĐT ${g.phone} đã dùng cho "${seen.name}" ở dòng ${seen.row}, khác tên "${g.fullName}" (một SĐT = một tài khoản). Kiểm tra lại SĐT; nếu đúng là cùng một người thì xác nhận gắn (confirmLinks)`, g.phone,
+            { code: 'PHONE_NAME_MISMATCH', existingAccount: null, conflictRow: seen.row });
       }
       if (bad || !key || !r.dob || !r.gender) continue; // has errors: not in the preview
       const existing = kidIndex.get(key);
@@ -209,10 +250,13 @@ export class ImportsController {
       if (!existing) for (const g of r.guardians) {
         if (staffSamePhone.has(g.phone) && !users.has(g.phone)) warnings.push({ row: r.row, message: `SĐT ${g.phone} trùng SĐT của nhân viên ${staffSamePhone.get(g.phone)}; vẫn tạo tài khoản phụ huynh riêng (tên đăng nhập ${g.phone})` });
         const seen = phoneName.get(g.phone);
-        if (seen && nameKey(seen.name) !== nameKey(g.fullName)) warnings.push({ row: r.row, message: `SĐT ${g.phone}: tên "${g.fullName}" khác dòng ${seen.row} ("${seen.name}"); dùng chung một tài khoản` });
-        else if (!seen) phoneName.set(g.phone, { name: g.fullName, row: r.row });
+        if (seen && seen.row !== r.row && personKey(seen.name) !== personKey(g.fullName)) warnings.push({ row: r.row, message: `SĐT ${g.phone}: tên "${g.fullName}" khác dòng ${seen.row} ("${seen.name}"); đã xác nhận dùng chung một tài khoản` });
         const ex = users.get(g.phone);
-        if (ex && nameKey(ex.name) !== nameKey(g.fullName)) warnings.push({ row: r.row, message: `SĐT ${g.phone} đã có tài khoản phụ huynh "${ex.name}"; bé sẽ được gắn vào tài khoản này` });
+        if (ex) {
+          const kids = linkedKids.get(ex.id) ?? [];
+          const same = personKey(ex.name) === personKey(g.fullName);
+          warnings.push({ row: r.row, message: `SĐT ${g.phone} đã có tài khoản phụ huynh "${ex.name}"${same ? '' : ` (khác tên "${g.fullName}", đã xác nhận gắn)`}; bé sẽ được gắn vào tài khoản này. Tài khoản đang có ${kids.length ? `bé: ${kids.join(', ')}` : 'chưa có bé nào'}` });
+        }
         if (ex && !ex.active) warnings.push({ row: r.row, message: `Tài khoản phụ huynh ${g.phone} đang bị khoá` });
       }
       if (existing) warnings.push({ row: r.row, message: `Bé "${r.fullName}" (${r.dob.split('-').reverse().join('/')}) đã có trong hệ thống${existing.status === 'withdrawn' ? ' (đã nghỉ học)' : ''}; bỏ qua dòng này` });
@@ -222,7 +266,11 @@ export class ImportsController {
         child: { fullName: r.fullName, dob: r.dob, gender: r.gender, className: classAction === 'existing' ? classRows.find((c) => nameKey(c.name) === ck)!.name : r.className, classAction,
           allergies: r.allergies, healthNotes: r.healthNotes, address: r.address, enrolledAt: r.enrolledAt ?? today },
         // skipped duplicate: nothing is created or linked for its guardians
-        guardians: r.guardians.map((g) => ({ ...g, username: g.phone, account: existing ? 'skip' : users.has(g.phone) ? (users.get(g.phone)!.active ? 'existing' : 'existing_inactive') : 'create' })),
+        guardians: r.guardians.map((g) => {
+          const ex = users.get(g.phone);
+          return { ...g, username: g.phone, account: existing ? 'skip' : ex ? (ex.active ? 'existing' : 'existing_inactive') : 'create',
+            ...(ex && !existing ? { accountName: ex.name, ...(personKey(ex.name) !== personKey(g.fullName) ? { linkConfirmed: true } : {}) } : {}) };
+        }),
       });
     }
     for (const c of classRows) {
