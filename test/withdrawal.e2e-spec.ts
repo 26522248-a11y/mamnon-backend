@@ -163,7 +163,19 @@ describe('PM round 3: void rules, withdrawal & payout, discount cap, account sec
       const b0 = (await as('ketoan').get(`/children/${w.id}/balance`).expect(200)).body;
       const debtBefore = b0.outstanding.filter((i: any) => i.period <= leave.slice(0, 7)).reduce((a: number, i: any) => a + i.balance, 0);
       expect(debtBefore).toBeGreaterThan(0);
+      const invsBefore = (await as('ketoan').get(`/invoices?childId=${w.id}&limit=50`).expect(200)).body.items;
       const r = await as('admin').post(`/children/${w.id}/withdraw`, { leaveDate: leave, reason: 'Gia đình chuyển trường' }).expect(200);
+      // regression: credit applied to an already-issued invoice is a payment by credit -> total unchanged, paid increased, no credit line
+      expect(r.body.creditAppliedToInvoices.length).toBeGreaterThan(0);
+      for (const ap of r.body.creditAppliedToInvoices) {
+        const b = invsBefore.find((x: any) => x.id === ap.invoiceId);
+        const after = (await as('ketoan').get(`/invoices/${ap.invoiceId}`).expect(200)).body;
+        expect(after.totalAmount).toBe(b.totalAmount);
+        expect(after.paidAmount).toBe(b.paidAmount + ap.amount);
+        expect(after.lines.some((l: any) => l.kind === 'credit' && l.description.includes('tất toán'))).toBe(false);
+        const h = (await as('ketoan').get(`/invoices/${ap.invoiceId}/history`).expect(200)).body.find((x: any) => x.action === 'credit_applied');
+        expect(h).toMatchObject({ old: { totalAmount: b.totalAmount, paidAmount: b.paidAmount }, new: { totalAmount: b.totalAmount, paidAmount: b.paidAmount + ap.amount, creditApplied: ap.amount } });
+      }
       const relief = r.body.mealRefund.amount + r.body.leaveMonth.mealAdjustment - r.body.mealClawback.amount;
       expect(relief).toBeGreaterThan(0);
       expect(r.body).toMatchObject({ outstandingDebt: debtBefore - relief, creditBalance: 0, nextAction: 'collect_debt' });
@@ -173,6 +185,31 @@ describe('PM round 3: void rules, withdrawal & payout, discount cap, account sec
       await payAll(w.id);
       expect((await as('ketoan').get('/debts').expect(200)).body.items.find((x: any) => x.childId === w.id)).toBeUndefined();
       expect((await as('ketoan').get(`/children/${w.id}/withdrawal`).expect(200)).body.nextAction).toBe('none');
+    });
+  });
+
+  describe('withdrawal credit vs debt (QA bug: total must not shrink)', () => {
+    it('credit >= debt: old invoice becomes paid, total unchanged, totalInvoiced unchanged, rest stays credit', async () => {
+      const k = s.kids[6];
+      const old = await invOf(k.id, s.periods.lastMonth); // seed: paid
+      // make an open debt on last month's invoice: add a charge line, then prepay more than it
+      await as('ketoan').post(`/invoices/${old.id}/lines`, { description: 'Dã ngoại', unitPrice: 500000 }).expect(201);
+      const before = (await as('ketoan').get(`/invoices/${old.id}`).expect(200)).body;
+      expect(before.balance).toBe(500000);
+      const invsPrior = (await as('ketoan').get(`/invoices?childId=${k.id}&limit=100`).expect(200)).body.items;
+      await as('ketoan').post(`/children/${k.id}/prepayments`, { amount: 1500000, method: 'cash' }).expect(201);
+      const r = await as('ketoan').post(`/children/${k.id}/withdraw`, { leaveDate: leave, reason: 'Hồi quy QA' }).expect(200);
+      const ap = r.body.creditAppliedToInvoices.find((x: any) => x.invoiceId === old.id);
+      expect(ap.amount).toBe(500000);
+      const after = (await as('ketoan').get(`/invoices/${old.id}`).expect(200)).body;
+      expect(after).toMatchObject({ totalAmount: before.totalAmount, paidAmount: before.paidAmount + 500000, status: 'paid', balance: 0 });
+      const bal1 = (await as('ketoan').get(`/children/${k.id}/balance`).expect(200)).body;
+      // what was invoiced for months before the leave month is unchanged by the settlement
+      const sumBefore = async (when: any[]) => when.filter((i: any) => i.status !== 'void' && i.period < leave.slice(0, 7)).reduce((t: number, i: any) => t + i.totalAmount, 0);
+      const list = (await as('ketoan').get(`/invoices?childId=${k.id}&limit=100`).expect(200)).body.items;
+      expect(await sumBefore(list)).toBe(await sumBefore(invsPrior));
+      expect(r.body.outstandingDebt).toBe(0);
+      expect(r.body.creditBalance).toBe(bal1.creditBalance);
     });
   });
 

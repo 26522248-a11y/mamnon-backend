@@ -654,13 +654,7 @@ export class FeesController {
         if (credit <= 0) break;
         const amt = Math.min(credit, inv.totalAmount - inv.paidAmount);
         if (amt <= 0) continue;
-        const line = await m.save(InvoiceLine, m.create(InvoiceLine, { invoiceId: inv.id, feeItemId: null, kind: 'credit',
-          description: 'Trừ số dư khi tất toán nghỉ học', quantity: 1, unitPrice: amt, amount: -amt, reason: `Nghỉ học từ ${fmt(leave)}` }));
-        const total = inv.totalAmount - amt;
-        await m.update(Invoice, inv.id, { totalAmount: total, status: statusOf(total, inv.paidAmount) });
-        await m.save(CreditTransaction, m.create(CreditTransaction, { childId: id, amount: -amt, type: 'applied', invoiceId: inv.id,
-          note: `Trừ vào hoá đơn ${inv.invoiceNo} khi tất toán nghỉ học`, createdBy: u.id }));
-        await this.audit(m, u, inv.id, 'credit_applied', line.id, { totalAmount: inv.totalAmount }, { totalAmount: total, creditApplied: amt, reason: 'withdrawal' });
+        await this.applyCreditToIssuedInvoice(m, u, inv, amt, `Trừ vào hoá đơn ${inv.invoiceNo} khi tất toán nghỉ học`, 'withdrawal');
         applied.push({ invoiceId: inv.id, invoiceNo: inv.invoiceNo, amount: amt });
         credit -= amt;
       }
@@ -714,6 +708,23 @@ export class FeesController {
       await this.audit(m, u, inv.id, 'line_added', line.id, null, { ...lineView(line), reason: 'withdrawal_leave_month', movedToCredit });
     }
     return { ...base, invoiceId: inv.id, created: false, mealCharged: charged, mealAdjustment: adj, movedToCredit, warnings };
+  }
+
+  /**
+   * Credit balance used to settle an invoice that is ALREADY issued: it is a payment by credit, so the invoice total
+   * (what was invoiced) stays the same and paid_amount increases. No receipt / payment row is created (the money was
+   * already counted when it was first received). Only a NEW invoice takes credit as a 'credit' line before issue (insertInvoice).
+   */
+  private async applyCreditToIssuedInvoice(m: EntityManager, u: AuthUser, inv: Invoice, amount: number, note: string, reason: string) {
+    const fresh = await m.findOneOrFail(Invoice, { where: { id: inv.id }, lock: { mode: 'pessimistic_write' } });
+    const amt = Math.min(amount, fresh.totalAmount - fresh.paidAmount);
+    if (amt <= 0) return 0;
+    const paid = fresh.paidAmount + amt;
+    await m.update(Invoice, fresh.id, { paidAmount: paid, status: statusOf(fresh.totalAmount, paid) });
+    await m.save(CreditTransaction, m.create(CreditTransaction, { childId: fresh.childId, amount: -amt, type: 'applied', invoiceId: fresh.id, note, createdBy: u.id }));
+    await this.audit(m, u, fresh.id, 'credit_applied', null, { totalAmount: fresh.totalAmount, paidAmount: fresh.paidAmount, status: fresh.status },
+      { totalAmount: fresh.totalAmount, paidAmount: paid, status: statusOf(fresh.totalAmount, paid), creditApplied: amt, reason });
+    return amt;
   }
 
   /** Current withdrawal / settlement state of a child (+ payouts). */

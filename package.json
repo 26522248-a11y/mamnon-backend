@@ -13,7 +13,8 @@
     "migration:revert": "npm run typeorm -- migration:revert",
     "seed": "ts-node --transpile-only src/database/seed.ts",
     "test": "jest --runInBand",
-    "avatars": "ts-node --transpile-only src/database/placeholder-avatars.ts"
+    "avatars": "ts-node --transpile-only src/database/placeholder-avatars.ts",
+    "repair:withdrawal-credit": "ts-node --transpile-only src/database/repair-withdrawal-credit.ts"
   },
   "keywords": [],
   "author": "",
