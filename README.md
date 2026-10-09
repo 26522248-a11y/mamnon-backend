@@ -71,7 +71,7 @@ Dữ liệu mẫu:
 | GET | `/children/:id` | theo phạm vi |
 | POST / DELETE | `/children`, `/children/:id` | admin |
 | PATCH | `/children/:id` | admin; giáo viên của lớp chỉ được sửa `allergies`, `healthNotes` |
-| POST | `/children/:id/photo` (multipart, field `file`, JPG/PNG ≤ 3MB; kiểm tra nội dung thật bằng magic bytes) | admin, giáo viên của lớp |
+| POST | `/children/:id/photo` (multipart, field `file`, JPG/PNG/HEIC ≤ 3MB; kiểm tra nội dung thật bằng magic bytes; HEIC/HEIF được chuyển sang JPEG) | admin, giáo viên của lớp |
 | GET | `/children/:id/photo` (trả về ảnh, cần header `Authorization`) | admin, giáo viên của lớp, phụ huynh của trẻ |
 | GET | `/pickup-requests/:id/photo` | admin, giáo viên của lớp, phụ huynh của trẻ |
 | GET | `/children/:id/guardians` | admin, giáo viên của lớp, phụ huynh của trẻ |
@@ -80,10 +80,11 @@ Dữ liệu mẫu:
 | GET | `/classes/:id/attendance?date=YYYY-MM-DD` → `{classId,date,items[]}` | admin, giáo viên của lớp |
 | PUT | `/classes/:id/attendance` `{date, items:[{childId,status,note?}]}` | admin, giáo viên của lớp |
 | GET | `/attendance/:id/history` (ai sửa, lúc nào, giá trị cũ, giá trị mới) | admin, giáo viên của lớp |
-| POST | `/attendance/:id/pickup` `{guardianId \| pickupRequestId, pickedUpAt?, note?}` | admin, giáo viên của lớp |
+| POST | `/attendance/:id/pickup` `{guardianId \| authorizedPickerId \| pickupRequestId, pickedUpAt?, note?}` (giao lần 2 → 409) | admin, giáo viên của lớp |
 | POST | `/attendance/:id/pickup-requests` (JSON hoặc multipart: `pickerName, pickerPhone, note` **bắt buộc** (thiếu/rỗng → 400), `relation?`, ảnh `photo` tuỳ chọn) | admin, giáo viên của lớp |
 | GET | `/pickup-requests?status&childId&date` | admin; giáo viên: lớp mình; phụ huynh: con mình |
-| POST | `/pickup-requests/:id/confirm`, `/pickup-requests/:id/reject` `{note?}` → `status` thành **`approved`** (không phải `confirmed`) / `rejected` | admin, phụ huynh của trẻ |
+| POST | `/pickup-requests/:id/confirm`, `/pickup-requests/:id/reject` `{note?}`: phụ huynh → bước phụ huynh; admin / trực đón hôm nay → bước nhà trường. `status` = `approved` khi đủ 2 bước | phụ huynh của trẻ, admin, tài khoản trực đón |
+| | **An toàn đón trẻ (người đón hộ, trực đón, web push, quy tắc 15 phút):** xem [docs/pickup-safety.md](docs/pickup-safety.md) | |
 | GET | `/children/attendance-summary?month=YYYY-MM&classId` (chỉ số ngày) | admin, kế toán; giáo viên: lớp mình; phụ huynh: con mình |
 | GET | `/dashboard/summary?date=` | tất cả (theo phạm vi, xem dưới) |
 | GET/POST/PATCH/DELETE | `/fee-items`, `/fee-items/:id` (scope `school`/`class`/`child`, type `monthly`/`one_time`) | admin, kế toán |
@@ -149,8 +150,9 @@ Mỗi phần tử trong bảng điểm danh có dạng `{ attendanceId, childId,
 - Mọi lần tạo hoặc sửa điểm danh đều được ghi vào `attendance_history`. Lưu lại thao tác không làm thay đổi gì thì không sinh bản ghi.
 - Đón trẻ: người giám hộ có `canPickup=true` thì được giao trẻ. Nếu `canPickup=false` thì nhận 403 `PICKUP_NOT_ALLOWED`.
   - Với người không có trong danh sách, giáo viên tạo yêu cầu đón (chỉ cho ngày hôm nay), trạng thái ban đầu là `pending`.
-  - Phụ huynh của trẻ hoặc admin xác nhận hay từ chối. Khi đó giáo viên mới gọi `POST /attendance/:id/pickup {pickupRequestId}`.
-  - Yêu cầu còn chờ thì nhận 403 `PICKUP_REQUEST_PENDING`, yêu cầu bị từ chối thì nhận 403 `PICKUP_REQUEST_REJECTED`. Yêu cầu đã xử lý rồi thì nhận 409 `ALREADY_DECIDED`.
+  - Cần **đủ 2 bước**: phụ huynh xác nhận (app, nút trên push, hoặc admin ghi thay qua `/parent-decision` có ghi chú) **và** nhà trường duyệt (admin hoặc tài khoản trực đón của ngày đó; GV kể cả GV chủ nhiệm → 403). Người duyệt phần nhà trường không được tự giao bé. Khi đó giáo viên mới gọi `POST /attendance/:id/pickup {pickupRequestId}`.
+  - Người đón hộ do phụ huynh đăng ký và admin đã duyệt: giao luôn (`authorizedPickerId`); chưa duyệt / bị từ chối = ngoài danh sách. Chi tiết: [docs/pickup-safety.md](docs/pickup-safety.md).
+  - Yêu cầu còn thiếu bước thì nhận 403 `PICKUP_REQUEST_PENDING` (`details`: `PARENT_PENDING` / `SCHOOL_PENDING`), yêu cầu bị từ chối thì nhận 403 `PICKUP_REQUEST_REJECTED`. Yêu cầu đã xử lý rồi thì nhận 409 `ALREADY_DECIDED`.
 - Dashboard: admin xem toàn trường và từng lớp (`byClass`). Giáo viên xem các lớp của mình kèm `byClass`. Kế toán chỉ xem tổng. Phụ huynh xem con mình kèm trạng thái từng bé.
 - Học phí (xem thêm phần "Quyết định PM đã áp dụng"): admin và kế toán quản lý. Phụ huynh chỉ xem hoá đơn, phiếu thu, công nợ của con mình. Giáo viên không truy cập được (403).
   - Mỗi trẻ chỉ có 1 hoá đơn còn hiệu lực cho mỗi kỳ; huỷ hoá đơn thì lập lại được.
@@ -167,7 +169,7 @@ Thư mục `uploads/` (hoặc đường dẫn trong `UPLOAD_DIR`) **không** đ�
 
 Front end phải tải ảnh bằng `fetch` có header `Authorization`, rồi hiển thị qua `URL.createObjectURL(blob)`, vì thẻ `<img src>` không gửi được Bearer token.
 
-Ảnh được nhận diện qua magic bytes: chỉ chấp nhận JPEG và PNG thật. Tên file hay Content-Type không có tác dụng.
+Ảnh được nhận diện qua magic bytes: chấp nhận JPEG, PNG và HEIC/HEIF thật (hộp `ftyp` có brand heic/heix/hevc/heif/mif1…; ảnh iPhone). HEIC/HEIF được chuyển sang JPEG khi lưu (thư viện `heic-convert`, không cần libvips). Tên file hay Content-Type không có tác dụng: file giả đổi đuôi `.heic` → 400 `INVALID_FILE`. Áp dụng cho mọi ảnh tải lên (ảnh trẻ, ảnh người đón hộ, ảnh yêu cầu đón).
 
 ## Quyết định PM đã áp dụng
 
@@ -266,7 +268,7 @@ Cột: `Họ tên bé *`, `Ngày sinh *` (dd/mm/yyyy hoặc ô ngày), `Giới t
 ## Định dạng lỗi
 
 Mọi lỗi đều có dạng `{ "code": "FORBIDDEN", "message": "..." }`. Lỗi validate có thêm `details[]`; 429 có thêm `lockedUntil`; `AMOUNT_MISMATCH` có `details.creditBalance`.
-Các mã lỗi: `UNAUTHORIZED`, `TOKEN_INVALID`, `INVALID_CREDENTIALS`, `NO_REFRESH_TOKEN`, `FORBIDDEN`, `EDIT_WINDOW_EXPIRED`, `PICKUP_NOT_ALLOWED`, `NOT_FOUND`, `VALIDATION_ERROR`, `BAD_REQUEST`, `CONFLICT`, `USERNAME_TAKEN`, `TOO_MANY_ATTEMPTS`, `WRONG_PASSWORD`, `SAME_PASSWORD`, `LAST_ADMIN`, `SELF_CHANGE`, `USER_HAS_LINKS`, `USER_HAS_HISTORY`, `PICKUP_REQUEST_EXPIRED`, `REQUEST_EXPIRED`, `NOTE_REQUIRED`, `REASON_REQUIRED`, `TOTAL_BELOW_PAID`, `CREDIT_LINE_LOCKED`, `REFUND_LINE_USE_PATCH`, `PICKUP_REQUEST_PENDING`, `PICKUP_REQUEST_REJECTED`, `ALREADY_DECIDED`, `INVOICE_EXISTS`, `ALREADY_VOID`, `ALREADY_PAID`, `INVOICE_VOID`, `INVALID_SCOPE`, `NEGATIVE_TOTAL`, `INVALID_WEEK_START`, `CHILD_NOT_IN_CLASS`, `CLASS_NOT_EMPTY`, `DATE_IN_FUTURE`, `NOTE_REQUIRED`, `INVALID_GUARDIAN`, `INVALID_FILE`, `CHILD_WITHDRAWN`, `ALREADY_WITHDRAWN`, `LEAVE_DATE_IN_FUTURE`, `INVALID_LEAVE_DATE`, `CHILD_NOT_WITHDRAWN`, `NO_CREDIT_BALANCE`, `OUTSTANDING_DEBT`, `AMOUNT_MISMATCH`, `INTERNAL_ERROR`.
+Các mã lỗi: `UNAUTHORIZED`, `TOKEN_INVALID`, `INVALID_CREDENTIALS`, `NO_REFRESH_TOKEN`, `FORBIDDEN`, `EDIT_WINDOW_EXPIRED`, `PICKUP_NOT_ALLOWED`, `NOT_FOUND`, `VALIDATION_ERROR`, `BAD_REQUEST`, `CONFLICT`, `USERNAME_TAKEN`, `TOO_MANY_ATTEMPTS`, `WRONG_PASSWORD`, `SAME_PASSWORD`, `LAST_ADMIN`, `SELF_CHANGE`, `USER_HAS_LINKS`, `USER_HAS_HISTORY`, `PICKUP_REQUEST_EXPIRED`, `REQUEST_EXPIRED`, `NOTE_REQUIRED`, `REASON_REQUIRED`, `TOTAL_BELOW_PAID`, `CREDIT_LINE_LOCKED`, `REFUND_LINE_USE_PATCH`, `PICKUP_REQUEST_PENDING`, `PICKUP_REQUEST_REJECTED`, `ALREADY_DECIDED`, `INVOICE_EXISTS`, `ALREADY_VOID`, `ALREADY_PAID`, `INVOICE_VOID`, `INVALID_SCOPE`, `NEGATIVE_TOTAL`, `INVALID_WEEK_START`, `CHILD_NOT_IN_CLASS`, `CLASS_NOT_EMPTY`, `DATE_IN_FUTURE`, `NOTE_REQUIRED`, `INVALID_GUARDIAN`, `INVALID_FILE`, `CHILD_WITHDRAWN`, `ALREADY_WITHDRAWN`, `LEAVE_DATE_IN_FUTURE`, `INVALID_LEAVE_DATE`, `CHILD_NOT_WITHDRAWN`, `NO_CREDIT_BALANCE`, `OUTSTANDING_DEBT`, `AMOUNT_MISMATCH`, `ALREADY_PICKED_UP`, `PICKUP_PERSON_REQUIRED`, `PICKER_NOT_APPROVED`, `INVALID_AUTHORIZED_PICKER`, `APPROVER_CANNOT_HAND_OVER`, `NOT_ON_DUTY`, `INVALID_ACTION_TOKEN`, `PHOTO_REQUIRED`, `DUPLICATE_PICKER`, `INVALID_DUTY_USER`, `INTERNAL_ERROR`.
 
 ## Cấu trúc
 

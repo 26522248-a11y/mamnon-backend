@@ -1,4 +1,4 @@
-import { Body, Controller, Get, HttpCode, Param, ParseUUIDPipe, Post, Put, Query, Res, UploadedFile, UseInterceptors } from '@nestjs/common';
+import { Body, Controller, Get, HttpCode, Param, ParseUUIDPipe, Post, Put, Query, Req, Res, UploadedFile, UseInterceptors } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { ApiBearerAuth, ApiOperation, ApiConsumes, ApiProperty, ApiPropertyOptional, ApiTags } from '@nestjs/swagger';
 import { InjectRepository } from '@nestjs/typeorm';
@@ -6,7 +6,7 @@ import { Type } from 'class-transformer';
 import {
   ArrayMaxSize, IsArray, IsBoolean, IsDateString, IsIn, IsISO8601, IsOptional, IsString, IsUUID, Matches, MaxLength, MinLength, ValidateNested,
 } from 'class-validator';
-import { DataSource, In, Repository } from 'typeorm';
+import { Brackets, DataSource, In, IsNull, Repository } from 'typeorm';
 import { AccessService } from '../common/access';
 import { AuthUser, CurrentUser, Roles } from '../common/auth';
 import { addDays, dayDiff, todayStr } from '../common/dates';
@@ -14,7 +14,11 @@ import { NotificationsService } from '../notifications/notifications.service';
 import { AppError, BadRequest, Forbidden, NotFound } from '../common/errors';
 import { imageUploadOptions, saveImage, sendImage } from '../common/upload';
 import { Response } from 'express';
-import { Attendance, AttendanceHistory, AttStatus, Child, Guardian, Pickup, PickupRequest } from '../database/entities';
+import { Attendance, AttendanceHistory, AttStatus, AuthorizedPicker, Child, ClassRoom, Guardian, Pickup, PickupCallAttempt, PickupRequest, User } from '../database/entities';
+import { ESCALATE_MINUTES, maskId, PickupSafetyService } from '../pickup/pickup-safety.service';
+import { parsePhone } from '../imports/children-import';
+import { Request } from 'express';
+import { isExpired, requestBlockers } from '../pickup/request-rules';
 
 export const TEACHER_EDIT_WINDOW_DAYS = 3;
 
@@ -33,8 +37,9 @@ export class PutAttendanceDto {
   @ApiProperty({ type: [AttendanceItemDto] }) @IsArray() @ArrayMaxSize(200) @ValidateNested({ each: true }) @Type(() => AttendanceItemDto) items!: AttendanceItemDto[];
 }
 export class PickupDto {
-  @ApiPropertyOptional({ description: 'Người đón nằm trong danh sách người giám hộ (canPickup=true)' }) @IsOptional() @IsUUID() guardianId?: string;
-  @ApiPropertyOptional({ description: 'Người đón ngoài danh sách: yêu cầu đón đã được phụ huynh/BGH xác nhận' }) @IsOptional() @IsUUID() pickupRequestId?: string;
+  @ApiPropertyOptional({ description: 'Bố mẹ / người giám hộ trong danh sách (canPickup=true): giao luôn' }) @IsOptional() @IsUUID() guardianId?: string;
+  @ApiPropertyOptional({ description: 'Người đón hộ phụ huynh đã đăng ký và BGH đã duyệt: giao luôn' }) @IsOptional() @IsUUID() authorizedPickerId?: string;
+  @ApiPropertyOptional({ description: 'Người ngoài danh sách: yêu cầu đã được CẢ phụ huynh VÀ nhà trường duyệt, chưa hết hạn' }) @IsOptional() @IsUUID() pickupRequestId?: string;
   @ApiPropertyOptional({ description: 'ISO 8601, mặc định thời điểm hiện tại' }) @IsOptional() @IsISO8601() pickedUpAt?: string;
   @ApiPropertyOptional() @IsOptional() @IsString() @MaxLength(500) note?: string;
 }
@@ -43,10 +48,30 @@ export class CreatePickupRequestDto {
   @ApiProperty({ example: '0909123456' }) @Matches(/^[0-9+ ]{8,20}$/) pickerPhone!: string;
   @ApiPropertyOptional({ example: 'Chú ruột' }) @IsOptional() @IsString() @MaxLength(40) relation?: string;
   @ApiProperty({ example: 'Mẹ bé gọi báo nhờ chú đón', description: 'BẮT BUỘC (thiếu/rỗng → 400 VALIDATION_ERROR): ai báo, báo lúc nào' }) @IsString() @MinLength(1) @MaxLength(500) note!: string;
+  @ApiPropertyOptional({ example: '079123456789', description: 'CCCD người đón (12 số, tuỳ chọn) – dùng cảnh báo một người đón nhiều bé' }) @IsOptional() @Matches(/^\d{12}$/, { message: 'CCCD phải đúng 12 chữ số' }) pickerIdNumber?: string;
   @ApiPropertyOptional({ type: 'string', format: 'binary', description: 'Ảnh người đón (tuỳ chọn)' }) @IsOptional() photo?: any;
 }
 export class DecisionDto {
-  @ApiPropertyOptional({ example: 'Đúng là chú của bé', description: 'Bắt buộc khi Ban giám hiệu quyết định thay phụ huynh' }) @IsOptional() @IsString() @MaxLength(500) note?: string;
+  @ApiPropertyOptional({ example: 'Không quen người này', description: 'Bắt buộc khi nhà trường (BGH / trực đón) TỪ CHỐI; duyệt thì không cần' }) @IsOptional() @IsString() @MaxLength(500) note?: string;
+}
+export class OnBehalfDto {
+  @ApiProperty({ enum: ['approve', 'reject'] }) @IsIn(['approve', 'reject']) decision!: 'approve' | 'reject';
+  @ApiProperty({ example: 'Đã gọi số 0912…, mẹ bé đồng ý', description: 'Bắt buộc: đã liên lạc phụ huynh thế nào' }) @IsString() @MinLength(1) @MaxLength(500) note!: string;
+}
+export class CallAttemptDto {
+  @ApiProperty({ example: '0912000001' }) @Matches(/^[0-9+ ]{8,20}$/) phone!: string;
+  @ApiProperty({ enum: ['no_answer', 'busy', 'wrong_number', 'confirmed', 'rejected', 'other'], description: "Chỉ ghi nhận; 'confirmed' KHÔNG tự duyệt hay tự giao bé" })
+  @IsIn(['no_answer', 'busy', 'wrong_number', 'confirmed', 'rejected', 'other']) outcome!: string;
+  @ApiPropertyOptional() @IsOptional() @IsUUID() guardianId?: string;
+  @ApiPropertyOptional() @IsOptional() @IsString() @MaxLength(500) note?: string;
+}
+export class FeedQuery {
+  @ApiPropertyOptional({ description: 'Mặc định hôm nay' }) @IsOptional() @IsDateString() date?: string;
+  @ApiPropertyOptional() @IsOptional() @IsUUID() childId?: string;
+}
+export class IdentityQuery {
+  @ApiProperty({ enum: ['guardian', 'authorized_picker', 'pickup_request'] }) @IsIn(['guardian', 'authorized_picker', 'pickup_request']) kind!: string;
+  @ApiProperty() @IsUUID() id!: string;
 }
 export class PickupRequestQuery {
   @ApiPropertyOptional({ enum: ['pending', 'approved', 'rejected', 'expired'] }) @IsOptional() @IsIn(['pending', 'approved', 'rejected', 'expired']) status?: string;
@@ -63,8 +88,8 @@ export function assertDateEditable(u: AuthUser, date: string) {
 }
 
 const pickupView = (p: Pickup) => ({
-  id: p.id, attendanceId: p.attendanceId, guardianId: p.guardianId, pickupRequestId: p.pickupRequestId, pickedUpByName: p.pickedUpByName,
-  relation: p.relation, pickedUpAt: p.pickedUpAt, isAuthorized: p.isAuthorized, note: p.note,
+  id: p.id, attendanceId: p.attendanceId, guardianId: p.guardianId, authorizedPickerId: p.authorizedPickerId, pickupRequestId: p.pickupRequestId,
+  pickerKind: p.pickerKind, pickedUpByName: p.pickedUpByName, relation: p.relation, pickedUpAt: p.pickedUpAt, isAuthorized: p.isAuthorized, note: p.note, recordedBy: p.recordedBy,
 });
 export const PICKUP_REQUEST_TTL_MS = 2 * 60 * 60 * 1000;
 /** min(now + 2h, midnight ending the school day in Vietnam time, UTC+7 without DST). */
@@ -72,13 +97,21 @@ export function pickupRequestExpiry(now = new Date()): Date {
   const endOfDay = new Date(`${addDays(todayStr(), 1)}T00:00:00+07:00`);
   return new Date(Math.min(now.getTime() + PICKUP_REQUEST_TTL_MS, endOfDay.getTime()));
 }
-const requestView = (r: PickupRequest & { child?: Child }) => ({
-  id: r.id, attendanceId: r.attendanceId, childId: r.childId, childName: r.child?.fullName, classId: r.classId,
-  pickerName: r.pickerName, pickerPhone: r.pickerPhone, relation: r.relation, note: r.note, photoUrl: r.photoUrl ? `/api/v1/pickup-requests/${r.id}/photo` : null,
-  status: r.status, expiresAt: r.expiresAt, requestedBy: r.requestedBy, decidedBy: r.decidedBy, decidedByName: r.decider?.name ?? null,
-  decidedOnBehalf: r.decidedOnBehalf, decidedAt: r.decidedAt, decisionNote: r.decisionNote, createdAt: r.createdAt,
+export { requestBlockers };
+const requestView = (r: PickupRequest & { child?: Child }, names: Map<string, string> = new Map()) => ({
+  id: r.id, attendanceId: r.attendanceId, childId: r.childId, childName: r.child?.fullName, classId: r.classId, className: names.get(`class:${r.classId}`) ?? null,
+  pickerName: r.pickerName, pickerPhone: r.pickerPhone, pickerIdNumberMasked: maskId(r.pickerIdNumber), relation: r.relation, note: r.note,
+  photoUrl: r.photoUrl ? `/api/v1/pickup-requests/${r.id}/photo` : null,
+  status: isExpired(r) && r.status === 'pending' ? 'expired' : r.status, expiresAt: r.expiresAt, requestedBy: r.requestedBy, createdAt: r.createdAt,
+  /** when the 15-minute call prompt starts (createdAt + PICKUP_ESCALATE_MINUTES) */
+  dueAt: new Date(new Date(r.createdAt).getTime() + ESCALATE_MINUTES() * 60_000),
+  parent: { status: r.parentStatus, decidedBy: r.parentDecidedBy, decidedByName: r.parentDecidedBy ? names.get(r.parentDecidedBy) ?? null : null, decidedAt: r.parentDecidedAt, note: r.parentNote, channel: r.parentChannel },
+  school: { status: r.schoolStatus, decidedBy: r.schoolDecidedBy, decidedByName: r.schoolDecidedBy ? names.get(r.schoolDecidedBy) ?? null : null, decidedAt: r.schoolDecidedAt, note: r.schoolNote,
+    role: r.schoolDecidedRole as 'admin' | 'duty' | null },
+  blockers: requestBlockers(r), readyForHandover: requestBlockers(r).length === 0,
+  // legacy single-decision fields (last decision)
+  decidedBy: r.decidedBy, decidedByName: r.decider?.name ?? null, decidedOnBehalf: r.decidedOnBehalf, decidedAt: r.decidedAt, decisionNote: r.decisionNote,
 });
-
 @ApiTags('attendance') @ApiBearerAuth()
 @Controller()
 export class AttendanceController {
@@ -89,7 +122,7 @@ export class AttendanceController {
     @InjectRepository(Guardian) private guardians: Repository<Guardian>,
     @InjectRepository(Pickup) private pickups: Repository<Pickup>,
     @InjectRepository(PickupRequest) private requests: Repository<PickupRequest>,
-    private access: AccessService, private ds: DataSource, private notify: NotificationsService,
+    private access: AccessService, private ds: DataSource, private notify: NotificationsService, private safety: PickupSafetyService,
   ) {}
 
   /** Lazily flips overdue pending requests to 'expired'. */
@@ -187,43 +220,135 @@ export class AttendanceController {
     };
   }
 
+  private async names(rows: PickupRequest[]) {
+    const ids = [...new Set(rows.flatMap((r) => [r.parentDecidedBy, r.schoolDecidedBy]).filter(Boolean) as string[])];
+    const us = ids.length ? await this.ds.getRepository(User).find({ where: { id: In(ids) }, select: { id: true, name: true } }) : [];
+    const cids = [...new Set(rows.map((r) => r.classId).filter(Boolean))];
+    const cs = cids.length ? await this.ds.getRepository(ClassRoom).find({ where: { id: In(cids) }, select: { id: true, name: true } }) : [];
+    return new Map([...us.map((x) => [x.id, x.name] as [string, string]), ...cs.map((c) => [`class:${c.id}`, c.name] as [string, string])]);
+  }
+  /** Staff view: + 15-minute escalation info and same-picker warnings. */
+  private async staffView(r: PickupRequest, names?: Map<string, string>) {
+    const date = await this.safety.requestDate(r);
+    return {
+      ...requestView(r, names ?? (await this.names([r]))),
+      escalation: await this.safety.escalation(r),
+      warnings: this.safety.multiWarning(await this.safety.samePickerToday(r.childId, r.pickerPhone, r.pickerIdNumber, date), r.pickerName),
+    };
+  }
+  private async parentIds(childId: string) { return this.notify.parentIdsOfChildren([childId]); }
+
   /**
-   * Hand the child over. Allowed only for (a) a listed guardian with canPickup=true, or
-   * (b) a pickup request that the child's parent or admin has approved. Otherwise 403.
+   * Hand the child over (API-enforced, PM rules):
+   *  - guardianId: listed parent/guardian with canPickup -> direct;
+   *  - authorizedPickerId: person registered by a parent AND approved by admin -> direct (pending/rejected = off-list -> 403);
+   *  - pickupRequestId: off-list person; needs parent approved AND school approved, not expired, and the school approver
+   *    must not be the one handing over. Already handed over -> 409. Parents are notified "Bé đã được X đón lúc HH:MM".
    */
   @Post('attendance/:id/pickup') @Roles('admin', 'teacher')
   async pickup(@CurrentUser() u: AuthUser, @Param('id', ParseUUIDPipe) id: string, @Body() dto: PickupDto) {
     const a = await this.attendanceForStaff(u, id);
     assertDateEditable(u, a.date);
     if (a.status === 'absent') throw BadRequest('Trẻ vắng mặt, không thể ghi nhận đón', 'CHILD_ABSENT');
-    if (!!dto.guardianId === !!dto.pickupRequestId)
-      throw BadRequest('Cần đúng một trong hai: guardianId (người trong danh sách) hoặc pickupRequestId (người ngoài danh sách đã được xác nhận)', 'PICKUP_PERSON_REQUIRED');
+    if ([dto.guardianId, dto.authorizedPickerId, dto.pickupRequestId].filter(Boolean).length !== 1)
+      throw BadRequest('Cần đúng một trong: guardianId (bố mẹ / người giám hộ), authorizedPickerId (người đón hộ đã duyệt) hoặc pickupRequestId (người ngoài danh sách đã đủ 2 bước duyệt)', 'PICKUP_PERSON_REQUIRED');
+    if (await this.pickups.exist({ where: { attendanceId: id } })) throw new AppError(409, 'ALREADY_PICKED_UP', 'Bé đã được giao rồi');
 
-    let name: string, relation: string | null, guardianId: string | null = null, requestId: string | null = null;
+    let name: string, relation: string | null, kind: string, phone: string | null = null, idNumber: string | null = null;
+    let guardianId: string | null = null, pickerId: string | null = null, requestId: string | null = null;
     if (dto.guardianId) {
       const g = await this.guardians.findOne({ where: { id: dto.guardianId } });
       if (!g || g.childId !== a.childId) throw BadRequest('Người giám hộ không thuộc trẻ này', 'INVALID_GUARDIAN');
       if (!g.canPickup) throw new AppError(403, 'PICKUP_NOT_ALLOWED', 'Người này không được phép đón trẻ');
-      guardianId = g.id; name = g.fullName; relation = g.relation;
+      guardianId = g.id; name = g.fullName; relation = g.relation; kind = 'guardian'; phone = g.phone; idNumber = g.idNumber;
+    } else if (dto.authorizedPickerId) {
+      const p = await this.ds.getRepository(AuthorizedPicker).findOne({ where: { id: dto.authorizedPickerId } });
+      if (!p || p.childId !== a.childId || p.deletedAt) throw BadRequest('Người đón hộ không thuộc trẻ này (hoặc đã bị xoá)', 'INVALID_AUTHORIZED_PICKER');
+      if (p.status !== 'approved') throw new AppError(403, 'PICKER_NOT_APPROVED',
+        p.status === 'pending' ? 'Người đón hộ chưa được Ban giám hiệu duyệt: coi như người ngoài danh sách, cần tạo yêu cầu đón (đủ 2 bước)' : 'Người đón hộ đã bị từ chối: không được giao trẻ');
+      pickerId = p.id; name = p.fullName; relation = p.relation; kind = 'authorized_picker'; phone = p.phone1; idNumber = p.idNumber;
     } else {
       await this.sweepExpired();
       const r = await this.requests.findOne({ where: { id: dto.pickupRequestId } });
       if (!r || r.attendanceId !== a.id) throw BadRequest('Yêu cầu đón không thuộc bản điểm danh này', 'INVALID_PICKUP_REQUEST');
-      if (r.status === 'rejected') throw new AppError(403, 'PICKUP_REQUEST_REJECTED', 'Yêu cầu đón đã bị từ chối, không được giao trẻ');
-      if (r.status === 'expired' || (r.expiresAt && r.expiresAt.getTime() <= Date.now()))
-        throw new AppError(403, 'PICKUP_REQUEST_EXPIRED', 'Yêu cầu đón đã hết hạn (2 giờ hoặc hết ngày); tạo yêu cầu mới');
-      if (r.status !== 'approved') throw new AppError(403, 'PICKUP_REQUEST_PENDING', 'Yêu cầu đón chưa được phụ huynh hoặc Ban giám hiệu xác nhận');
-      requestId = r.id; name = r.pickerName; relation = r.relation;
+      if (r.parentStatus === 'rejected' || r.schoolStatus === 'rejected' || r.status === 'rejected')
+        throw new AppError(403, 'PICKUP_REQUEST_REJECTED', 'Yêu cầu đón đã bị từ chối, không được giao trẻ');
+      if (isExpired(r)) throw new AppError(403, 'PICKUP_REQUEST_EXPIRED', 'Yêu cầu đón đã hết hạn (2 giờ hoặc hết ngày); tạo yêu cầu mới');
+      // code kept from v1 (PICKUP_REQUEST_PENDING); details = which step is missing: PARENT_PENDING / SCHOOL_PENDING
+      if (r.parentStatus !== 'approved' || r.schoolStatus !== 'approved') throw new AppError(403, 'PICKUP_REQUEST_PENDING',
+        r.parentStatus !== 'approved' && r.schoolStatus !== 'approved' ? 'Cần phụ huynh xác nhận VÀ nhà trường (BGH / trực đón) duyệt trước khi giao bé'
+          : r.parentStatus !== 'approved' ? 'Phụ huynh chưa xác nhận người đón' : 'Nhà trường (BGH / trực đón) chưa duyệt người đón',
+        requestBlockers(r));
+      if (r.schoolDecidedBy === u.id) throw new AppError(403, 'APPROVER_CANNOT_HAND_OVER', 'Người duyệt phần nhà trường không được tự giao bé; người khác phải giao');
+      requestId = r.id; name = r.pickerName; relation = r.relation; kind = 'request'; phone = r.pickerPhone; idNumber = r.pickerIdNumber;
     }
-    const existing = await this.pickups.findOne({ where: { attendanceId: id } });
-    const p = await this.pickups.save({
-      ...(existing ?? {}), attendanceId: id, guardianId, pickupRequestId: requestId, pickedUpByName: name, relation,
-      pickedUpAt: dto.pickedUpAt ? new Date(dto.pickedUpAt) : new Date(), isAuthorized: true, note: dto.note ?? null, recordedBy: u.id,
-    });
-    return pickupView(p as Pickup);
+    const warnings = this.safety.multiWarning(await this.safety.samePickerToday(a.childId, phone, idNumber, a.date), name);
+    let p: Pickup;
+    try {
+      p = await this.pickups.save(this.pickups.create({
+        attendanceId: id, guardianId, authorizedPickerId: pickerId, pickupRequestId: requestId, pickerKind: kind, pickerPhone: phone, pickerIdNumber: idNumber,
+        pickedUpByName: name, relation, pickedUpAt: dto.pickedUpAt ? new Date(dto.pickedUpAt) : new Date(), isAuthorized: true, note: dto.note ?? null, recordedBy: u.id,
+      }));
+    } catch (e: any) {
+      if (e?.driverError?.code === '23505') throw new AppError(409, 'ALREADY_PICKED_UP', 'Bé đã được giao rồi');
+      throw e;
+    }
+    const child = await this.children.findOne({ where: { id: a.childId } });
+    const sent = await this.safety.notifyPickedUp(a.childId, child?.fullName ?? '', name, relation, p.pickedUpAt, await this.parentIds(a.childId), p.id);
+    return { ...pickupView(p), handedOverBy: u.id, handedOverByName: u.name, warnings, notified: sent };
   }
 
-  /** Teacher registers a person NOT on the guardian list; child is released only after parent/admin confirms. */
+  /** Handover screen: everyone who may pick this child up, with what is still missing. CCCD masked (full via /pickup-identity). */
+  @Get('attendance/:id/pickup-options') @Roles('admin', 'teacher')
+  async pickupOptions(@CurrentUser() u: AuthUser, @Param('id', ParseUUIDPipe) id: string) {
+    const a = await this.attendanceForStaff(u, id);
+    await this.sweepExpired();
+    const child = await this.children.findOne({ where: { id: a.childId }, relations: { classRoom: true } });
+    const done = await this.pickups.findOne({ where: { attendanceId: id } });
+    const gs = await this.guardians.find({ where: { childId: a.childId }, order: { createdAt: 'ASC' } });
+    const aps = await this.ds.getRepository(AuthorizedPicker).find({ where: { childId: a.childId, deletedAt: IsNull() }, order: { createdAt: 'ASC' } });
+    const reqs = await this.requests.find({ where: { attendanceId: id }, order: { createdAt: 'DESC' } });
+    const names = await this.names(reqs);
+    return {
+      attendanceId: id, date: a.date, status: a.status,
+      child: { id: child!.id, fullName: child!.fullName, className: child!.classRoom?.name ?? null, photoUrl: child!.photoUrl ? `/api/v1/children/${child!.id}/photo` : null },
+      pickedUp: done ? pickupView(done) : null,
+      guardians: gs.map((g) => ({ kind: 'guardian', id: g.id, fullName: g.fullName, relation: g.relation, phone: g.phone, idNumberMasked: maskId(g.idNumber),
+        hasAccount: !!g.userId, canPickup: g.canPickup, canHandOver: !done && g.canPickup && a.status !== 'absent', blockers: g.canPickup ? [] : ['NOT_ALLOWED'] })),
+      authorizedPickers: aps.map((p) => ({ kind: 'authorized_picker', id: p.id, fullName: p.fullName, relation: p.relation, phone1: p.phone1, phone2: p.phone2,
+        idNumberMasked: maskId(p.idNumber), photoUrl: `/api/v1/authorized-pickers/${p.id}/photo`, status: p.status,
+        canHandOver: !done && p.status === 'approved' && a.status !== 'absent', blockers: p.status === 'approved' ? [] : [p.status === 'pending' ? 'NOT_APPROVED_YET' : 'REJECTED'] })),
+      requests: await Promise.all(reqs.map(async (r) => {
+        const v = await this.staffView(r, names);
+        const blockers = [...v.blockers, ...(r.schoolDecidedBy === u.id ? ['YOU_APPROVED'] : [])];
+        return { kind: 'pickup_request', ...v, blockers, canHandOver: !done && a.status !== 'absent' && blockers.length === 0 };
+      })),
+    };
+  }
+
+  /** Full CCCD + photo for the handover screen. Admin / teacher of the class only; every call is audit-logged. */
+  @Get('attendance/:id/pickup-identity') @Roles('admin', 'teacher')
+  async pickupIdentity(@CurrentUser() u: AuthUser, @Param('id', ParseUUIDPipe) id: string, @Query() q: IdentityQuery, @Req() req: Request) {
+    const a = await this.attendanceForStaff(u, id);
+    let out: { fullName: string; relation: string | null; idNumber: string | null; photoUrl: string | null; phones: string[] };
+    if (q.kind === 'guardian') {
+      const g = await this.guardians.findOne({ where: { id: q.id } });
+      if (!g || g.childId !== a.childId) throw NotFound('Không tìm thấy người đón của bé này');
+      out = { fullName: g.fullName, relation: g.relation, idNumber: g.idNumber, photoUrl: null, phones: [g.phone].filter(Boolean) as string[] };
+    } else if (q.kind === 'authorized_picker') {
+      const p = await this.ds.getRepository(AuthorizedPicker).findOne({ where: { id: q.id } });
+      if (!p || p.childId !== a.childId || p.deletedAt) throw NotFound('Không tìm thấy người đón của bé này');
+      out = { fullName: p.fullName, relation: p.relation, idNumber: p.idNumber, photoUrl: `/api/v1/authorized-pickers/${p.id}/photo`, phones: [p.phone1, p.phone2].filter(Boolean) as string[] };
+    } else {
+      const r = await this.requests.findOne({ where: { id: q.id } });
+      if (!r || r.attendanceId !== a.id) throw NotFound('Không tìm thấy yêu cầu đón của bé này');
+      out = { fullName: r.pickerName, relation: r.relation, idNumber: r.pickerIdNumber, photoUrl: r.photoUrl ? `/api/v1/pickup-requests/${r.id}/photo` : null, phones: [r.pickerPhone] };
+    }
+    await this.safety.logSensitive(u, q.kind, q.id, a.childId, 'handover', a.id, req.ip ?? null);
+    return { kind: q.kind, id: q.id, attendanceId: a.id, childId: a.childId, ...out, audited: true };
+  }
+
+  /** Teacher registers a person NOT on the list; needs parent AND school approval before handover. Push to the child's parents only. */
   @Post('attendance/:id/pickup-requests') @Roles('admin', 'teacher')
   @ApiConsumes('multipart/form-data', 'application/json')
   @UseInterceptors(FileInterceptor('photo', imageUploadOptions))
@@ -232,74 +357,117 @@ export class AttendanceController {
     const a = await this.attendanceForStaff(u, id);
     if (a.date !== todayStr()) throw BadRequest('Chỉ tạo yêu cầu đón cho ngày hôm nay', 'NOT_TODAY');
     if (a.status === 'absent') throw BadRequest('Trẻ vắng mặt, không thể tạo yêu cầu đón', 'CHILD_ABSENT');
-    const photo = file ? saveImage(file) : null; // validated by magic bytes
+    if (await this.pickups.exist({ where: { attendanceId: id } })) throw new AppError(409, 'ALREADY_PICKED_UP', 'Bé đã được giao rồi');
+    const phone = parsePhone(dto.pickerPhone) ?? dto.pickerPhone.replace(/\s/g, '');
+    const photo = file ? await saveImage(file) : null; // validated by magic bytes
     const r = await this.requests.save(this.requests.create({
-      attendanceId: a.id, childId: a.childId, classId: a.classId, pickerName: dto.pickerName.trim(), pickerPhone: dto.pickerPhone,
-      relation: dto.relation ?? null, note: dto.note, photoUrl: photo, status: 'pending', requestedBy: u.id, expiresAt: pickupRequestExpiry(),
+      attendanceId: a.id, childId: a.childId, classId: a.classId, pickerName: dto.pickerName.trim(), pickerPhone: phone, pickerIdNumber: dto.pickerIdNumber ?? null,
+      relation: dto.relation ?? null, note: dto.note, photoUrl: photo, status: 'pending', parentStatus: 'pending', schoolStatus: 'pending', requestedBy: u.id, expiresAt: pickupRequestExpiry(),
     }));
     const child = await this.children.findOne({ where: { id: a.childId } });
-    await this.notify.toParentsOfChild(a.childId, {
-      type: 'pickup_request', title: `Yêu cầu xác nhận người đón bé ${child?.fullName ?? ''}`.trim(),
-      body: `${r.pickerName}${r.relation ? ' (' + r.relation + ')' : ''}, SĐT ${r.pickerPhone} xin đón bé. Ghi chú: ${r.note}. Vui lòng xác nhận hoặc từ chối.`,
-      data: { pickupRequestId: r.id, childId: a.childId, attendanceId: a.id, expiresAt: r.expiresAt },
-    });
-    return requestView(r);
+    const delivery = await this.safety.notifyRequestCreated(r, child?.fullName ?? '', await this.parentIds(a.childId));
+    return { ...(await this.staffView(r)), delivery };
   }
 
-  private canSeeRequest(u: AuthUser, r: PickupRequest) {
-    return u.role === 'admin' || (u.role === 'teacher' && u.classIds.includes(r.classId)) || (u.role === 'parent' && u.childIds.includes(r.childId));
+  private async canSeeRequest(u: AuthUser, r: PickupRequest) {
+    if (u.role === 'admin' || (u.role === 'teacher' && u.classIds.includes(r.classId)) || (u.role === 'parent' && u.childIds.includes(r.childId))) return true;
+    // the day's duty account approves off-list requests, so it may see them (that day only)
+    return u.role !== 'parent' && (await this.safety.requestDate(r)) === todayStr() && (await this.safety.isOnDuty(u.id));
   }
 
-  @Get('pickup-requests/:id/photo') @Roles('admin', 'teacher', 'parent')
+  @Get('pickup-requests/:id/photo') @Roles('admin', 'teacher', 'parent', 'accountant')
   async requestPhoto(@CurrentUser() u: AuthUser, @Param('id', ParseUUIDPipe) id: string, @Res() res: Response) {
     const r = await this.requests.findOne({ where: { id } });
     if (!r) throw NotFound('Không tìm thấy yêu cầu đón');
-    if (!this.canSeeRequest(u, r)) throw Forbidden('Không có quyền xem ảnh này');
+    if (!(await this.canSeeRequest(u, r))) throw Forbidden('Không có quyền xem ảnh này');
     sendImage(res, r.photoUrl);
   }
 
-  /** admin: all; teacher: own classes; parent: own children (e.g. ?status=pending). Accountant: 403. */
-  @Get('pickup-requests') @Roles('admin', 'teacher', 'parent')
+  /** admin: all; teacher: own classes; duty account: today's; parent: own children. */
+  @Get('pickup-requests') @Roles('admin', 'teacher', 'parent', 'accountant')
   async listRequests(@CurrentUser() u: AuthUser, @Query() q: PickupRequestQuery) {
     await this.sweepExpired();
     const qb = this.requests.createQueryBuilder('r').leftJoinAndSelect('r.child', 'c').leftJoinAndSelect('r.decider', 'd')
       .leftJoin('r.attendance', 'a').orderBy('r.createdAt', 'DESC').take(200);
-    if (u.role === 'teacher') qb.andWhere('r.class_id = ANY(:cids)', { cids: u.classIds });
+    const duty = u.role !== 'parent' && u.role !== 'admin' && (await this.safety.isOnDuty(u.id));
+    if (u.role === 'teacher' || u.role === 'accountant') {
+      if (duty) qb.andWhere(new Brackets((w) => w.where('r.class_id = ANY(:cids)', { cids: u.classIds }).orWhere('a.date = :today', { today: todayStr() })));
+      else if (u.role === 'accountant') throw Forbidden('Chỉ tài khoản trực đón xem được yêu cầu đón');
+      else qb.andWhere('r.class_id = ANY(:cids)', { cids: u.classIds });
+    }
     if (u.role === 'parent') qb.andWhere('r.child_id = ANY(:kids)', { kids: u.childIds });
     if (q.status) qb.andWhere('r.status = :st', { st: q.status });
     if (q.childId) qb.andWhere('r.child_id = :cid', { cid: q.childId });
     if (q.date) qb.andWhere('a.date = :d', { d: q.date });
-    return (await qb.getMany()).map(requestView);
+    const rows = await qb.getMany();
+    const names = await this.names(rows);
+    if (u.role === 'parent') return rows.map((r) => ({ ...requestView(r, names), needsMyAction: r.status === 'pending' && r.parentStatus === 'pending' && !isExpired(r) }));
+    return Promise.all(rows.map((r) => this.staffView(r, names)));
   }
 
-  private async decide(u: AuthUser, id: string, status: 'approved' | 'rejected', dto: DecisionDto) {
+  /** Parent feed (separate from the general inbox): pending requests needing my answer first, with picker photo. Default: today. */
+  @Get('pickup-requests/feed') @Roles('parent')
+  async feed(@CurrentUser() u: AuthUser, @Query() q: FeedQuery) {
     await this.sweepExpired();
+    const date = q.date ?? todayStr();
+    const kids = q.childId ? u.childIds.filter((k) => k === q.childId) : u.childIds;
+    if (q.childId && !kids.length) throw Forbidden('Không phải con của bạn');
+    const rows = kids.length ? await this.requests.createQueryBuilder('r').leftJoinAndSelect('r.child', 'c').leftJoin('r.attendance', 'a')
+      .where('r.child_id = ANY(:kids)', { kids }).andWhere('a.date = :d', { d: date }).orderBy('r.createdAt', 'DESC').getMany() : [];
+    const names = await this.names(rows);
+    const items = rows.map((r) => ({ ...requestView(r, names), needsMyAction: r.status === 'pending' && r.parentStatus === 'pending' && !isExpired(r) }))
+      .sort((x, y) => Number(y.needsMyAction) - Number(x.needsMyAction) || +new Date(y.createdAt) - +new Date(x.createdAt));
+    return { date, pendingCount: items.filter((i) => i.needsMyAction).length, items };
+  }
+
+  @Get('pickup-requests/:id') @Roles('admin', 'teacher', 'parent', 'accountant')
+  async getRequest(@CurrentUser() u: AuthUser, @Param('id', ParseUUIDPipe) id: string) {
+    await this.sweepExpired();
+    const r = await this.requests.findOne({ where: { id }, relations: { child: true, decider: true } });
+    if (!r) throw NotFound('Không tìm thấy yêu cầu đón');
+    if (!(await this.canSeeRequest(u, r))) throw Forbidden('Không có quyền xem yêu cầu này');
+    if (u.role === 'parent') return { ...requestView(r, await this.names([r])), needsMyAction: r.status === 'pending' && r.parentStatus === 'pending' && !isExpired(r) };
+    return this.staffView(r);
+  }
+
+  private async decide(u: AuthUser, id: string, decision: 'approved' | 'rejected', dto: DecisionDto) {
     const r = await this.requests.findOne({ where: { id } });
     if (!r) throw NotFound('Không tìm thấy yêu cầu đón');
-    if (!(u.role === 'admin' || (u.role === 'parent' && u.childIds.includes(r.childId))))
-      throw Forbidden('Chỉ phụ huynh của trẻ hoặc Ban giám hiệu được xác nhận');
-    if (r.status === 'expired') throw new AppError(409, 'REQUEST_EXPIRED', 'Yêu cầu đã hết hạn; giáo viên cần tạo yêu cầu mới');
-    if (r.status !== 'pending') throw new AppError(409, 'ALREADY_DECIDED', 'Yêu cầu này đã được xử lý');
-    const onBehalf = u.role === 'admin';
-    if (onBehalf && !dto.note?.trim()) throw BadRequest('Ban giám hiệu quyết định thay phụ huynh phải ghi chú lý do (vd. đã gọi điện xác nhận)', 'NOTE_REQUIRED');
-    const res = await this.requests.createQueryBuilder().update()
-      .set({ status, decidedBy: u.id, decidedAt: () => 'now()', decisionNote: dto.note ?? null, decidedOnBehalf: onBehalf })
-      .where("id = :id AND status = 'pending' AND (expires_at IS NULL OR expires_at > now())", { id }).execute();
-    if (!res.affected) throw new AppError(409, 'ALREADY_DECIDED', 'Yêu cầu này đã được xử lý hoặc đã hết hạn');
-    const done = (await this.requests.findOne({ where: { id }, relations: { child: true, decider: true } }))!;
-    if (done.requestedBy) await this.notify.toUsers([done.requestedBy], {
-      type: 'pickup_decision', title: `Yêu cầu đón bé ${done.child?.fullName ?? ''} đã được ${status === 'approved' ? 'XÁC NHẬN' : 'TỪ CHỐI'}`,
-      body: `${done.pickerName}: ${status === 'approved' ? 'được phép đón' : 'KHÔNG được giao trẻ'}${onBehalf ? ' (Ban giám hiệu quyết định thay phụ huynh)' : ''}${dto.note ? '. Ghi chú: ' + dto.note : ''}`,
-      data: { pickupRequestId: id, childId: done.childId, status },
-    });
-    return requestView(done);
+    let done: PickupRequest;
+    if (u.role === 'parent') {
+      if (!u.childIds.includes(r.childId)) throw Forbidden('Chỉ phụ huynh của trẻ được xác nhận');
+      done = await this.safety.decideStep(u, id, 'parent', decision, { note: dto.note, channel: 'app' });
+    } else {
+      const role = await this.safety.schoolRole(u, await this.safety.requestDate(r));
+      if (decision === 'rejected' && !dto.note?.trim()) throw BadRequest('Nhà trường từ chối phải ghi lý do', 'NOTE_REQUIRED');
+      done = await this.safety.decideStep(u, id, 'school', decision, { note: dto.note, role });
+    }
+    return u.role === 'parent' ? requestView(done, await this.names([done])) : this.staffView(done);
   }
 
-  @Post('pickup-requests/:id/confirm') @Roles('admin', 'parent') @HttpCode(200)
-  @ApiOperation({ summary: "Xác nhận yêu cầu đón → status = 'approved' (không phải 'confirmed'). Trạng thái: pending | approved | rejected | expired" })
+  @Post('pickup-requests/:id/confirm') @Roles('admin', 'parent', 'teacher', 'accountant') @HttpCode(200)
+  @ApiOperation({ summary: 'Đồng ý: phụ huynh của bé → bước phụ huynh; BGH / tài khoản trực đón hôm nay → bước nhà trường. GV không trực → 403.' })
   confirm(@CurrentUser() u: AuthUser, @Param('id', ParseUUIDPipe) id: string, @Body() dto: DecisionDto) { return this.decide(u, id, 'approved', dto); }
 
-  @Post('pickup-requests/:id/reject') @Roles('admin', 'parent') @HttpCode(200)
-  @ApiOperation({ summary: "Từ chối yêu cầu đón → status = 'rejected'; giao trẻ cho người này sẽ bị 403" })
+  @Post('pickup-requests/:id/reject') @Roles('admin', 'parent', 'teacher', 'accountant') @HttpCode(200)
+  @ApiOperation({ summary: 'Từ chối (nhà trường từ chối phải có note). Một bước từ chối → status rejected, giao bé 403.' })
   reject(@CurrentUser() u: AuthUser, @Param('id', ParseUUIDPipe) id: string, @Body() dto: DecisionDto) { return this.decide(u, id, 'rejected', dto); }
+
+  /** Admin records the PARENT's answer after reaching them by phone (bước phụ huynh, note required). The school step stays separate. */
+  @Post('pickup-requests/:id/parent-decision') @Roles('admin') @HttpCode(200)
+  async parentOnBehalf(@CurrentUser() u: AuthUser, @Param('id', ParseUUIDPipe) id: string, @Body() dto: OnBehalfDto) {
+    const done = await this.safety.decideStep(u, id, 'parent', dto.decision === 'approve' ? 'approved' : 'rejected', { note: dto.note, channel: 'on_behalf', onBehalf: true });
+    return this.staffView(done);
+  }
+
+  /** 15-minute rule: log a phone call to the parent (who, which number, outcome). Never changes the request. */
+  @Post('pickup-requests/:id/call-attempts') @Roles('admin', 'teacher', 'accountant')
+  async logCall(@CurrentUser() u: AuthUser, @Param('id', ParseUUIDPipe) id: string, @Body() dto: CallAttemptDto) {
+    const r = await this.requests.findOne({ where: { id } });
+    if (!r) throw NotFound('Không tìm thấy yêu cầu đón');
+    if (!(await this.canSeeRequest(u, r))) throw Forbidden('Không có quyền với yêu cầu này');
+    const phone = parsePhone(dto.phone) ?? dto.phone.replace(/\s/g, '');
+    await this.ds.getRepository(PickupCallAttempt).insert({ pickupRequestId: id, calledBy: u.id, phone, guardianId: dto.guardianId ?? null, outcome: dto.outcome, note: dto.note ?? null });
+    return this.staffView((await this.requests.findOne({ where: { id }, relations: { child: true, decider: true } }))!);
+  }
 }

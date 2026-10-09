@@ -59,14 +59,15 @@ describe('PM decisions, notifications, reports, users, rate limit (e2e)', () => 
       expect(pickupRequestExpiry(late).toISOString()).toBe(new Date(`${addDays(todayStr(), 1)}T00:00:00+07:00`).toISOString());
     });
 
-    it('parent gets an inbox notification; expired request cannot be confirmed or used', async () => {
+    it('parent sees the request in the pickup feed (not the general inbox); expired request cannot be confirmed or used', async () => {
       const attId = await todayAttendanceId();
       const r = await newRequest(attId);
       expect(new Date(r.expiresAt).getTime()).toBeGreaterThan(Date.now());
-      const inbox = await as('ph1').get('/notifications?unreadOnly=true').expect(200);
-      const n = inbox.body.items.find((x: any) => x.type === 'pickup_request' && x.data.pickupRequestId === r.id);
-      expect(n).toBeTruthy();
-      expect((await as('ph2').get('/notifications').expect(200)).body.items.some((x: any) => x.data?.pickupRequestId === r.id)).toBe(false);
+      const feed = await as('ph1').get('/pickup-requests/feed').expect(200);
+      expect(feed.body.items.find((x: any) => x.id === r.id)).toMatchObject({ needsMyAction: true });
+      const inbox = await as('ph1').get('/notifications').expect(200);
+      expect(inbox.body.items.some((x: any) => x.type === 'pickup_request')).toBe(false);
+      expect((await as('ph2').get('/pickup-requests/feed').expect(200)).body.items.some((x: any) => x.id === r.id)).toBe(false);
       await ds.query(`UPDATE pickup_requests SET expires_at = now() - interval '1 minute' WHERE id = $1`, [r.id]);
       expect((await as('ph1').get('/pickup-requests?status=expired').expect(200)).body.map((x: any) => x.id)).toContain(r.id);
       expect((await as('ph1').post(`/pickup-requests/${r.id}/confirm`, {}).expect(409)).body.code).toBe('REQUEST_EXPIRED');
@@ -81,12 +82,14 @@ describe('PM decisions, notifications, reports, users, rate limit (e2e)', () => 
       expect((await as('gv1').post(`/attendance/${attId}/pickup`, { pickupRequestId: r.id }).expect(403)).body.code).toBe('PICKUP_REQUEST_EXPIRED');
     });
 
-    it('admin may decide on behalf of the parent only with a note; teacher is notified', async () => {
+    it('admin may record the parent step on behalf only with a note (school step separate); teacher is notified', async () => {
       const attId = await todayAttendanceId();
       const r = await newRequest(attId, 'Bác Năm');
-      expect((await as('admin').post(`/pickup-requests/${r.id}/confirm`, {}).expect(400)).body.code).toBe('NOTE_REQUIRED');
-      const ok = await as('admin').post(`/pickup-requests/${r.id}/confirm`, { note: 'Đã gọi mẹ bé xác nhận qua điện thoại' }).expect(200);
-      expect(ok.body).toMatchObject({ status: 'approved', decidedOnBehalf: true, decidedBy: s.users.admin.id });
+      expect((await as('admin').post(`/pickup-requests/${r.id}/parent-decision`, { decision: 'approve' }).expect(400)).body.code).toBe('VALIDATION_ERROR');
+      const ok = await as('admin').post(`/pickup-requests/${r.id}/parent-decision`, { decision: 'approve', note: 'Đã gọi mẹ bé xác nhận qua điện thoại' }).expect(200);
+      expect(ok.body).toMatchObject({ status: 'pending', decidedOnBehalf: true, decidedBy: s.users.admin.id, parent: { status: 'approved', channel: 'on_behalf' }, school: { status: 'pending' } });
+      // school step by admin (no note needed to approve); hand-over by someone else (gv1)
+      expect((await as('admin').post(`/pickup-requests/${r.id}/confirm`, {}).expect(200)).body).toMatchObject({ status: 'approved', school: { status: 'approved', role: 'admin' } });
       const tInbox = await as('gv1').get('/notifications').expect(200);
       expect(tInbox.body.items.some((x: any) => x.type === 'pickup_decision' && x.data.pickupRequestId === r.id)).toBe(true);
       await as('gv1').post(`/attendance/${attId}/pickup`, { pickupRequestId: r.id }).expect(201);

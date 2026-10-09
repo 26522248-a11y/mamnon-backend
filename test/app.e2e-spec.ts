@@ -132,10 +132,13 @@ describe('Mầm non API (e2e)', () => {
       const attId = today.body.items.find((i: any) => i.childId === s.kids[0].id).attendanceId;
       const gs = (await as('admin').get(`/children/${s.kids[0].id}/guardians`).expect(200)).body;
       const dad = gs.find((g: any) => g.relation === 'Bố'), grandma = gs.find((g: any) => !g.canPickup);
-      const ok = await as('gv1').post(`/attendance/${attId}/pickup`, { guardianId: dad.id }).expect(201);
-      expect(ok.body).toMatchObject({ isAuthorized: true, pickedUpByName: dad.fullName });
       expect((await as('gv1').post(`/attendance/${attId}/pickup`, { guardianId: grandma.id }).expect(403)).body.code).toBe('PICKUP_NOT_ALLOWED');
       await as('gv1').post(`/attendance/${attId}/pickup`, {}).expect(400);
+      const ok = await as('gv1').post(`/attendance/${attId}/pickup`, { guardianId: dad.id }).expect(201);
+      expect(ok.body).toMatchObject({ isAuthorized: true, pickedUpByName: dad.fullName, pickerKind: 'guardian' });
+      // second hand-over -> 409 (PK-D07); undo for the next test
+      expect((await as('gv1').post(`/attendance/${attId}/pickup`, { guardianId: dad.id }).expect(409)).body.code).toBe('ALREADY_PICKED_UP');
+      await app.get(DataSource).query('DELETE FROM pickups WHERE attendance_id = $1', [attId]);
     });
 
     it('pickup request flow: pending -> 403, parent confirms -> release; rejected -> 403; other parent cannot decide', async () => {
@@ -160,12 +163,15 @@ describe('Mầm non API (e2e)', () => {
       await request(http).get(r1.body.photoUrl).set('Authorization', `Bearer ${tokens.ph2}`).expect(403);
       await as('gv1').post(`/pickup-requests/${r1.body.id}/confirm`, {}).expect(403);
       await as('ketoan').get('/pickup-requests').expect(403);
-      // parent confirms -> teacher can release
-      expect((await as('ph1').post(`/pickup-requests/${r1.body.id}/confirm`, { note: 'Đúng chú bé' }).expect(200)).body.status).toBe('approved');
+      // parent confirms + school (admin) approves -> teacher can release
+      expect((await as('ph1').post(`/pickup-requests/${r1.body.id}/confirm`, { note: 'Đúng chú bé' }).expect(200)).body.status).toBe('pending');
       await as('ph1').post(`/pickup-requests/${r1.body.id}/reject`, {}).expect(409);
+      expect((await as('gv1').post(`/attendance/${attId}/pickup`, { pickupRequestId: r1.body.id }).expect(403)).body.code).toBe('PICKUP_REQUEST_PENDING');
+      expect((await as('admin').post(`/pickup-requests/${r1.body.id}/confirm`, {}).expect(200)).body.status).toBe('approved');
       const rel = await as('gv1').post(`/attendance/${attId}/pickup`, { pickupRequestId: r1.body.id }).expect(201);
       expect(rel.body).toMatchObject({ pickedUpByName: 'Chú Tư', pickupRequestId: r1.body.id, isAuthorized: true });
-      // a second request, rejected by admin -> 403 on release
+      // a second request (on a fresh day-record: the child is already handed over), rejected by admin -> 403 on release
+      await app.get(DataSource).query('DELETE FROM pickups WHERE attendance_id = $1', [attId]);
       const r2 = await as('gv1').post(`/attendance/${attId}/pickup-requests`, { pickerName: 'Người lạ', pickerPhone: '0909000111', note: 'Không rõ' }).expect(201);
       await as('admin').post(`/pickup-requests/${r2.body.id}/reject`, { note: 'Phụ huynh không biết người này' }).expect(200);
       expect((await as('gv1').post(`/attendance/${attId}/pickup`, { pickupRequestId: r2.body.id }).expect(403)).body.code).toBe('PICKUP_REQUEST_REJECTED');

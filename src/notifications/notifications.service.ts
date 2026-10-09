@@ -2,6 +2,7 @@ import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { DataSource, EntityManager, Repository } from 'typeorm';
 import { Notification, NotificationType } from '../database/entities';
+import { NotificationDispatcher, OutboundMessage } from './channels';
 
 export interface NotifyPayload {
   type: NotificationType; title: string; body?: string | null; data?: Record<string, unknown> | null; announcementId?: string | null; important?: boolean;
@@ -10,8 +11,9 @@ export interface NotifyPayload {
 /** In-app inbox. (Push / SMS / Zalo delivery is not wired yet — inbox only.) */
 @Injectable()
 export class NotificationsService {
-  constructor(@InjectRepository(Notification) private repo: Repository<Notification>, private ds: DataSource) {}
+  constructor(@InjectRepository(Notification) private repo: Repository<Notification>, private ds: DataSource, private dispatcher: NotificationDispatcher) {}
 
+  /** In-app inbox only (inside the caller's transaction when `m` is given). Returns the recipient count. */
   async toUsers(userIds: string[], p: NotifyPayload, m?: EntityManager) {
     const ids = [...new Set(userIds)];
     if (!ids.length) return 0;
@@ -20,6 +22,11 @@ export class NotificationsService {
       userId, type: p.type, title: p.title.slice(0, 200), body: p.body ?? null, data: p.data ?? null, announcementId: p.announcementId ?? null, important: !!p.important,
     })) as any).execute();
     return ids.length;
+  }
+
+  /** All enabled channels (inapp, webpush, sms/zalo stubs). Never throws. */
+  send(userIds: string[], msg: OutboundMessage, opts: { only?: string[] } = {}) {
+    return this.dispatcher.dispatch(userIds, msg, opts);
   }
 
   /** Active parent accounts linked (via guardians.user_id) to the child. */

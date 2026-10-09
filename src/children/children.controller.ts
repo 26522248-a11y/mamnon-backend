@@ -178,7 +178,7 @@ export class ChildrenController {
   async photo(@CurrentUser() u: AuthUser, @Param('id', ParseUUIDPipe) id: string, @UploadedFile() file?: Express.Multer.File) {
     const c = await this.access.getChildOr404(id);
     if (!this.access.canOperateClass(u, c.classId)) throw Forbidden('Không có quyền với trẻ này');
-    const key = saveImage(file); // 400 INVALID_FILE unless real JPEG/PNG
+    const key = await saveImage(file); // 400 INVALID_FILE unless real JPEG/PNG/HEIC
     await this.children.update(id, { photoUrl: key });
     removeImage(c.photoUrl);
     return { photoUrl: `/api/v1/children/${id}/photo` };

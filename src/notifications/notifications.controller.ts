@@ -3,7 +3,7 @@ import { ApiBearerAuth, ApiProperty, ApiPropertyOptional, ApiTags } from '@nestj
 import { InjectRepository } from '@nestjs/typeorm';
 import { Type } from 'class-transformer';
 import { ArrayMaxSize, ArrayMinSize, IsArray, IsBoolean, IsIn, IsInt, IsOptional, IsString, IsUUID, Max, MaxLength, Min, MinLength } from 'class-validator';
-import { Brackets, DataSource, In, IsNull, Repository } from 'typeorm';
+import { Brackets, DataSource, In, IsNull, Not, Repository } from 'typeorm';
 import { AccessService } from '../common/access';
 import { AuthUser, CurrentUser, Roles } from '../common/auth';
 import { AppError, BadRequest, Forbidden, NotFound } from '../common/errors';
@@ -48,7 +48,8 @@ const notifView = (n: Notification) => ({
   id: n.id, type: n.type, title: n.title, body: n.body, data: n.data, announcementId: n.announcementId, important: n.important,
   read: !!n.readAt, readAt: n.readAt, createdAt: n.createdAt,
 });
-const VISIBLE = { hiddenAt: IsNull() };
+/** pickup requests have their own feed (GET /pickup-requests/feed) and push; they are not part of the general inbox */
+const VISIBLE = { hiddenAt: IsNull(), type: Not('pickup_request' as const) };
 
 @ApiTags('notifications') @ApiBearerAuth()
 @Controller()
@@ -240,7 +241,7 @@ export class NotificationsController {
 
   @Post('notifications/read-all') @HttpCode(200)
   async readAll(@CurrentUser() u: AuthUser) {
-    const r = await this.notifs.createQueryBuilder().update().set({ readAt: () => 'now()' }).where('user_id = :u AND read_at IS NULL AND hidden_at IS NULL', { u: u.id }).execute();
+    const r = await this.notifs.createQueryBuilder().update().set({ readAt: () => 'now()' }).where("user_id = :u AND read_at IS NULL AND hidden_at IS NULL AND type <> 'pickup_request'", { u: u.id }).execute();
     return { updated: r.affected ?? 0 };
   }
 }

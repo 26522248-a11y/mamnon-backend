@@ -14,6 +14,11 @@ import { HealthController as HealthNutritionController } from './health/health.c
 import { LoginThrottleService } from './auth/login-throttle.service';
 import { NotificationsController } from './notifications/notifications.controller';
 import { NotificationsService } from './notifications/notifications.service';
+import { NotificationDispatcher } from './notifications/channels';
+import { AuthorizedPickersController, ContactPhonesController } from './pickup/authorized-pickers.controller';
+import { PickupDutiesController } from './pickup/duties.controller';
+import { PickupSafetyService } from './pickup/pickup-safety.service';
+import { PushController } from './pickup/push.controller';
 import { ImportsController } from './imports/imports.controller';
 import { ReportsController } from './reports/reports.controller';
 import { UsersController } from './users/users.controller';
@@ -44,9 +49,9 @@ class SettingsController {
     TypeOrmModule.forFeature(ENTITIES),
     JwtModule.register({}),
   ],
-  controllers: [HealthController, SettingsController, AuthController, ClassesController, ChildrenController, AttendanceController, DashboardController, FeesController, HealthNutritionController, NotificationsController, ReportsController, UsersController, ImportsController],
+  controllers: [HealthController, SettingsController, AuthController, ClassesController, ChildrenController, AttendanceController, DashboardController, FeesController, HealthNutritionController, NotificationsController, ReportsController, UsersController, ImportsController, AuthorizedPickersController, ContactPhonesController, PickupDutiesController, PushController],
   providers: [
-    AccessService, UserContextService, NotificationsService, LoginThrottleService,
+    AccessService, UserContextService, NotificationsService, NotificationDispatcher, PickupSafetyService, LoginThrottleService,
     { provide: APP_GUARD, useClass: JwtAuthGuard },
     { provide: APP_FILTER, useClass: AllExceptionsFilter },
   ],

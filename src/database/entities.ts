@@ -64,6 +64,11 @@ export class Child {
   @Column({ name: 'withdrawal_reason', type: 'text', nullable: true }) withdrawalReason!: string | null;
   @Column({ name: 'withdrawn_at', type: 'timestamptz', nullable: true }) withdrawnAt!: Date | null;
   @Column({ name: 'withdrawn_by', type: 'uuid', nullable: true }) withdrawnBy!: string | null;
+  /** Parent-set contact phones for pickup calls (15-minute rule), in calling order. Null = fall back to guardian phones. */
+  @Column({ name: 'contact_phone1', type: 'varchar', length: 20, nullable: true }) contactPhone1!: string | null;
+  @Column({ name: 'contact_phone2', type: 'varchar', length: 20, nullable: true }) contactPhone2!: string | null;
+  @Column({ name: 'contact_phones_updated_by', type: 'uuid', nullable: true }) contactPhonesUpdatedBy!: string | null;
+  @Column({ name: 'contact_phones_updated_at', type: 'timestamptz', nullable: true }) contactPhonesUpdatedAt!: Date | null;
   @OneToMany(() => Guardian, (g) => g.child) guardians!: Guardian[];
   @CreateDateColumn({ name: 'created_at', type: 'timestamptz' }) createdAt!: Date;
   @UpdateDateColumn({ name: 'updated_at', type: 'timestamptz' }) updatedAt!: Date;
@@ -118,6 +123,12 @@ export class Pickup {
   @Column({ type: 'text', nullable: true }) note!: string | null;
   @Column({ name: 'recorded_by', type: 'uuid', nullable: true }) recordedBy!: string | null;
   @CreateDateColumn({ name: 'created_at', type: 'timestamptz' }) createdAt!: Date;
+  /** registered & approved person who picked up (người đón hộ) */
+  @Column({ name: 'authorized_picker_id', type: 'uuid', nullable: true }) authorizedPickerId!: string | null;
+  /** 'guardian' | 'authorized_picker' | 'request' */
+  @Column({ name: 'picker_kind', type: 'varchar', length: 20, nullable: true }) pickerKind!: string | null;
+  @Index() @Column({ name: 'picker_phone', type: 'varchar', length: 20, nullable: true }) pickerPhone!: string | null;
+  @Index() @Column({ name: 'picker_id_number', type: 'varchar', length: 20, nullable: true }) pickerIdNumber!: string | null;
 }
 
 
@@ -299,6 +310,149 @@ export class PickupRequest {
   @Column({ name: 'decided_at', type: 'timestamptz', nullable: true }) decidedAt!: Date | null;
   @Column({ name: 'decision_note', type: 'text', nullable: true }) decisionNote!: string | null;
   @CreateDateColumn({ name: 'created_at', type: 'timestamptz' }) createdAt!: Date;
+  /** CCCD of the off-list person (optional, 12 digits) */
+  @Column({ name: 'picker_id_number', type: 'varchar', length: 20, nullable: true }) pickerIdNumber!: string | null;
+  // two-step approval (PM): BOTH the parent and the school (admin or the day's duty account) must approve before handover
+  @Column({ name: 'parent_status', type: 'varchar', length: 10, default: 'pending' }) parentStatus!: StepStatus;
+  @Column({ name: 'parent_decided_by', type: 'uuid', nullable: true }) parentDecidedBy!: string | null;
+  @Column({ name: 'parent_decided_at', type: 'timestamptz', nullable: true }) parentDecidedAt!: Date | null;
+  @Column({ name: 'parent_note', type: 'text', nullable: true }) parentNote!: string | null;
+  /** 'app' | 'push' | 'on_behalf' (admin recorded the parent's answer after a phone call) */
+  @Column({ name: 'parent_channel', type: 'varchar', length: 12, nullable: true }) parentChannel!: string | null;
+  @Column({ name: 'school_status', type: 'varchar', length: 10, default: 'pending' }) schoolStatus!: StepStatus;
+  @Column({ name: 'school_decided_by', type: 'uuid', nullable: true }) schoolDecidedBy!: string | null;
+  @Column({ name: 'school_decided_at', type: 'timestamptz', nullable: true }) schoolDecidedAt!: Date | null;
+  @Column({ name: 'school_note', type: 'text', nullable: true }) schoolNote!: string | null;
+  /** 'admin' | 'duty' */
+  @Column({ name: 'school_decided_role', type: 'varchar', length: 10, nullable: true }) schoolDecidedRole!: string | null;
+}
+export type StepStatus = 'pending' | 'approved' | 'rejected';
+
+/** Person registered by a parent to pick the child up (người đón hộ). Only status=approved (by admin) counts as on-list. */
+@Entity('authorized_pickers')
+export class AuthorizedPicker {
+  @PrimaryGeneratedColumn('uuid') id!: string;
+  @Index() @Column({ name: 'child_id', type: 'uuid' }) childId!: string;
+  @ManyToOne(() => Child, { onDelete: 'CASCADE' }) @JoinColumn({ name: 'child_id' }) child!: Child;
+  @Column({ name: 'full_name', length: 120 }) fullName!: string;
+  @Column({ length: 40 }) relation!: string;
+  @Column({ name: 'photo_url', type: 'text' }) photoUrl!: string;
+  /** CCCD (12 digits). Sensitive: masked in every list; full value only via the audited identity endpoint. */
+  @Index() @Column({ name: 'id_number', length: 20 }) idNumber!: string;
+  @Index() @Column({ length: 20 }) phone1!: string;
+  @Column({ type: 'varchar', length: 20, nullable: true }) phone2!: string | null;
+  @Index() @Column({ type: 'varchar', length: 10, default: 'pending' }) status!: StepStatus;
+  @Column({ name: 'decided_by', type: 'uuid', nullable: true }) decidedBy!: string | null;
+  @Column({ name: 'decided_at', type: 'timestamptz', nullable: true }) decidedAt!: Date | null;
+  @Column({ name: 'decision_note', type: 'text', nullable: true }) decisionNote!: string | null;
+  @Column({ name: 'created_by', type: 'uuid', nullable: true }) createdBy!: string | null;
+  @CreateDateColumn({ name: 'created_at', type: 'timestamptz' }) createdAt!: Date;
+  @UpdateDateColumn({ name: 'updated_at', type: 'timestamptz' }) updatedAt!: Date;
+  /** soft delete (history is kept) */
+  @Index() @Column({ name: 'deleted_at', type: 'timestamptz', nullable: true }) deletedAt!: Date | null;
+  @Column({ name: 'deleted_by', type: 'uuid', nullable: true }) deletedBy!: string | null;
+}
+
+@Entity('authorized_picker_history')
+export class AuthorizedPickerHistory {
+  @PrimaryGeneratedColumn('uuid') id!: string;
+  @Index() @Column({ name: 'picker_id', type: 'uuid' }) pickerId!: string;
+  @ManyToOne(() => AuthorizedPicker, { onDelete: 'CASCADE' }) @JoinColumn({ name: 'picker_id' }) picker!: AuthorizedPicker;
+  /** create | update | delete | approve | reject */
+  @Column({ length: 10 }) action!: string;
+  /** changed fields; CCCD values are stored masked */
+  @Column({ type: 'jsonb', nullable: true }) changes!: Record<string, unknown> | null;
+  @Column({ name: 'changed_by', type: 'uuid', nullable: true }) changedBy!: string | null;
+  @ManyToOne(() => User, { onDelete: 'SET NULL', nullable: true }) @JoinColumn({ name: 'changed_by' }) changer!: User | null;
+  @CreateDateColumn({ name: 'changed_at', type: 'timestamptz' }) changedAt!: Date;
+}
+
+/** History of the child's pickup contact phones (who changed what, when). */
+@Entity('child_contact_history')
+export class ChildContactHistory {
+  @PrimaryGeneratedColumn('uuid') id!: string;
+  @Index() @Column({ name: 'child_id', type: 'uuid' }) childId!: string;
+  @ManyToOne(() => Child, { onDelete: 'CASCADE' }) @JoinColumn({ name: 'child_id' }) child!: Child;
+  @Column({ type: 'jsonb' }) before!: { phone1: string | null; phone2: string | null };
+  @Column({ type: 'jsonb' }) after!: { phone1: string | null; phone2: string | null };
+  @Column({ name: 'changed_by', type: 'uuid', nullable: true }) changedBy!: string | null;
+  @ManyToOne(() => User, { onDelete: 'SET NULL', nullable: true }) @JoinColumn({ name: 'changed_by' }) changer!: User | null;
+  @CreateDateColumn({ name: 'changed_at', type: 'timestamptz' }) changedAt!: Date;
+}
+
+/** Every view of a full CCCD number (who, what, when, from where). */
+@Entity('sensitive_access_logs')
+export class SensitiveAccessLog {
+  @PrimaryGeneratedColumn('uuid') id!: string;
+  @Index() @Column({ name: 'user_id', type: 'uuid', nullable: true }) userId!: string | null;
+  @Column({ name: 'user_role', type: 'varchar', length: 20 }) userRole!: string;
+  /** 'authorized_picker' | 'pickup_request' | 'guardian' */
+  @Column({ name: 'entity_type', type: 'varchar', length: 30 }) entityType!: string;
+  @Index() @Column({ name: 'entity_id', type: 'uuid' }) entityId!: string;
+  @Column({ name: 'child_id', type: 'uuid', nullable: true }) childId!: string | null;
+  @Column({ type: 'varchar', length: 30 }) field!: string;
+  @Column({ type: 'varchar', length: 30 }) purpose!: string;
+  @Column({ name: 'attendance_id', type: 'uuid', nullable: true }) attendanceId!: string | null;
+  @Column({ type: 'varchar', length: 64, nullable: true }) ip!: string | null;
+  @Index() @CreateDateColumn({ name: 'created_at', type: 'timestamptz' }) createdAt!: Date;
+}
+
+/** 'trực đón': user allowed to give the school approval of off-list pickup requests on that date. */
+@Entity('pickup_duties')
+@Index('uq_pickup_duty', ['date', 'userId'], { unique: true })
+export class PickupDuty {
+  @PrimaryGeneratedColumn('uuid') id!: string;
+  @Index() @Column({ type: 'date' }) date!: string;
+  @Column({ name: 'user_id', type: 'uuid' }) userId!: string;
+  @ManyToOne(() => User, { onDelete: 'CASCADE' }) @JoinColumn({ name: 'user_id' }) user!: User;
+  @Column({ name: 'assigned_by', type: 'uuid', nullable: true }) assignedBy!: string | null;
+  @Column({ type: 'text', nullable: true }) note!: string | null;
+  @CreateDateColumn({ name: 'created_at', type: 'timestamptz' }) createdAt!: Date;
+}
+
+/** Teacher phone calls to the parent when a request has no answer after 15 minutes. Logging never changes the request. */
+@Entity('pickup_call_attempts')
+export class PickupCallAttempt {
+  @PrimaryGeneratedColumn('uuid') id!: string;
+  @Index() @Column({ name: 'pickup_request_id', type: 'uuid' }) pickupRequestId!: string;
+  @ManyToOne(() => PickupRequest, { onDelete: 'CASCADE' }) @JoinColumn({ name: 'pickup_request_id' }) request!: PickupRequest;
+  @Column({ name: 'called_by', type: 'uuid', nullable: true }) calledBy!: string | null;
+  @ManyToOne(() => User, { onDelete: 'SET NULL', nullable: true }) @JoinColumn({ name: 'called_by' }) caller!: User | null;
+  @Column({ name: 'guardian_id', type: 'uuid', nullable: true }) guardianId!: string | null;
+  @Column({ length: 20 }) phone!: string;
+  /** no_answer | busy | wrong_number | confirmed | rejected | other */
+  @Column({ type: 'varchar', length: 20 }) outcome!: string;
+  @Column({ type: 'text', nullable: true }) note!: string | null;
+  @CreateDateColumn({ name: 'created_at', type: 'timestamptz' }) createdAt!: Date;
+}
+
+@Entity('push_subscriptions')
+export class PushSubscription {
+  @PrimaryGeneratedColumn('uuid') id!: string;
+  @Index() @Column({ name: 'user_id', type: 'uuid' }) userId!: string;
+  @ManyToOne(() => User, { onDelete: 'CASCADE' }) @JoinColumn({ name: 'user_id' }) user!: User;
+  @Index({ unique: true }) @Column({ type: 'text' }) endpoint!: string;
+  @Column({ type: 'text' }) p256dh!: string;
+  @Column({ type: 'text' }) auth!: string;
+  @Column({ name: 'user_agent', type: 'varchar', length: 300, nullable: true }) userAgent!: string | null;
+  @Column({ name: 'last_success_at', type: 'timestamptz', nullable: true }) lastSuccessAt!: Date | null;
+  @Column({ name: 'last_error', type: 'text', nullable: true }) lastError!: string | null;
+  @Column({ name: 'fail_count', type: 'int', default: 0 }) failCount!: number;
+  @CreateDateColumn({ name: 'created_at', type: 'timestamptz' }) createdAt!: Date;
+}
+
+/** One row per channel delivery attempt (inapp / webpush / sms / zalo). */
+@Entity('notification_deliveries')
+export class NotificationDelivery {
+  @PrimaryGeneratedColumn('uuid') id!: string;
+  @Column({ type: 'varchar', length: 12 }) channel!: string;
+  @Index() @Column({ name: 'user_id', type: 'uuid', nullable: true }) userId!: string | null;
+  @Column({ type: 'varchar', length: 30 }) type!: string;
+  @Index() @Column({ name: 'ref_id', type: 'uuid', nullable: true }) refId!: string | null;
+  /** sent | failed | skipped */
+  @Column({ type: 'varchar', length: 10 }) status!: string;
+  @Column({ type: 'text', nullable: true }) error!: string | null;
+  @Index() @CreateDateColumn({ name: 'created_at', type: 'timestamptz' }) createdAt!: Date;
 }
 
 // ───────────── Announcements & notifications ─────────────
@@ -326,7 +480,7 @@ export class Announcement {
   @Column({ name: 'recipient_count', type: 'integer', default: 0 }) recipientCount!: number;
 }
 
-export type NotificationType = 'announcement' | 'pickup_request' | 'pickup_decision' | 'invoice' | 'payment';
+export type NotificationType = 'announcement' | 'pickup_request' | 'pickup_decision' | 'invoice' | 'payment' | 'picked_up' | 'picker_registration' | 'picker_decision' | 'contact_change';
 @Entity('notifications')
 @Index('ix_notifications_user_read', ['userId', 'readAt'])
 @Index('ix_notifications_announcement', ['announcementId'])
@@ -417,6 +571,7 @@ export class RefundPayout {
 }
 
 export const ENTITIES = [
+  AuthorizedPicker, AuthorizedPickerHistory, ChildContactHistory, SensitiveAccessLog, PickupDuty, PickupCallAttempt, PushSubscription, NotificationDelivery,
   RefundPayout,
   MealRefund, InvoiceAudit,
   CreditTransaction,
