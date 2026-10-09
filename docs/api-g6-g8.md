@@ -96,3 +96,12 @@ Trong **ngày** có trông thay, cô trông thay được như GV lớp đó v�
 Như cũ (`{ note? }`), idempotent: lần 2 → 409 `ALREADY_GIVEN` kèm `givenAt`, `givenByName` (không báo trùng). Phụ huynh nhận
 `type: "medicine_given"` tiêu đề `"Bé Na đã được cho uống thuốc lúc 10:05"`, nội dung `"Hạ sốt, 5ml · Cô Hoa (cô trông thay)"`.
 Trả về `MedicineView` với `doses[].givenAt` + `givenByName` để web hiện "Đã cho uống lúc HH:MM · đã báo phụ huynh".
+
+## P9 — parent: upcoming substitute teachers
+
+`GET /api/v1/children/:id/substitutions` (parent of the child, admin, class teacher)
+
+Returns `{ items: [{ substitutionId, date: "YYYY-MM-DD", session: "full"|"morning"|"afternoon", classId, className, substituteName, today: boolean }] }`
+for the child's class, today (VN) and later, ordered by date. Only live rows: a deleted substitution disappears; one linked to a leave
+that is no longer `approved` (cancelled/rejected) is excluded. Empty list when the child has no class.
+The `substitute_teacher` notification `data` always carries `substitutionId, classId, className, date, session, substituteName`.

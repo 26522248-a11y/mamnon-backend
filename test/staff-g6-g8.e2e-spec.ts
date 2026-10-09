@@ -82,6 +82,9 @@ describe('Staff G6–G8 (e2e)', () => {
     const pa = (await notes('ph1', 'substitute_teacher'));
     expect(pa).toHaveLength(1);
     expect(pa[0]).toMatchObject({ title: `↔ Cô trông thay ngày ${dm(MON)}`, data: { classId: s.classes.c1.id, session: 'morning', substituteName: s.users.gv3.name, date: MON, className: 'Mầm 1' } }); // P9
+    // P9: parent-readable upcoming substitutions for the child's class
+    const ps = (await as('ph1').get(`/children/${s.kids[0].id}/substitutions`).expect(200)).body.items;
+    expect(ps).toEqual(expect.arrayContaining([expect.objectContaining({ date: MON, session: 'morning', classId: s.classes.c1.id, substituteName: s.users.gv3.name })]));
     // the substitute sees the handover note but not the reason
     const sv = (await as('gv3').get(`/staff/leaves/${leaveId}`).expect(200)).body;
     expect(sv.handoverNote).toBe('Bé Na dị ứng sữa'); expect(sv.reason).toBeUndefined();

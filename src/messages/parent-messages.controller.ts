@@ -118,6 +118,21 @@ export class ParentMessagesController {
     }));
   }
 
+  /** P9: upcoming substitute teachers for the child's class (today + future, live rows only; a deleted substitution or a
+   *  cancelled/rejected leave drops out). Parent card: "Thứ Hai cô Mai trông con". */
+  @Get('children/:id/substitutions') @Roles('parent', 'admin', 'teacher')
+  async childSubstitutions(@CurrentUser() u: AuthUser, @Param('id', ParseUUIDPipe) id: string) {
+    const c = await this.childFor(u, id, false);
+    if (!c.classId) return { items: [] };
+    const rows = await this.ds.query(`SELECT s.id, s.date::text AS date, s.session, s.class_id, cl.name AS class_name, su.name AS substitute_name
+      FROM staff_substitutions s JOIN users su ON su.id = s.substitute_user_id JOIN classes cl ON cl.id = s.class_id
+      LEFT JOIN staff_leaves l ON l.id = s.leave_id
+      WHERE s.class_id = $1 AND s.date >= $2 AND (s.leave_id IS NULL OR l.status = 'approved')
+      ORDER BY s.date, s.session LIMIT 50`, [c.classId, todayStr()]);
+    return { items: rows.map((r: any) => ({ substitutionId: r.id, date: r.date, session: r.session ?? 'full', classId: r.class_id, className: r.class_name,
+      substituteName: r.substitute_name, today: r.date === todayStr() })) };
+  }
+
   @Post('children/:id/medicines') @Roles('parent', 'admin')
   @UseInterceptors(FileInterceptor('photo', imageUploadOptions)) @ApiConsumes('multipart/form-data', 'application/json')
   async createMedicine(@CurrentUser() u: AuthUser, @Param('id', ParseUUIDPipe) id: string, @Body() dto: CreateMedicineDto, @UploadedFile() photo?: Express.Multer.File) {
