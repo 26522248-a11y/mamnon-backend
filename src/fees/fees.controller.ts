@@ -1,3 +1,4 @@
+import { schoolInfo } from '../common/school';
 import { Body, Controller, Delete, Get, HttpCode, Param, ParseUUIDPipe, Patch, Post, Query } from '@nestjs/common';
 import { ApiBearerAuth, ApiProperty, ApiPropertyOptional, ApiTags, PartialType } from '@nestjs/swagger';
 import { InjectRepository } from '@nestjs/typeorm';
@@ -113,6 +114,15 @@ export class DebtQuery {
   @ApiPropertyOptional({ enum: ['true', 'false'], description: 'Chỉ trẻ có hoá đơn quá hạn (sau ngày 10)' }) @IsOptional() @IsIn(['true', 'false']) overdueOnly?: string;
 }
 
+/** 0đ invoice because discounts/refunds cover every charge (not because prepaid credit covered it). */
+export const WAIVER_NOTE = 'Miễn/giảm 100%';
+const isWaived = (lines: { kind: string; amount: number }[]) =>
+  lines.some((l) => l.kind === 'charge' && l.amount > 0) && lines.some((l) => l.kind === 'discount' || l.kind === 'refund')
+  && lines.filter((l) => l.kind !== 'credit').reduce((s, l) => s + l.amount, 0) === 0;
+const withWaiverNote = (note: string | null | undefined, waived: boolean): string | null => {
+  const rest = (note ?? '').split(' | ').filter((x) => x && x !== WAIVER_NOTE).join(' | ');
+  return waived ? (rest ? `${WAIVER_NOTE} | ${rest}` : WAIVER_NOTE) : rest || null;
+};
 const statusOf = (total: number, paid: number): Invoice['status'] => (total === 0 || paid >= total ? 'paid' : paid <= 0 ? 'unpaid' : 'partial');
 const lineView = (l: InvoiceLine) => ({
   id: l.id, feeItemId: l.feeItemId, kind: l.kind, description: l.description, quantity: l.quantity, unitPrice: l.unitPrice, amount: l.amount, reason: l.reason,
@@ -127,6 +137,8 @@ const invoiceView = (i: Invoice, detail = false) => ({
   id: i.id, invoiceNo: i.invoiceNo, childId: i.childId, childName: i.child?.fullName, classId: i.classId, className: i.classRoom?.name ?? null,
   period: i.period, issueDate: i.issueDate, dueDate: i.dueDate, totalAmount: i.totalAmount, paidAmount: i.paidAmount,
   balance: i.status === 'void' ? 0 : i.totalAmount - i.paidAmount, status: i.status, note: i.note, overdue: isOverdue(i),
+  /** true: 0đ, miễn/giảm 100% -> status paid, no receipt exists or can be created */
+  waived: i.status !== 'void' && i.totalAmount === 0 && (i.note ?? '').split(' | ').includes(WAIVER_NOTE),
   ...(detail ? {
     lines: (i.lines ?? []).sort((a, b) => (a.kind === 'charge' ? 0 : 1) - (b.kind === 'charge' ? 0 : 1)).map(lineView),
     payments: (i.payments ?? []).map(paymentView),
@@ -288,7 +300,7 @@ export class FeesController {
     }
     const inv = await m.save(Invoice, m.create(Invoice, {
       invoiceNo: await this.nextNo(m, 'invoice_no_seq', 'HD', period), childId: child.id, classId: child.classId, period,
-      issueDate: todayStr(), dueDate, totalAmount: total, paidAmount: 0, status: statusOf(total, 0), note: opts.note ?? null,
+      issueDate: todayStr(), dueDate, totalAmount: total, paidAmount: 0, status: statusOf(total, 0), note: withWaiverNote(opts.note, total === 0 && isWaived(lines)),
       createdBy: u.id, lines: lines as InvoiceLine[],
     }));
     if (applied > 0) await m.save(CreditTransaction, m.create(CreditTransaction, {
@@ -489,7 +501,7 @@ export class FeesController {
       }
       if (total < 0) throw BadRequest('Tổng hoá đơn không được âm', 'NEGATIVE_TOTAL');
       if (total < inv.paidAmount) throw new AppError(409, 'TOTAL_BELOW_PAID', 'Tổng mới nhỏ hơn số đã thu; ghi nhận phần chênh vào số dư thay vì sửa dòng');
-      await m.update(Invoice, id, { totalAmount: total, status: statusOf(total, inv.paidAmount) });
+      await m.update(Invoice, id, { totalAmount: total, status: statusOf(total, inv.paidAmount), note: withWaiverNote(inv.note, total === 0 && isWaived(all)) });
     });
     return { ...(await this.getInvoice(u, id)), warnings };
   }
@@ -769,7 +781,7 @@ export class FeesController {
     this.assertFinanceChild(u, p.childId);
     const creditBalance = Number((await this.ds.query('SELECT COALESCE(SUM(amount),0)::int AS s FROM credit_transactions WHERE child_id = $1', [p.childId]))[0].s);
     return {
-      school: { name: process.env.SCHOOL_NAME || 'Trường Mầm non', address: process.env.SCHOOL_ADDRESS || null, phone: process.env.SCHOOL_PHONE || null },
+      school: schoolInfo(),
       kind: 'refund_payout', title: 'PHIẾU CHI', voucherNo: p.voucherNo, payoutId: p.id, paidAt: p.paidAt, method: p.method,
       recipientName: p.recipientName, amount: p.amount, amountInWords: vndInWords(p.amount),
       reason: `Hoàn trả số dư học phí khi nghỉ học (từ ${p.child.leaveDate?.split('-').reverse().join('/') ?? ''})`, note: p.note,
@@ -786,6 +798,7 @@ export class FeesController {
       if (!i) throw NotFound('Không tìm thấy hoá đơn');
       if (i.status === 'void') throw BadRequest('Hoá đơn đã huỷ', 'INVOICE_VOID');
       const balance = i.totalAmount - i.paidAmount;
+      if (i.totalAmount === 0) throw new AppError(409, 'ZERO_INVOICE', 'Hoá đơn 0đ (miễn/giảm 100%) không cần thu tiền, không lập phiếu thu; dùng POST /children/:id/prepayments để trả trước');
       if (balance <= 0) throw new AppError(409, 'ALREADY_PAID', 'Hoá đơn đã thanh toán đủ; dùng POST /children/:id/prepayments để trả trước');
       const applied = Math.min(dto.amount, balance), excess = dto.amount - applied;
       const p = await m.save(Payment, m.create(Payment, {
@@ -832,6 +845,18 @@ export class FeesController {
       transactions: tx.map((t) => ({ id: t.id, amount: t.amount, type: t.type, paymentId: t.paymentId, invoiceId: t.invoiceId, note: t.note, createdAt: t.createdAt })) };
   }
 
+  /** Latest receipt of an invoice. 0đ (miễn/giảm 100%) or unpaid invoices have none -> 404 NO_RECEIPT. */
+  @Get('invoices/:id/receipt') @Roles('admin', 'accountant', 'parent')
+  async invoiceReceipt(@CurrentUser() u: AuthUser, @Param('id', ParseUUIDPipe) id: string) {
+    const i = await this.invoices.findOne({ where: { id } });
+    if (!i) throw NotFound('Không tìm thấy hoá đơn');
+    this.assertFinanceChild(u, i.childId);
+    const p = await this.payments.findOne({ where: { invoiceId: id }, order: { paidAt: 'DESC' } });
+    if (!p) throw new AppError(404, 'NO_RECEIPT', i.totalAmount === 0 && i.status !== 'void'
+      ? 'Hoá đơn 0đ (miễn/giảm 100%) không có phiếu thu' : 'Hoá đơn chưa có phiếu thu');
+    return this.receipt(u, p.id);
+  }
+
   /** Data for printing a receipt (phiếu thu). */
   @Get('payments/:id/receipt') @Roles('admin', 'accountant', 'parent')
   async receipt(@CurrentUser() u: AuthUser, @Param('id', ParseUUIDPipe) id: string) {
@@ -841,7 +866,7 @@ export class FeesController {
     const i = p.invoice;
     const creditBalance = Number((await this.ds.query('SELECT COALESCE(SUM(amount),0)::int AS s FROM credit_transactions WHERE child_id = $1', [p.childId]))[0].s);
     return {
-      school: { name: process.env.SCHOOL_NAME || 'Trường Mầm non', address: process.env.SCHOOL_ADDRESS || null, phone: process.env.SCHOOL_PHONE || null },
+      school: schoolInfo(),
       receiptNo: p.receiptNo, paymentId: p.id, paidAt: p.paidAt, method: p.method, payerName: p.payerName,
       amount: p.amount, amountInWords: vndInWords(p.amount), appliedToInvoice: p.amount - p.creditAmount, creditAdded: p.creditAmount,
       currentCreditBalance: creditBalance, note: p.note, receivedByName: p.receiver?.name ?? null, kind: i ? 'invoice' : 'prepayment',

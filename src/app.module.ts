@@ -1,7 +1,8 @@
 import { Controller, Get, INestApplication, Module, ValidationPipe } from '@nestjs/common';
 import { APP_FILTER, APP_GUARD } from '@nestjs/core';
 import { JwtModule } from '@nestjs/jwt';
-import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
+import { ApiTags, DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
+import { schoolInfo } from './common/school';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import cookieParser from 'cookie-parser';
 import { NestExpressApplication } from '@nestjs/platform-express';
@@ -29,13 +30,20 @@ class HealthController {
   @Public() @Get() health() { return { status: 'ok', time: new Date().toISOString() }; }
 }
 
+@ApiTags('settings')
+@Controller('settings')
+class SettingsController {
+  /** Public (login page / print headers): school name, address, phone from env. */
+  @Public() @Get('school') school() { return schoolInfo(); }
+}
+
 @Module({
   imports: [
     TypeOrmModule.forRoot({ ...dataSourceOptions, migrationsRun: process.env.MIGRATIONS_RUN === 'true' }),
     TypeOrmModule.forFeature(ENTITIES),
     JwtModule.register({}),
   ],
-  controllers: [HealthController, AuthController, ClassesController, ChildrenController, AttendanceController, DashboardController, FeesController, HealthNutritionController, NotificationsController, ReportsController, UsersController],
+  controllers: [HealthController, SettingsController, AuthController, ClassesController, ChildrenController, AttendanceController, DashboardController, FeesController, HealthNutritionController, NotificationsController, ReportsController, UsersController],
   providers: [
     AccessService, UserContextService, NotificationsService, LoginThrottleService,
     { provide: APP_GUARD, useClass: JwtAuthGuard },

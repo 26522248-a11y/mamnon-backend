@@ -1,3 +1,4 @@
+import { schoolInfo } from '../common/school';
 import { Controller, Get, Query, Res } from '@nestjs/common';
 import { Response } from 'express';
 import * as ExcelJS from 'exceljs';
@@ -29,11 +30,11 @@ export const LOW_ATTENDANCE_RATE = Number(process.env.LOW_ATTENDANCE_RATE || 80)
 type Col = { header: string; key: string; width?: number; fmt?: 'vnd' | 'pct' | 'int' };
 async function sendXlsx(res: Response, filename: string, title: string, sheets: { name: string; cols: Col[]; rows: any[]; total?: any }[]) {
   const wb = new ExcelJS.Workbook();
-  wb.creator = process.env.SCHOOL_NAME || 'Mầm non'; wb.created = new Date();
+  wb.creator = schoolInfo().name; wb.created = new Date();
   for (const sh of sheets) {
     const ws = wb.addWorksheet(sh.name, { views: [{ state: 'frozen', ySplit: 3 }] });
     ws.mergeCells(1, 1, 1, Math.max(1, sh.cols.length));
-    ws.getCell(1, 1).value = `${process.env.SCHOOL_NAME || 'Trường Mầm non'} – ${title}`;
+    ws.getCell(1, 1).value = `${schoolInfo().name} – ${title}`;
     ws.getCell(1, 1).font = { bold: true, size: 14 };
     ws.getRow(3).values = sh.cols.map((c) => c.header);
     ws.getRow(3).font = { bold: true };

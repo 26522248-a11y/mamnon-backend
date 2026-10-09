@@ -2,7 +2,7 @@ import { Controller, Get, Query } from '@nestjs/common';
 import { ApiBearerAuth, ApiPropertyOptional, ApiTags } from '@nestjs/swagger';
 import { InjectRepository } from '@nestjs/typeorm';
 import { IsDateString, IsOptional } from 'class-validator';
-import { Repository } from 'typeorm';
+import { DataSource, Repository } from 'typeorm';
 import { AuthUser, CurrentUser } from '../common/auth';
 import { todayStr } from '../common/dates';
 import { Child } from '../database/entities';
@@ -19,7 +19,7 @@ export class DashboardQuery {
 @ApiTags('dashboard') @ApiBearerAuth()
 @Controller('dashboard')
 export class DashboardController {
-  constructor(@InjectRepository(Child) private children: Repository<Child>) {}
+  constructor(@InjectRepository(Child) private children: Repository<Child>, private ds: DataSource) {}
 
   @Get('summary')
   async summary(@CurrentUser() u: AuthUser, @Query() q: DashboardQuery) {
@@ -47,12 +47,36 @@ export class DashboardController {
     if (u.role === 'parent') return { ...base, children: rows.map((r) => ({ childId: r.childId, fullName: r.fullName, className: r.className, status: r.status })) };
     const classIds = [...new Set(rows.map((r) => r.classId))];
     if (u.role === 'teacher') for (const id of u.classIds) if (!classIds.includes(id)) classIds.push(id); // empty classes still listed
+    const byClass = classIds.map((id) => {
+      const list = rows.filter((r) => r.classId === id);
+      return { classId: id, className: list[0]?.className ?? null, ...count(list) };
+    });
+    if (u.role !== 'admin') return { ...base, byClass };
+    return { ...base, byClass, attention: await this.attention(date, byClass) };
+  }
+
+  /** Admin "cần chú ý" block for the day. */
+  private async attention(date: string, byClass: { classId: string | null; className: string | null; totalChildren: number; unmarked: number }[]) {
+    const allergy: any[] = await this.ds.query(`
+      SELECT c.id AS "childId", c.full_name AS "fullName", c.class_id AS "classId", cl.name AS "className", c.allergies, a.status
+      FROM children c JOIN attendance a ON a.child_id = c.id AND a.date = $1 LEFT JOIN classes cl ON cl.id = c.class_id
+      WHERE c.status = 'active' AND a.status IN ('present','late') AND COALESCE(btrim(c.allergies), '') <> ''
+      ORDER BY cl.name, c.full_name`, [date]);
+    const [{ n: pending }] = await this.ds.query(`
+      SELECT COUNT(*)::int AS n FROM pickup_requests pr JOIN attendance a ON a.id = pr.attendance_id
+      WHERE pr.status = 'pending' AND (pr.expires_at IS NULL OR pr.expires_at > now()) AND a.date = $1`, [date]);
+    const notMarked = byClass.filter((c) => c.classId && c.totalChildren > 0 && c.unmarked === c.totalChildren);
+    const partly = byClass.filter((c) => c.classId && c.unmarked > 0 && c.unmarked < c.totalChildren);
     return {
-      ...base,
-      byClass: classIds.map((id) => {
-        const list = rows.filter((r) => r.classId === id);
-        return { classId: id, className: list[0]?.className ?? null, ...count(list) };
-      }),
+      /** classes with active children and no attendance at all for the day */
+      classesNotMarked: notMarked.map((c) => ({ classId: c.classId, className: c.className, totalChildren: c.totalChildren })),
+      classesNotMarkedCount: notMarked.length,
+      /** classes where some children are still unmarked */
+      classesPartlyMarked: partly.map((c) => ({ classId: c.classId, className: c.className, totalChildren: c.totalChildren, unmarked: c.unmarked })),
+      allergyChildrenPresent: allergy.map((r) => ({ childId: r.childId, fullName: r.fullName, classId: r.classId, className: r.className, allergies: r.allergies, status: r.status })),
+      allergyChildrenPresentCount: allergy.length,
+      /** pending, not yet expired pickup requests for that day */
+      pendingPickupRequests: Number(pending),
     };
   }
 }

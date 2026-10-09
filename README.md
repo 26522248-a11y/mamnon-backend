@@ -96,7 +96,9 @@ Dữ liệu mẫu:
 | POST | `/children/:id/refund-payouts` `{method, recipientName, amount?, paidAt?, note?}` → dữ liệu **phiếu chi** | admin, kế toán |
 | GET | `/refund-payouts/:id/voucher` (in phiếu chi: số PC, số tiền bằng chữ) | admin, kế toán; phụ huynh: con mình |
 | POST | `/invoices/:id/payments` `{amount, method: cash\|transfer, paidAt?, payerName?, note?}` → dữ liệu phiếu thu | admin, kế toán |
-| GET | `/payments/:id/receipt` (số phiếu, số tiền bằng chữ, các dòng hoá đơn) | admin, kế toán; phụ huynh: con mình |
+| GET | `/payments/:id/receipt` (số phiếu, số tiền bằng chữ, các dòng hoá đơn, `school`) | admin, kế toán; phụ huynh: con mình |
+| GET | `/invoices/:id/receipt` (phiếu thu mới nhất của hoá đơn; chưa có / hoá đơn 0đ → 404 `NO_RECEIPT`) | admin, kế toán; phụ huynh: con mình |
+| GET | `/settings/school` → `{name, address, phone}` từ env `SCHOOL_NAME/SCHOOL_ADDRESS/SCHOOL_PHONE` | **công khai** (trang đăng nhập, tiêu đề in) |
 | GET | `/children/:id/balance` | admin, kế toán; phụ huynh: con mình |
 | GET | `/debts?classId&upToPeriod&overdueOnly` (mỗi dòng có `childStatus`, `leaveDate`) | admin, kế toán |
 | GET / POST | `/children/:id/growth` (ghi lại theo ngày), DELETE `/growth/:id` | đọc: admin, giáo viên của lớp, phụ huynh của trẻ; ghi: admin, giáo viên của lớp |
@@ -107,14 +109,26 @@ Dữ liệu mẫu:
 | GET | `/invoices/:id/history` (ai sửa, lúc nào, giá trị cũ, giá trị mới) | admin, kế toán |
 | POST | `/children/:id/prepayments` `{amount, method, ...}` | admin, kế toán |
 | GET | `/children/:id/credits` (số dư trả trước / trả thừa và lịch sử) | admin, kế toán; phụ huynh: con mình |
-| POST | `/announcements` `{title, body, scope: school\|class, classId?, audience: all\|parents\|staff}` | admin; giáo viên: chỉ thông báo cho lớp mình |
-| GET / DELETE | `/announcements`, `/announcements/:id` | xem: theo phạm vi; xoá: admin hoặc người tạo |
-| GET | `/notifications?unreadOnly&page&limit` → `{items,total,unreadCount}`, `/notifications/unread-count` | mọi người dùng (hộp thư của chính mình) |
+| POST | `/announcements` `{title, body, scope?: school\|class, classId?, audience?: all\|parents\|staff\|specific, recipientUserIds?: uuid[], important?: bool}` | admin; giáo viên: chỉ lớp mình / phụ huynh của trẻ lớp mình |
+| GET | `/announcements?classId&mine=true&includeRecalled=true&page&limit` | theo phạm vi + tin do mình tạo (giáo viên: trong lớp mình); `includeRecalled`: admin tất cả, giáo viên tin của mình |
+| GET | `/announcements/recipients?classId` → `{items:[{userId, name, phone, children:[{id, fullName, classId, className, relation}]}]}` (danh sách phụ huynh chọn được cho `audience=specific`) | admin (tất cả); giáo viên: lớp mình |
+| DELETE | `/announcements/:id` = **thu hồi** (204; lần 2 → 409 `ALREADY_RECALLED`) | admin hoặc người tạo |
+| GET | `/notifications?unreadOnly&page&limit` → `{items,total,unreadCount,importantUnreadCount}`, `/notifications/unread-count` → `{unreadCount, importantUnreadCount}` | mọi người dùng (hộp thư của chính mình) |
 | POST | `/notifications/:id/read`, `/notifications/read-all` | chính chủ (của người khác thì nhận 404) |
 | GET | `/reports/attendance?fromMonth&toMonth&classId` (tỉ lệ chuyên cần theo lớp, theo tháng) | admin |
 | GET | `/reports/enrollment` (sĩ số, sức chứa, nam/nữ, số trẻ mới nhập học theo tháng) | admin |
 | GET | `/reports/finance?fromMonth&toMonth&classId` (phải thu, đã thu, công nợ, quá hạn, giảm trừ theo kỳ; tiền thu theo tháng; `cashFlowByMonth`: thu / chi (phiếu chi) / chênh lệch) | admin, kế toán |
 | GET | `/reports/attendance/export`, `/reports/enrollment/export`, `/reports/finance/export` (cùng tham số) → file **.xlsx** | như báo cáo tương ứng |
+
+**Thông báo (announcements):**
+- **Gửi riêng phụ huynh:** `audience: 'specific'` + `recipientUserIds` (gửi `recipientUserIds` mà không có `audience` thì tự hiểu là `specific`). Chỉ nhận tài khoản phụ huynh đang hoạt động (khác → 400 `INVALID_RECIPIENTS`, `details` = id sai). Giáo viên chỉ chọn được phụ huynh có con đang học lớp mình (khác → 403). `scope` tự suy ra: có `classId` → `class`, không → `school`. Chỉ người nhận, người tạo và admin thấy tin này; phụ huynh không thấy danh sách người nhận (`recipientUserIds` bị ẩn).
+- **`important`:** cờ quan trọng; có ở tin, ở `notification.important` và `notification.data.important`; hộp thư có thêm `importantUnreadCount`.
+- **Thu hồi (DELETE):** không xoá cứng; ghi `recalledAt`, `recalledBy`. Thông báo đã phát vào hộp thư của mọi người nhận bị ẩn (`hidden_at`), không còn trong `/notifications`, `unreadCount`, `read-all`; mở theo id → 404. Tin đã thu hồi chỉ hiện với `includeRecalled=true` (admin / người tạo).
+- Mỗi tin có thêm: `important, mine, canRecall, recalled, recalledAt, recalledBy`, và (với admin / người tạo) `recipientUserIds, recipientCount`.
+
+**Hoá đơn 0đ (miễn/giảm 100%):** khi giảm trừ / hoàn tiền phủ hết các khoản thu (không tính trừ số dư trả trước), hoá đơn có `status: 'paid'`, `note` bắt đầu bằng `Miễn/giảm 100%`, `waived: true`. Không tạo phiếu thu: `POST /invoices/:id/payments` → 409 `ZERO_INVOICE`; `GET /invoices/:id/receipt` → 404 `NO_RECEIPT`. Sửa dòng làm hoá đơn hết 0đ thì ghi chú tự bỏ. Hoá đơn 0đ vì số dư trả trước trừ hết thì **không** phải miễn giảm (`waived: false`).
+
+**Dashboard (admin):** `/dashboard/summary` có thêm `attention`: `classesNotMarked[{classId, className, totalChildren}]`, `classesNotMarkedCount`, `classesPartlyMarked[{…, unmarked}]`, `allergyChildrenPresent[{childId, fullName, classId, className, allergies, status}]`, `allergyChildrenPresentCount`, `pendingPickupRequests` (đang chờ, chưa hết hạn, trong ngày).
 
 Báo cáo chuyên cần có `lowThreshold` (mặc định 80, đổi bằng env `LOW_ATTENDANCE_RATE`) và `low: true` cho lớp dưới ngưỡng.
 | GET/POST/PATCH/DELETE | `/users`, `/users/:id` | admin |
@@ -207,7 +221,9 @@ docker compose up -d --build
 docker compose ps           # migrate: exited (0); db, api, web, caddy, backup: running/healthy
 ```
 
-- **Thứ tự khởi động:** `db` (healthcheck) → `migrate` (chạy migration một lần rồi thoát, không xoá dữ liệu) → `api`. Không service nào seed. Dữ liệu demo (XOÁ SẠCH DB): `docker compose run --rm api node dist/database/seed.js --force`.
+- **Thứ tự khởi động:** `db` (healthcheck) → `migrate` (chạy migration rồi `bootstrap-admin`, sau đó thoát; không xoá dữ liệu) → `api`. Stack **không bao giờ** tạo dữ liệu demo.
+- **Admin đầu tiên (`npm run bootstrap:admin`, trong compose chạy tự động ở `migrate`):** đặt `INITIAL_ADMIN_USERNAME`, `INITIAL_ADMIN_PASSWORD` (tuỳ chọn `INITIAL_ADMIN_NAME`) trong `deploy/.env`. Chỉ tạo **một** tài khoản admin, `mustChangePassword=true` (đăng nhập lần đầu phải đổi mật khẩu); nếu đã có admin thì bỏ qua. Mật khẩu yếu bị từ chối (dưới 10 ký tự, không có cả chữ và số, `123456`/mật khẩu phổ biến, chứa tên đăng nhập) → `migrate` lỗi, API không khởi động. Sau lần chạy đầu, xoá `INITIAL_ADMIN_PASSWORD` khỏi `.env`. Chạy tay: `docker compose run --rm migrate` hoặc ngoài Docker `INITIAL_ADMIN_USERNAME=… INITIAL_ADMIN_PASSWORD=… npm run bootstrap:admin`.
+- **Seed demo (`npm run seed`, tài khoản mật khẩu `123456`) từ chối chạy khi `NODE_ENV=production`** (compose đặt sẵn `NODE_ENV=production`). Chỉ dùng cho máy dev / demo.
 - **Định tuyến (Caddy, `deploy/Caddyfile`):** `https://DOMAIN/api/*` → API (Swagger ở `/api/docs`), còn lại → web. Web build với `NEXT_PUBLIC_API_URL=""` nên gọi `/api/v1` cùng origin; cookie refresh `Secure`, `CORS_ORIGIN=https://DOMAIN`, `TRUST_PROXY=1` (IP thật cho giới hạn đăng nhập). Có HSTS, nosniff, chặn iframe, giới hạn body 5MB. Thử trong LAN không có domain: `DOMAIN=localhost` (chứng chỉ nội bộ của Caddy).
 - **Ảnh:** volume `uploads` (`/data/uploads`), chỉ phục vụ qua API có kiểm tra quyền.
 - **Backup** (service `backup`, `deploy/backup/`): mỗi ngày lúc `BACKUP_TIME` (giờ VN, mặc định 02:30) chạy `pg_dump -Fc` (kiểm tra đọc lại bằng `pg_restore -l`) + nén thư mục ảnh vào `BACKUP_DIR/daily`; giữ 14 bản ngày, 8 bản Chủ nhật (`weekly`), 12 bản ngày 1 (`monthly`) – chỉnh bằng `BACKUP_KEEP_*`. Chạy ngay: `docker compose exec backup backup.sh`. **Nên chép `BACKUP_DIR` ra ngoài máy chủ.**
@@ -220,6 +236,12 @@ docker compose ps           # migrate: exited (0); db, api, web, caddy, backup: 
   ```
 - **Cập nhật phiên bản:** `git pull` cả 2 repo → `docker compose up -d --build` (migrate tự chạy migration mới trước khi API khởi động).
 - Lưu ý: giới hạn đăng nhập lưu trong bộ nhớ → chạy 1 instance `api`. Nên chặn `/api/docs` ở môi trường thật nếu không cần (thêm `respond /api/docs* 404` trong Caddyfile).
+
+## Script dữ liệu một lần (đều có dry run, ghi log JSON vào `logs/`; nên `pg_dump` trước)
+
+- `npm run repair:withdrawal-credit [-- --apply]`: sửa hoá đơn bị giảm tổng do lỗi tất toán nghỉ học cũ (chuyển thành `paid_amount`).
+- `npm run cleanup:acceptance [-- --apply]`: dọn trước nghiệm thu: xoá thông báo yêu cầu đón thử (từ script QA) của `ph1`; huỷ hoá đơn test HD202612-00061..HD202702-00064 của bé Vũ Minh Phúc (lý do `Dữ liệu test`; tiền thu thử chuyển vào số dư rồi bị huỷ bằng bút toán `adjustment`); thêm ghi chú `Miễn/giảm 100%` cho hoá đơn 0đ cũ.
+- `npm run avatars`: gán ảnh đại diện mẫu cho trẻ chưa có ảnh.
 
 ## Định dạng lỗi
 

@@ -2,11 +2,32 @@
 # Layout expected:  <root>/mamnon-backend (this repo)  and  <root>/mamnon-web
 #   cd mamnon-backend/deploy && cp .env.example .env && edit .env
 #   docker compose up -d --build
-# The stack never seeds. First-time demo data (wipes DB!): docker compose run --rm api node dist/database/seed.js --force
+# The stack never loads demo data. On first start `migrate` creates ONLY the first admin from INITIAL_ADMIN_USERNAME /
+# INITIAL_ADMIN_PASSWORD (strong password required, must be changed at first login); later starts skip it.
+# The demo seed (123456 accounts) refuses to run here because NODE_ENV=production.
 name: mamnon
 
 x-restart: &restart
   restart: unless-stopped
+
+x-api-env: &api_env
+  NODE_ENV: production
+  DATABASE_URL: postgres://mamnon:${POSTGRES_PASSWORD}@db:5432/mamnon
+  JWT_ACCESS_SECRET: ${JWT_ACCESS_SECRET:?set JWT_ACCESS_SECRET}
+  JWT_REFRESH_SECRET: ${JWT_REFRESH_SECRET:?set JWT_REFRESH_SECRET}
+  JWT_ACCESS_TTL: ${JWT_ACCESS_TTL:-15m}
+  JWT_REFRESH_TTL: ${JWT_REFRESH_TTL:-7d}
+  CORS_ORIGIN: https://${DOMAIN}
+  COOKIE_SECURE: "true"
+  TRUST_PROXY: "1"
+  TZ_SCHOOL: Asia/Ho_Chi_Minh
+  SCHOOL_NAME: ${SCHOOL_NAME:-Trường Mầm non}
+  SCHOOL_ADDRESS: ${SCHOOL_ADDRESS:-}
+  SCHOOL_PHONE: ${SCHOOL_PHONE:-}
+  LOGIN_MAX_FAILS: ${LOGIN_MAX_FAILS:-5}
+  LOGIN_IP_MAX_FAILS: ${LOGIN_IP_MAX_FAILS:-30}
+  LOGIN_LOCK_MINUTES: ${LOGIN_LOCK_MINUTES:-15}
+  UPLOAD_DIR: /data/uploads
 
 services:
   db:
@@ -32,24 +53,12 @@ services:
     build:
       context: ..
       dockerfile: Dockerfile
-    command: ["node", "node_modules/typeorm/cli.js", "-d", "dist/database/data-source.js", "migration:run"]
-    environment: &api_env
-      DATABASE_URL: postgres://mamnon:${POSTGRES_PASSWORD}@db:5432/mamnon
-      JWT_ACCESS_SECRET: ${JWT_ACCESS_SECRET:?set JWT_ACCESS_SECRET}
-      JWT_REFRESH_SECRET: ${JWT_REFRESH_SECRET:?set JWT_REFRESH_SECRET}
-      JWT_ACCESS_TTL: ${JWT_ACCESS_TTL:-15m}
-      JWT_REFRESH_TTL: ${JWT_REFRESH_TTL:-7d}
-      CORS_ORIGIN: https://${DOMAIN}
-      COOKIE_SECURE: "true"
-      TRUST_PROXY: "1"
-      TZ_SCHOOL: Asia/Ho_Chi_Minh
-      SCHOOL_NAME: ${SCHOOL_NAME:-Trường Mầm non}
-      SCHOOL_ADDRESS: ${SCHOOL_ADDRESS:-}
-      SCHOOL_PHONE: ${SCHOOL_PHONE:-}
-      LOGIN_MAX_FAILS: ${LOGIN_MAX_FAILS:-5}
-      LOGIN_IP_MAX_FAILS: ${LOGIN_IP_MAX_FAILS:-30}
-      LOGIN_LOCK_MINUTES: ${LOGIN_LOCK_MINUTES:-15}
-      UPLOAD_DIR: /data/uploads
+    command: ["sh", "-c", "node node_modules/typeorm/cli.js -d dist/database/data-source.js migration:run && node dist/database/bootstrap-admin.js"]
+    environment:
+      <<: *api_env
+      INITIAL_ADMIN_USERNAME: ${INITIAL_ADMIN_USERNAME:-}
+      INITIAL_ADMIN_PASSWORD: ${INITIAL_ADMIN_PASSWORD:-}
+      INITIAL_ADMIN_NAME: ${INITIAL_ADMIN_NAME:-Quản trị viên}
     depends_on:
       db:
         condition: service_healthy

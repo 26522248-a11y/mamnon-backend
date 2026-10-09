@@ -303,7 +303,8 @@ export class PickupRequest {
 
 // ───────────── Announcements & notifications ─────────────
 export type AnnouncementScope = 'school' | 'class';
-export type Audience = 'all' | 'parents' | 'staff';
+/** 'specific' = only the parents listed in recipient_user_ids */
+export type Audience = 'all' | 'parents' | 'staff' | 'specific';
 @Entity('announcements')
 export class Announcement {
   @PrimaryGeneratedColumn('uuid') id!: string;
@@ -316,11 +317,19 @@ export class Announcement {
   @Column({ name: 'created_by', type: 'uuid', nullable: true }) createdBy!: string | null;
   @ManyToOne(() => User, { onDelete: 'SET NULL', nullable: true }) @JoinColumn({ name: 'created_by' }) author!: User | null;
   @Index() @CreateDateColumn({ name: 'created_at', type: 'timestamptz' }) createdAt!: Date;
+  @Column({ type: 'boolean', default: false }) important!: boolean;
+  /** audience='specific': the chosen parent user ids */
+  @Column({ name: 'recipient_user_ids', type: 'uuid', array: true, nullable: true }) recipientUserIds!: string[] | null;
+  /** Recall (= DELETE): soft-deleted, derived inbox items hidden */
+  @Index() @Column({ name: 'recalled_at', type: 'timestamptz', nullable: true }) recalledAt!: Date | null;
+  @Column({ name: 'recalled_by', type: 'uuid', nullable: true }) recalledBy!: string | null;
+  @Column({ name: 'recipient_count', type: 'integer', default: 0 }) recipientCount!: number;
 }
 
 export type NotificationType = 'announcement' | 'pickup_request' | 'pickup_decision' | 'invoice' | 'payment';
 @Entity('notifications')
 @Index('ix_notifications_user_read', ['userId', 'readAt'])
+@Index('ix_notifications_announcement', ['announcementId'])
 export class Notification {
   @PrimaryGeneratedColumn('uuid') id!: string;
   @Index() @Column({ name: 'user_id', type: 'uuid' }) userId!: string;
@@ -333,6 +342,9 @@ export class Notification {
   @ManyToOne(() => Announcement, { onDelete: 'CASCADE', nullable: true }) @JoinColumn({ name: 'announcement_id' }) announcement!: Announcement | null;
   @Column({ name: 'read_at', type: 'timestamptz', nullable: true }) readAt!: Date | null;
   @Index() @CreateDateColumn({ name: 'created_at', type: 'timestamptz' }) createdAt!: Date;
+  @Column({ type: 'boolean', default: false }) important!: boolean;
+  /** set when the source announcement is recalled: hidden from inbox and unread counts */
+  @Column({ name: 'hidden_at', type: 'timestamptz', nullable: true }) hiddenAt!: Date | null;
 }
 
 @Entity('credit_transactions')

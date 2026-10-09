@@ -4,7 +4,7 @@ import { DataSource, EntityManager, Repository } from 'typeorm';
 import { Notification, NotificationType } from '../database/entities';
 
 export interface NotifyPayload {
-  type: NotificationType; title: string; body?: string | null; data?: Record<string, unknown> | null; announcementId?: string | null;
+  type: NotificationType; title: string; body?: string | null; data?: Record<string, unknown> | null; announcementId?: string | null; important?: boolean;
 }
 
 /** In-app inbox. (Push / SMS / Zalo delivery is not wired yet — inbox only.) */
@@ -17,7 +17,7 @@ export class NotificationsService {
     if (!ids.length) return 0;
     const em = m ?? this.ds.manager;
     await em.createQueryBuilder().insert().into(Notification).values(ids.map((userId) => ({
-      userId, type: p.type, title: p.title.slice(0, 200), body: p.body ?? null, data: p.data ?? null, announcementId: p.announcementId ?? null,
+      userId, type: p.type, title: p.title.slice(0, 200), body: p.body ?? null, data: p.data ?? null, announcementId: p.announcementId ?? null, important: !!p.important,
     })) as any).execute();
     return ids.length;
   }

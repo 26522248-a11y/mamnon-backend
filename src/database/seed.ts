@@ -164,6 +164,11 @@ export async function seed(ds: DataSource) {
 
 if (require.main === module) {
   (async () => {
+    // Demo data only: creates admin/gv1/ketoan/ph1… with password 123456. Never in production (use npm run bootstrap:admin).
+    if (process.env.NODE_ENV === 'production') {
+      console.error('Refusing to run the DEMO seed with NODE_ENV=production (it creates accounts with password 123456 and wipes data). Use: npm run bootstrap:admin');
+      process.exit(3);
+    }
     await dataSource.initialize();
     // Safety: seeding wipes every table. Refuse on a database that already has data unless --force is given.
     const [{ n }] = await dataSource.query('SELECT COUNT(*)::int AS n FROM users');
