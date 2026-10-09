@@ -88,6 +88,8 @@ export class Attendance {
   @Index() @Column({ type: 'date' }) date!: string;
   @Column({ type: 'enum', enum: ['present', 'absent', 'late'], enumName: 'attendance_status' }) status!: AttStatus;
   @Column({ type: 'text', nullable: true }) note!: string | null;
+  /** Absence notified in advance by the family -> eligible for meal refund. */
+  @Column({ name: 'notified_in_advance', default: false }) notifiedInAdvance!: boolean;
   @Column({ name: 'recorded_by', type: 'uuid', nullable: true }) recordedBy!: string | null;
   @OneToOne(() => Pickup, (p) => p.attendance) pickup!: Pickup | null;
   @CreateDateColumn({ name: 'created_at', type: 'timestamptz' }) createdAt!: Date;
@@ -116,7 +118,8 @@ export class Pickup {
 const num = { to: (v?: number | null) => v, from: (v?: string | null) => (v === null || v === undefined ? null : Number(v)) };
 
 // ───────────── Fees / debts ─────────────
-export type FeeType = 'monthly' | 'one_time';
+export type FeeType = 'monthly' | 'one_time' | 'discount';
+export type LineKind = 'charge' | 'discount' | 'refund' | 'credit';
 export type FeeScope = 'school' | 'class' | 'child';
 export type InvoiceStatus = 'unpaid' | 'partial' | 'paid' | 'void';
 
@@ -132,6 +135,10 @@ export class FeeItem {
   @Index() @Column({ name: 'child_id', type: 'uuid', nullable: true }) childId!: string | null;
   @ManyToOne(() => Child, { onDelete: 'CASCADE', nullable: true }) @JoinColumn({ name: 'child_id' }) child!: Child | null;
   @Column({ name: 'is_active', default: true }) isActive!: boolean;
+  /** Required for type=discount (e.g. "Anh chị em ruột cùng học"). */
+  @Column({ type: 'text', nullable: true }) reason!: string | null;
+  /** On the meal fee item: refund per absent day notified in advance. */
+  @Column({ name: 'meal_refund_per_day', type: 'integer', nullable: true }) mealRefundPerDay!: number | null;
   @CreateDateColumn({ name: 'created_at', type: 'timestamptz' }) createdAt!: Date;
   @UpdateDateColumn({ name: 'updated_at', type: 'timestamptz' }) updatedAt!: Date;
 }
@@ -168,16 +175,23 @@ export class InvoiceLine {
   @ManyToOne(() => FeeItem, { onDelete: 'SET NULL', nullable: true }) @JoinColumn({ name: 'fee_item_id' }) feeItem!: FeeItem | null;
   @Column({ length: 200 }) description!: string;
   @Column({ type: 'integer', default: 1 }) quantity!: number;
-  @Column({ name: 'unit_price', type: 'integer' }) unitPrice!: number; // may be negative for discounts
+  @Column({ type: 'varchar', length: 10, default: 'charge' }) kind!: LineKind;
+  @Column({ name: 'unit_price', type: 'integer' }) unitPrice!: number; // always >= 0
+  /** Signed effective amount: + for charge, - for discount/refund/credit. */
   @Column({ type: 'integer' }) amount!: number;
+  @Column({ type: 'text', nullable: true }) reason!: string | null;
 }
 
 @Entity('payments')
 export class Payment {
   @PrimaryGeneratedColumn('uuid') id!: string;
   @Index({ unique: true }) @Column({ name: 'receipt_no', length: 30 }) receiptNo!: string;
-  @Index() @Column({ name: 'invoice_id', type: 'uuid' }) invoiceId!: string;
-  @ManyToOne(() => Invoice, (i) => i.payments, { onDelete: 'RESTRICT' }) @JoinColumn({ name: 'invoice_id' }) invoice!: Invoice;
+  @Index() @Column({ name: 'invoice_id', type: 'uuid', nullable: true }) invoiceId!: string | null; // null = prepayment
+  @ManyToOne(() => Invoice, (i) => i.payments, { onDelete: 'RESTRICT', nullable: true }) @JoinColumn({ name: 'invoice_id' }) invoice!: Invoice | null;
+  @Index() @Column({ name: 'child_id', type: 'uuid' }) childId!: string;
+  @ManyToOne(() => Child, { onDelete: 'RESTRICT' }) @JoinColumn({ name: 'child_id' }) child!: Child;
+  /** Portion of this payment that went to the child's credit balance (prepayment / overpayment). */
+  @Column({ name: 'credit_amount', type: 'integer', default: 0 }) creditAmount!: number;
   @Column({ type: 'integer' }) amount!: number;
   @Column({ type: 'varchar', length: 20 }) method!: 'cash' | 'transfer';
   @Column({ name: 'paid_at', type: 'timestamptz' }) paidAt!: Date;
@@ -211,6 +225,7 @@ export class MenuItem {
   @Index() @Column({ type: 'date' }) date!: string;
   @Column({ type: 'varchar', length: 20 }) meal!: Meal;
   @Column({ type: 'text' }) dishes!: string;
+  @Column({ name: 'allergy_notes', type: 'text', nullable: true }) allergyNotes!: string | null;
   @Column({ name: 'updated_by', type: 'uuid', nullable: true }) updatedBy!: string | null;
   @UpdateDateColumn({ name: 'updated_at', type: 'timestamptz' }) updatedAt!: Date;
 }
@@ -246,12 +261,14 @@ export class AttendanceHistory {
   @Column({ name: 'old_note', type: 'text', nullable: true }) oldNote!: string | null;
   @Column({ name: 'new_status', type: 'varchar', length: 10 }) newStatus!: AttStatus;
   @Column({ name: 'new_note', type: 'text', nullable: true }) newNote!: string | null;
+  @Column({ name: 'old_notified', type: 'boolean', nullable: true }) oldNotified!: boolean | null;
+  @Column({ name: 'new_notified', type: 'boolean', default: false }) newNotified!: boolean;
   @Column({ name: 'changed_by', type: 'uuid', nullable: true }) changedBy!: string | null;
   @ManyToOne(() => User, { onDelete: 'SET NULL', nullable: true }) @JoinColumn({ name: 'changed_by' }) changer!: User | null;
   @CreateDateColumn({ name: 'changed_at', type: 'timestamptz' }) changedAt!: Date;
 }
 
-export type PickupRequestStatus = 'pending' | 'approved' | 'rejected';
+export type PickupRequestStatus = 'pending' | 'approved' | 'rejected' | 'expired';
 @Entity('pickup_requests')
 export class PickupRequest {
   @PrimaryGeneratedColumn('uuid') id!: string;
@@ -266,6 +283,9 @@ export class PickupRequest {
   @Column({ type: 'text', nullable: true }) note!: string | null;
   @Column({ name: 'photo_url', type: 'text', nullable: true }) photoUrl!: string | null;
   @Index() @Column({ type: 'varchar', length: 10, default: 'pending' }) status!: PickupRequestStatus;
+  /** min(created + 2h, end of the school day) */
+  @Column({ name: 'expires_at', type: 'timestamptz', nullable: true }) expiresAt!: Date | null;
+  @Column({ name: 'decided_on_behalf', default: false }) decidedOnBehalf!: boolean;
   @Column({ name: 'requested_by', type: 'uuid', nullable: true }) requestedBy!: string | null;
   @Column({ name: 'decided_by', type: 'uuid', nullable: true }) decidedBy!: string | null;
   @ManyToOne(() => User, { onDelete: 'SET NULL', nullable: true }) @JoinColumn({ name: 'decided_by' }) decider!: User | null;
@@ -308,7 +328,23 @@ export class Notification {
   @Index() @CreateDateColumn({ name: 'created_at', type: 'timestamptz' }) createdAt!: Date;
 }
 
+@Entity('credit_transactions')
+export class CreditTransaction {
+  @PrimaryGeneratedColumn('uuid') id!: string;
+  @Index() @Column({ name: 'child_id', type: 'uuid' }) childId!: string;
+  @ManyToOne(() => Child, { onDelete: 'RESTRICT' }) @JoinColumn({ name: 'child_id' }) child!: Child;
+  /** + credit added (prepayment/overpayment/void restore), - credit applied to an invoice */
+  @Column({ type: 'integer' }) amount!: number;
+  @Column({ type: 'varchar', length: 20 }) type!: 'prepayment' | 'overpayment' | 'applied' | 'restored' | 'adjustment';
+  @Column({ name: 'payment_id', type: 'uuid', nullable: true }) paymentId!: string | null;
+  @Column({ name: 'invoice_id', type: 'uuid', nullable: true }) invoiceId!: string | null;
+  @Column({ type: 'text', nullable: true }) note!: string | null;
+  @Column({ name: 'created_by', type: 'uuid', nullable: true }) createdBy!: string | null;
+  @CreateDateColumn({ name: 'created_at', type: 'timestamptz' }) createdAt!: Date;
+}
+
 export const ENTITIES = [
+  CreditTransaction,
   Announcement, Notification,
   AttendanceHistory, PickupRequest,
   User, ClassRoom, ClassTeacher, Child, Guardian, Attendance, Pickup,

@@ -2,13 +2,13 @@ import * as bcrypt from 'bcryptjs';
 import { DataSource } from 'typeorm';
 import { addDays, todayStr } from '../common/dates';
 import dataSource from './data-source';
-import { Attendance, AttendanceHistory, Child, DailyNote, FeeItem, GrowthRecord, Invoice, MenuItem, Payment, ClassRoom, ClassTeacher, Guardian, User } from './entities';
+import { Announcement, Attendance, AttendanceHistory, Child, CreditTransaction, Notification, DailyNote, FeeItem, GrowthRecord, Invoice, MenuItem, Payment, ClassRoom, ClassTeacher, Guardian, User } from './entities';
 
 export const SEED_PASSWORD = '123456';
 
 /** Wipes all app tables and inserts deterministic sample data. Returns handy ids (used by e2e tests). */
 export async function seed(ds: DataSource) {
-  await ds.query('TRUNCATE payments, invoice_lines, invoices, fee_items, growth_records, menus, daily_notes, pickup_requests, attendance_history, pickups, attendance, guardians, children, class_teachers, classes, users RESTART IDENTITY CASCADE');
+  await ds.query('TRUNCATE notifications, announcements, credit_transactions, payments, invoice_lines, invoices, fee_items, growth_records, menus, daily_notes, pickup_requests, attendance_history, pickups, attendance, guardians, children, class_teachers, classes, users RESTART IDENTITY CASCADE');
   const hash = await bcrypt.hash(SEED_PASSWORD, 10);
   const mk = (username: string, name: string, role: User['role'], phone: string | null = null) =>
     ds.getRepository(User).save({ username, name, role, phone, passwordHash: hash });
@@ -59,10 +59,11 @@ export async function seed(ds: DataSource) {
   const y = addDays(todayStr(), -1);
   const attRows = await ds.getRepository(Attendance).save(kids.map((k, i) => ({
     childId: k.id, classId: k.classId!, date: y, status: (i % 9 === 0 ? 'absent' : i % 5 === 0 ? 'late' : 'present') as any,
-    note: i % 9 === 0 ? 'Phụ huynh xin nghỉ' : null, recordedBy: admin.id,
+    note: i % 9 === 0 ? 'Phụ huynh xin nghỉ' : null, notifiedInAdvance: i % 9 === 0, recordedBy: admin.id,
   })));
   await ds.getRepository(AttendanceHistory).save(attRows.map((a) => ({
-    attendanceId: a.id, action: 'create' as const, oldStatus: null, oldNote: null, newStatus: a.status, newNote: a.note, changedBy: admin.id,
+    attendanceId: a.id, action: 'create' as const, oldStatus: null, oldNote: null, oldNotified: null, newStatus: a.status, newNote: a.note,
+    newNotified: a.notifiedInAdvance, changedBy: admin.id,
   })));
 
   await ds.query('ALTER SEQUENCE invoice_no_seq RESTART WITH 1');
@@ -71,10 +72,12 @@ export async function seed(ds: DataSource) {
   // ── fees: school-wide monthly tuition + meals, class add-on, one child-specific item
   const fRepo = ds.getRepository(FeeItem);
   const tuition = await fRepo.save({ name: 'Học phí', amount: 1_500_000, type: 'monthly', scope: 'school' });
-  const meals = await fRepo.save({ name: 'Tiền ăn', amount: 900_000, type: 'monthly', scope: 'school' });
+  const meals = await fRepo.save({ name: 'Tiền ăn', amount: 900_000, type: 'monthly', scope: 'school', mealRefundPerDay: 40_000 });
   const english = await fRepo.save({ name: 'Tiếng Anh', amount: 300_000, type: 'monthly', scope: 'class', classId: c3.id });
   const art = await fRepo.save({ name: 'Năng khiếu vẽ', amount: 200_000, type: 'monthly', scope: 'child', childId: kids[0].id });
   await fRepo.save({ name: 'Đồng phục', amount: 250_000, type: 'one_time', scope: 'school' });
+  // kids[4] has an older sibling at school -> monthly discount
+  const sibling = await fRepo.save({ name: 'Giảm trừ anh chị em ruột', amount: 150_000, type: 'discount', scope: 'child', childId: kids[4].id, reason: 'Anh chị em ruột cùng học tại trường' });
   const today = todayStr(), thisMonth = today.slice(0, 7);
   const [yy, mm] = thisMonth.split('-').map(Number);
   const lastMonth = mm === 1 ? `${yy - 1}-12` : `${yy}-${String(mm - 1).padStart(2, '0')}`;
@@ -84,20 +87,37 @@ export async function seed(ds: DataSource) {
   for (const period of [lastMonth, thisMonth]) {
     for (const [i, k] of kids.entries()) {
       const fees = [tuition, meals, ...(k.classId === c3.id ? [english] : []), ...(k.id === kids[0].id ? [art] : [])];
-      const total = fees.reduce((sum, f) => sum + f.amount, 0);
+      const discounts = k.id === kids[4].id ? [sibling] : [];
+      const total = fees.reduce((sum, f) => sum + f.amount, 0) - discounts.reduce((sum, f) => sum + f.amount, 0);
       // last month: most paid, every 6th partial, every 10th unpaid; this month: a third paid
       const paid = period === lastMonth ? (i % 10 === 9 ? 0 : i % 6 === 5 ? 1_000_000 : total) : (i % 3 === 0 ? total : 0);
       const inv = await iRepo.save(iRepo.create({
         invoiceNo: await nextNo('invoice_no_seq', 'HD', period), childId: k.id, classId: k.classId, period,
         issueDate: `${period}-01`, dueDate: `${period}-10`, totalAmount: total, paidAmount: paid,
         status: paid === 0 ? 'unpaid' : paid >= total ? 'paid' : 'partial', createdBy: ketoan.id,
-        lines: fees.map((f) => ({ feeItemId: f.id, description: f.name, quantity: 1, unitPrice: f.amount, amount: f.amount })) as any,
+        lines: [
+          ...fees.map((f) => ({ feeItemId: f.id, kind: 'charge', description: f.name, quantity: 1, unitPrice: f.amount, amount: f.amount })),
+          ...discounts.map((f) => ({ feeItemId: f.id, kind: 'discount', description: f.name, quantity: 1, unitPrice: f.amount, amount: -f.amount, reason: f.reason })),
+        ] as any,
       }));
-      if (paid > 0) await pRepo.save({ receiptNo: await nextNo('receipt_no_seq', 'PT', period), invoiceId: inv.id, amount: paid,
+      if (paid > 0) await pRepo.save({ receiptNo: await nextNo('receipt_no_seq', 'PT', period), invoiceId: inv.id, childId: k.id, amount: paid,
         method: i % 2 ? 'cash' : 'transfer', paidAt: new Date(`${period}-0${(i % 8) + 2}T09:00:00+07:00`), receivedBy: ketoan.id,
         payerName: null });
     }
   }
+
+  // prepayment: kids[7]'s family paid 500.000đ in advance (credit applied to next invoice)
+  const pre = await pRepo.save({ receiptNo: await nextNo('receipt_no_seq', 'PT', thisMonth), invoiceId: null, childId: kids[7].id, amount: 500_000,
+    creditAmount: 500_000, method: 'transfer', paidAt: new Date(), receivedBy: ketoan.id, payerName: 'Phụ huynh', note: 'Trả trước' });
+  await ds.getRepository(CreditTransaction).save({ childId: kids[7].id, amount: 500_000, type: 'prepayment', paymentId: pre.id, note: `Trả trước ở phiếu ${pre.receiptNo}`, createdBy: ketoan.id });
+
+  // ── announcements + inbox
+  const annRepo = ds.getRepository(Announcement), nRepo = ds.getRepository(Notification);
+  const a1 = await annRepo.save({ title: 'Họp phụ huynh đầu năm', body: 'Kính mời quý phụ huynh dự họp lúc 8h sáng Chủ nhật tại hội trường.', scope: 'school', audience: 'all', createdBy: admin.id });
+  const a2 = await annRepo.save({ title: 'Lớp Mầm 1: mang áo mưa', body: 'Mùa mưa, phụ huynh vui lòng để áo mưa trong balo của bé.', scope: 'class', classId: c1.id, audience: 'parents', createdBy: gv1.id });
+  const everyone = [gv1, gv2, gv3, ketoan, ph1, ph2];
+  await nRepo.save(everyone.map((x) => ({ userId: x.id, type: 'announcement' as const, title: a1.title, body: a1.body, announcementId: a1.id, data: { announcementId: a1.id, scope: 'school' } })));
+  await nRepo.save({ userId: ph1.id, type: 'announcement', title: a2.title, body: a2.body, announcementId: a2.id, data: { announcementId: a2.id, scope: 'class', classId: c1.id } });
 
   // ── health: two growth measurements per child
   const gr = ds.getRepository(GrowthRecord);
@@ -119,8 +139,11 @@ export async function seed(ds: DataSource) {
     ['Phở bò, sữa tươi', 'Cơm, canh cải, tôm rim', 'Sữa đậu nành, bánh quy'],
     ['Xôi đậu xanh, sữa tươi', 'Cơm, canh mồng tơi, gà kho gừng', 'Thanh long'],
   ];
+  const allergy: Record<string, string> = {
+    '0-1': 'Dị ứng cá: thay cá kho bằng thịt heo kho', '3-1': 'Dị ứng hải sản: thay tôm rim bằng gà rim', '1-2': 'Dị ứng trứng/sữa: thay bánh flan bằng chuối',
+  };
   await ds.getRepository(MenuItem).save(menu.flatMap((d, i) => (['breakfast', 'lunch', 'snack'] as const).map((meal, j) =>
-    ({ date: addDays(monday, i), meal, dishes: d[j], updatedBy: admin.id }))));
+    ({ date: addDays(monday, i), meal, dishes: d[j], allergyNotes: allergy[`${i}-${j}`] ?? null, updatedBy: admin.id }))));
   // ── daily notes for yesterday
   await ds.getRepository(DailyNote).save(kids.map((k, i) => ({
     childId: k.id, classId: k.classId!, date: y, eating: (['all', 'most', 'half', 'all', 'little'] as const)[i % 5],

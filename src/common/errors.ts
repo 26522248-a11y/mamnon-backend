@@ -40,6 +40,7 @@ export class AllExceptionsFilter implements ExceptionFilter {
     } else {
       this.logger.error(exception);
     }
+    if ((exception as any)?.retryAfter) res.setHeader('Retry-After', String((exception as any).retryAfter));
     res.status(status).json(body);
   }
 }

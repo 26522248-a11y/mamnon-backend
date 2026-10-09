@@ -264,22 +264,23 @@ describe('Mầm non API (e2e)', () => {
       expect(an.invoiceNo).toMatch(/^HD202701-\d{5}$/);
     });
 
-    it('payments: partial -> paid, overpayment rejected, receipt with amount in words; debt balance', async () => {
+    it('payments: partial -> paid, overpayment becomes credit, receipt with amount in words; debt balance', async () => {
       const inv = (await as('ketoan').get(`/invoices?period=2027-01&childId=${s.kids[0].id}`).expect(200)).body.items[0];
       await as('gv1').post(`/invoices/${inv.id}/payments`, { amount: 1000, method: 'cash' }).expect(403);
       await as('ph1').post(`/invoices/${inv.id}/payments`, { amount: 1000, method: 'cash' }).expect(403);
       const p1 = await as('ketoan').post(`/invoices/${inv.id}/payments`, { amount: 1000000, method: 'cash', payerName: 'Nguyễn Văn Hùng' }).expect(201);
       expect(p1.body).toMatchObject({ amount: 1000000, amountInWords: 'Một triệu đồng', invoice: { status: 'partial', balanceAfter: 1600000 } });
       expect(p1.body.receiptNo).toMatch(/^PT202701-\d{5}$/);
-      expect((await as('ketoan').post(`/invoices/${inv.id}/payments`, { amount: 1600001, method: 'cash' }).expect(400)).body.code).toBe('OVERPAYMENT');
-      const p2 = await as('admin').post(`/invoices/${inv.id}/payments`, { amount: 1600000, method: 'transfer' }).expect(201);
-      expect(p2.body.invoice.status).toBe('paid');
+      const p2 = await as('admin').post(`/invoices/${inv.id}/payments`, { amount: 1700000, method: 'transfer' }).expect(201);
+      expect(p2.body).toMatchObject({ appliedToInvoice: 1600000, creditAdded: 100000, currentCreditBalance: 100000, invoice: { status: 'paid' } });
+      expect((await as('ketoan').post(`/invoices/${inv.id}/payments`, { amount: 1, method: 'cash' }).expect(409)).body.code).toBe('ALREADY_PAID');
+      expect((await as('ph1').get(`/children/${s.kids[0].id}/credits`).expect(200)).body.creditBalance).toBe(100000);
       const detail = await as('ph1').get(`/invoices/${inv.id}`).expect(200);
       expect(detail.body.payments).toHaveLength(2);
       expect(detail.body.lines.length).toBe(3);
       await as('ph1').get(`/payments/${p1.body.paymentId}/receipt`).expect(200);
       const bal = await as('ph1').get(`/children/${s.kids[0].id}/balance`).expect(200);
-      expect(bal.body).toMatchObject({ childId: s.kids[0].id, balance: 0 });
+      expect(bal.body).toMatchObject({ childId: s.kids[0].id, balance: 0, creditBalance: 100000, netBalance: -100000 });
       const debts = await as('ketoan').get('/debts').expect(200);
       expect(debts.body.totalDebt).toBeGreaterThan(0);
       expect(debts.body.items.find((x: any) => x.childId === s.kids[0].id)).toBeUndefined();
@@ -303,7 +304,7 @@ describe('Mầm non API (e2e)', () => {
     it('void: only without payments; frees the period for a corrected invoice', async () => {
       const inv = (await as('ketoan').get(`/invoices?period=2027-01&childId=${s.kids[1].id}`).expect(200)).body.items[0];
       await as('ketoan').post(`/invoices/${inv.id}/void`, { reason: 'Lập nhầm' }).expect(200);
-      const fixed = await as('ketoan').post('/invoices', { childId: s.kids[1].id, period: '2027-01', lines: [{ feeItemId: s.fees.tuition.id }, { description: 'Giảm trừ', unitPrice: -100000 }] }).expect(201);
+      const fixed = await as('ketoan').post('/invoices', { childId: s.kids[1].id, period: '2027-01', lines: [{ feeItemId: s.fees.tuition.id }, { kind: 'discount', description: 'Giảm trừ', unitPrice: 100000, reason: 'Hoàn cảnh khó khăn' }] }).expect(201);
       expect(fixed.body.totalAmount).toBe(1400000);
       await as('ketoan').post('/invoices', { childId: s.kids[1].id, period: '2027-01', lines: [{ feeItemId: s.fees.tuition.id }] }).expect(409);
       const paidInv = (await as('ketoan').get(`/invoices?period=2027-01&childId=${s.kids[0].id}`).expect(200)).body.items[0];

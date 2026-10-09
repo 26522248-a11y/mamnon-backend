@@ -32,7 +32,9 @@ export class WeekQuery {
 class MenuEntryDto {
   @ApiProperty({ example: '2026-10-05' }) @IsDateString() date!: string;
   @ApiProperty({ enum: MEALS }) @IsIn(MEALS) meal!: Meal;
-  @ApiProperty({ example: 'Cháo thịt bằm, sữa' }) @IsString() @MaxLength(500) dishes!: string;
+  @ApiProperty({ example: 'Cháo tôm, sữa' }) @IsString() @MaxLength(500) dishes!: string;
+  @ApiPropertyOptional({ example: 'Dị ứng hải sản: thay tôm bằng thịt gà', description: 'Ghi chú món thay thế cho trẻ dị ứng' })
+  @IsOptional() @IsString() @MaxLength(1000) allergyNotes?: string;
 }
 export class PutMenuDto {
   @ApiProperty({ example: '2026-10-05', description: 'Thứ Hai đầu tuần' }) @IsDateString() weekStart!: string;
@@ -120,13 +122,23 @@ export class HealthController {
 
   // ───── weekly menu (school-wide) ─────
   @Get('menus') @Roles('admin', 'teacher', 'parent')
-  async getMenu(@Query() q: WeekQuery) {
+  async getMenu(@CurrentUser() u: AuthUser, @Query() q: WeekQuery) {
     const weekStart = mondayOf(q.week ?? todayStr()), weekEnd = addDays(weekStart, 6);
     const rows = await this.menus.find({ where: { date: Between(weekStart, weekEnd) } });
+    const find = (date: string, m: Meal) => rows.find((r) => r.date === date && r.meal === m);
     const days = Array.from({ length: 7 }, (_, i) => addDays(weekStart, i)).map((date) => ({
-      date, meals: Object.fromEntries(MEALS.map((m) => [m, rows.find((r) => r.date === date && r.meal === m)?.dishes ?? null])),
+      date,
+      meals: Object.fromEntries(MEALS.map((m) => [m, find(date, m)?.dishes ?? null])),
+      allergyNotes: Object.fromEntries(MEALS.map((m) => [m, find(date, m)?.allergyNotes ?? null])),
     }));
-    return { weekStart, weekEnd, days };
+    // children with allergies the viewer is responsible for (admin: all, teacher: own classes, parent: own children)
+    const qb = this.children.createQueryBuilder('c').leftJoinAndSelect('c.classRoom', 'cl')
+      .where("c.status = 'active'").andWhere("COALESCE(TRIM(c.allergies), '') <> ''");
+    if (u.role === 'teacher') qb.andWhere('c.class_id = ANY(:cids)', { cids: u.classIds });
+    if (u.role === 'parent') qb.andWhere('c.id = ANY(:kids)', { kids: u.childIds });
+    const allergyAlerts = (await qb.orderBy('cl.name').addOrderBy('c.fullName').getMany())
+      .map((c) => ({ childId: c.id, fullName: c.fullName, className: c.classRoom?.name ?? null, allergies: c.allergies }));
+    return { weekStart, weekEnd, days, allergyAlerts };
   }
 
   @Put('menus') @Roles('admin')
@@ -137,11 +149,12 @@ export class HealthController {
     await this.ds.transaction(async (m) => {
       for (const i of dto.items) {
         if (!i.dishes.trim()) { await m.delete(MenuItem, { date: i.date, meal: i.meal }); continue; }
-        await m.createQueryBuilder().insert().into(MenuItem).values({ date: i.date, meal: i.meal, dishes: i.dishes.trim(), updatedBy: u.id })
-          .orUpdate(['dishes', 'updated_by', 'updated_at'], ['date', 'meal']).execute();
+        await m.createQueryBuilder().insert().into(MenuItem)
+          .values({ date: i.date, meal: i.meal, dishes: i.dishes.trim(), allergyNotes: i.allergyNotes?.trim() || null, updatedBy: u.id })
+          .orUpdate(['dishes', 'allergy_notes', 'updated_by', 'updated_at'], ['date', 'meal']).execute();
       }
     });
-    return this.getMenu({ week: dto.weekStart });
+    return this.getMenu(u, { week: dto.weekStart });
   }
 
   // ───── daily notes (eating / sleeping) ─────

@@ -10,6 +10,11 @@ import { AttendanceController } from './attendance/attendance.controller';
 import { AuthController } from './auth/auth.controller';
 import { DashboardController } from './dashboard/dashboard.controller';
 import { HealthController as HealthNutritionController } from './health/health.controller';
+import { LoginThrottleService } from './auth/login-throttle.service';
+import { NotificationsController } from './notifications/notifications.controller';
+import { NotificationsService } from './notifications/notifications.service';
+import { ReportsController } from './reports/reports.controller';
+import { UsersController } from './users/users.controller';
 import { FeesController } from './fees/fees.controller';
 import { ChildrenController } from './children/children.controller';
 import { ClassesController } from './classes/classes.controller';
@@ -30,9 +35,9 @@ class HealthController {
     TypeOrmModule.forFeature(ENTITIES),
     JwtModule.register({}),
   ],
-  controllers: [HealthController, AuthController, ClassesController, ChildrenController, AttendanceController, DashboardController, FeesController, HealthNutritionController],
+  controllers: [HealthController, AuthController, ClassesController, ChildrenController, AttendanceController, DashboardController, FeesController, HealthNutritionController, NotificationsController, ReportsController, UsersController],
   providers: [
-    AccessService, UserContextService,
+    AccessService, UserContextService, NotificationsService, LoginThrottleService,
     { provide: APP_GUARD, useClass: JwtAuthGuard },
     { provide: APP_FILTER, useClass: AllExceptionsFilter },
   ],
@@ -42,6 +47,7 @@ export class AppModule {}
 /** Shared app configuration (used by main.ts and e2e tests). */
 export function configureApp(app: NestExpressApplication) {
   app.setGlobalPrefix('api/v1');
+  if (process.env.TRUST_PROXY) { const t = process.env.TRUST_PROXY; app.set('trust proxy', t === 'true' ? true : /^\d+$/.test(t) ? Number(t) : t); } // for correct req.ip behind a reverse proxy
   app.use(cookieParser());
   app.enableCors({ origin: (process.env.CORS_ORIGIN || 'http://localhost:3000').split(','), credentials: true });
   app.useGlobalPipes(new ValidationPipe({ whitelist: true, forbidNonWhitelisted: true, transform: true }));
