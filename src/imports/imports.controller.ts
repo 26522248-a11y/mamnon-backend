@@ -27,7 +27,7 @@ const TEMP_HASH_COST = 8;
 interface Plan {
   row: number; action: 'create' | 'skip_duplicate'; existingChildId?: string; existingChildStatus?: string;
   child: { fullName: string; dob: string; gender: 'M' | 'F'; className: string; classAction: 'existing' | 'create'; allergies: string | null; healthNotes: string | null; address: string | null; enrolledAt: string };
-  guardians: { slot: 1 | 2; fullName: string; relation: string; phone: string; canPickup: boolean; account: 'create' | 'existing' | 'existing_inactive'; username: string }[];
+  guardians: { slot: 1 | 2; fullName: string; relation: string; phone: string; canPickup: boolean; account: 'create' | 'existing' | 'existing_inactive' | 'skip'; username: string }[];
 }
 
 @ApiTags('imports') @ApiBearerAuth()
@@ -177,23 +177,31 @@ export class ImportsController {
     const newPerClass = new Map<string, number>();
     const plans: Plan[] = [];
     const badRows = new Set(parseErrors.map((e) => e.row));
+    // Every check runs on every row independently, so a row reports ALL its errors at once (field errors from parsing
+    // + class / duplicate / staff-phone). Only rows without any error get a plan (preview).
     for (const r of rows) {
-      if (badRows.has(r.row)) continue; // already has field errors: not in the preview
-      const err = (column: string | null, field: any, message: string, value?: string) => errors.push({ row: r.row, column, field, value, message });
-      const key = kidKey(r.fullName, r.dob);
-      const dupInFile = seenKids.get(key);
-      if (dupInFile) { err('Họ tên bé *', 'fullName', `Trùng với dòng ${dupInFile} trong file (cùng họ tên + ngày sinh)`, r.fullName); continue; }
-      seenKids.set(key, r.row);
+      let bad = badRows.has(r.row);
+      const err = (column: string | null, field: any, message: string, value?: string) => { errors.push({ row: r.row, column, field, value, message }); bad = true; };
+      const key = r.fullName && r.dob ? kidKey(r.fullName, r.dob) : null;
+      if (key) {
+        const dupInFile = seenKids.get(key);
+        if (dupInFile) err('Họ tên bé *', 'fullName', `Trùng với dòng ${dupInFile} trong file (cùng họ tên + ngày sinh)`, r.fullName);
+        else seenKids.set(key, r.row);
+      }
       const ck = nameKey(r.className);
       let classAction: 'existing' | 'create' = 'existing';
-      if (!classes.has(ck)) {
-        if (createClasses) { classAction = 'create'; if (!classesToCreate.some((x) => nameKey(x) === ck)) classesToCreate.push(r.className); }
-        else { err('Lớp *', 'className', `Lớp "${r.className}" chưa có trong hệ thống (tạo lớp trước hoặc nhập với createClasses=true)`, r.className); continue; }
+      if (ck && !classes.has(ck)) {
+        if (createClasses) classAction = 'create';
+        else err('Lớp *', 'className', `Lớp "${r.className}" chưa có trong hệ thống (tạo lớp trước hoặc nhập với createClasses=true)`, r.className);
       }
-      let bad = false;
       for (const g of r.guardians) {
         const col = `PH${g.slot} - SĐT ${g.slot === 1 ? '*' : ''}`.trim();
-        if (staffPhones.has(g.phone)) { err(col, `g${g.slot}Phone`, `SĐT ${g.phone} trùng tài khoản ${staffPhones.get(g.phone)}; không dùng làm tài khoản phụ huynh được`, g.phone); bad = true; continue; }
+        if (staffPhones.has(g.phone)) err(col, `g${g.slot}Phone`, `SĐT ${g.phone} trùng tài khoản ${staffPhones.get(g.phone)}; không dùng làm tài khoản phụ huynh được`, g.phone);
+      }
+      if (bad || !key || !r.dob || !r.gender) continue; // has errors: not in the preview
+      const existing = kidIndex.get(key);
+      if (!existing && classAction === 'create' && !classesToCreate.some((x) => nameKey(x) === ck)) classesToCreate.push(r.className);
+      if (!existing) for (const g of r.guardians) {
         if (staffSamePhone.has(g.phone) && !users.has(g.phone)) warnings.push({ row: r.row, message: `SĐT ${g.phone} trùng SĐT của nhân viên ${staffSamePhone.get(g.phone)}; vẫn tạo tài khoản phụ huynh riêng (tên đăng nhập ${g.phone})` });
         const seen = phoneName.get(g.phone);
         if (seen && nameKey(seen.name) !== nameKey(g.fullName)) warnings.push({ row: r.row, message: `SĐT ${g.phone}: tên "${g.fullName}" khác dòng ${seen.row} ("${seen.name}"); dùng chung một tài khoản` });
@@ -202,15 +210,14 @@ export class ImportsController {
         if (ex && nameKey(ex.name) !== nameKey(g.fullName)) warnings.push({ row: r.row, message: `SĐT ${g.phone} đã có tài khoản phụ huynh "${ex.name}"; bé sẽ được gắn vào tài khoản này` });
         if (ex && !ex.active) warnings.push({ row: r.row, message: `Tài khoản phụ huynh ${g.phone} đang bị khoá` });
       }
-      if (bad) continue;
-      const existing = kidIndex.get(key);
       if (existing) warnings.push({ row: r.row, message: `Bé "${r.fullName}" (${r.dob.split('-').reverse().join('/')}) đã có trong hệ thống${existing.status === 'withdrawn' ? ' (đã nghỉ học)' : ''}; bỏ qua dòng này` });
       else if (classAction === 'existing') newPerClass.set(ck, (newPerClass.get(ck) ?? 0) + 1);
       plans.push({
         row: r.row, action: existing ? 'skip_duplicate' : 'create', ...(existing ? { existingChildId: existing.id, existingChildStatus: existing.status } : {}),
         child: { fullName: r.fullName, dob: r.dob, gender: r.gender, className: classAction === 'existing' ? classRows.find((c) => nameKey(c.name) === ck)!.name : r.className, classAction,
           allergies: r.allergies, healthNotes: r.healthNotes, address: r.address, enrolledAt: r.enrolledAt ?? today },
-        guardians: r.guardians.map((g) => ({ ...g, username: g.phone, account: users.has(g.phone) ? (users.get(g.phone)!.active ? 'existing' : 'existing_inactive') : 'create' })),
+        // skipped duplicate: nothing is created or linked for its guardians
+        guardians: r.guardians.map((g) => ({ ...g, username: g.phone, account: existing ? 'skip' : users.has(g.phone) ? (users.get(g.phone)!.active ? 'existing' : 'existing_inactive') : 'create' })),
       });
     }
     for (const c of classRows) {

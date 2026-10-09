@@ -4,6 +4,8 @@
  */
 import * as crypto from 'crypto';
 import * as ExcelJS from 'exceljs';
+import JSZip from 'jszip';
+import * as path from 'path';
 
 export const MAX_IMPORT_ROWS = 1000;
 export const MAX_IMPORT_BYTES = 5 * 1024 * 1024;
@@ -119,9 +121,60 @@ const gender = (s: string): 'M' | 'F' | null => { const k = norm(s); return ['na
 
 export interface RowError { row: number; column: string | null; field: Field | null; value?: string; message: string }
 export interface GuardianIn { slot: 1 | 2; fullName: string; relation: string; phone: string; canPickup: boolean }
+/**
+ * One non-blank data row. Every row is returned (also rows with field errors) so the DB-aware checks
+ * (class exists, duplicate in file, staff phone) still run and the school sees ALL errors of a row at once.
+ * Fields that failed validation are '' / null; guardians are listed when their phone is valid.
+ */
 export interface ParsedRow {
-  row: number; fullName: string; dob: string; gender: 'M' | 'F'; className: string; allergies: string | null; healthNotes: string | null;
+  row: number; fullName: string; dob: string | null; gender: 'M' | 'F' | null; className: string; allergies: string | null; healthNotes: string | null;
   address: string | null; enrolledAt: string | null; guardians: GuardianIn[];
+}
+
+const EXTRA_SHEET_PARTS = /\/(comments|vmlDrawing|drawing|table|printerSettings|threadedComment|person|ctrlProp|image|oleObject|package|pivotTable|queryTable|customProperty|webExtension)$/i;
+
+/**
+ * Rewrites an .xlsx package into the shape exceljs expects. Files saved by other tools (openpyxl, some Google Sheets /
+ * LibreOffice / Excel versions) use absolute relationship targets ("/xl/worksheets/sheet1.xml", "/xl/comments/comment1.xml"),
+ * which exceljs cannot resolve ("Cannot read properties of undefined (reading 'comments')").
+ * `strip` additionally drops everything an import never needs (comments, drawings, tables, …) from the worksheets.
+ */
+export async function normalizeXlsx(buf: Buffer, strip: boolean): Promise<Buffer> {
+  const zip = await JSZip.loadAsync(buf);
+  const relsFiles = Object.keys(zip.files).filter((n) => !zip.files[n].dir && /(^|\/)_rels\/[^/]*\.rels$/i.test(n));
+  for (const name of relsFiles) {
+    const baseDir = path.posix.dirname(path.posix.dirname(name)); // "xl/_rels/workbook.xml.rels" -> "xl", "_rels/.rels" -> "."
+    const isSheetRels = /^xl\/(worksheets|chartsheets)\/_rels\//i.test(name);
+    let xml = await zip.file(name)!.async('string');
+    xml = xml.replace(/<Relationship\b[^>]*?\/>|<Relationship\b[^>]*>[\s\S]*?<\/Relationship>/g, (rel) => {
+      if (/TargetMode\s*=\s*["']External["']/i.test(rel)) return rel;
+      if (strip && isSheetRels) { const t = rel.match(/Type\s*=\s*["']([^"']*)["']/); if (t && EXTRA_SHEET_PARTS.test(t[1])) return ''; }
+      return rel.replace(/Target\s*=\s*(["'])\/([^"']*)\1/, (_m, q, abs) => {
+        const rel2 = baseDir === '.' ? abs : path.posix.relative(baseDir, abs);
+        return `Target=${q}${rel2}${q}`;
+      });
+    });
+    zip.file(name, xml);
+  }
+  if (strip) for (const name of Object.keys(zip.files).filter((n) => /^xl\/worksheets\/[^/]+\.xml$/i.test(n))) {
+    const xml = await zip.file(name)!.async('string');
+    zip.file(name, xml.replace(/<(\w+:)?(legacyDrawing|legacyDrawingHF|drawing|tableParts|controls|oleObjects|picture)\b[^>]*?(\/>|>[\s\S]*?<\/\1?\2>)/g, ''));
+  }
+  return zip.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE' });
+}
+
+/** exceljs first (fast path, files from Excel / the template); on failure retry with normalised, then stripped packages. */
+export async function loadWorkbook(buf: Buffer): Promise<ExcelJS.Workbook> {
+  const attempts: (() => Promise<Buffer>)[] = [async () => buf, () => normalizeXlsx(buf, false), () => normalizeXlsx(buf, true)];
+  let lastErr: unknown = new Error('no worksheet');
+  for (const make of attempts) {
+    try {
+      const wb = new ExcelJS.Workbook();
+      await wb.xlsx.load((await make()) as any);
+      if (wb.worksheets.length) return wb;
+    } catch (e) { lastErr = e; }
+  }
+  throw lastErr;
 }
 
 /** Checks the upload really is an .xlsx (zip magic + parses), finds the sheet and returns rows + per-row validation errors. */
@@ -130,8 +183,8 @@ export async function parseWorkbook(buf: Buffer, today: string): Promise<{ rows:
   if (!buf?.length) throw new AppError(400, 'INVALID_FILE', 'Thiếu file .xlsx (trường "file")');
   if (buf.length > MAX_IMPORT_BYTES) throw new AppError(413, 'PAYLOAD_TOO_LARGE', 'File quá 5MB');
   if (!(buf[0] === 0x50 && buf[1] === 0x4b && buf[2] === 0x03 && buf[3] === 0x04)) throw new AppError(400, 'INVALID_FILE', 'File không phải Excel .xlsx (hãy dùng file mẫu, lưu dạng .xlsx)');
-  const wb = new ExcelJS.Workbook();
-  try { await wb.xlsx.load(buf as any); } catch { throw new AppError(400, 'INVALID_FILE', 'Không đọc được file Excel (.xlsx bị hỏng hoặc sai định dạng)'); }
+  let wb: ExcelJS.Workbook;
+  try { wb = await loadWorkbook(buf); } catch { throw new AppError(400, 'INVALID_FILE', 'Không đọc được file Excel (.xlsx bị hỏng hoặc sai định dạng)'); }
   // first sheet whose first row contains the required headers
   let ws: ExcelJS.Worksheet | undefined; let colOf = new Map<Field, number>(); let missing: string[] = COLUMNS.filter((c) => c.required).map((c) => c.header);
   for (const s of wb.worksheets) {
@@ -179,10 +232,10 @@ export async function parseWorkbook(buf: Buffer, today: string): Promise<{ rows:
       const phone = parsePhone(phRaw);
       if (!cellText(phRaw)) err(f('Phone'), 'Bắt buộc'); else if (!phone) err(f('Phone'), 'SĐT không hợp lệ (10 số, bắt đầu bằng 0)', phRaw);
       const canPickup = yesNo(pick); if (canPickup === null) err(f('CanPickup'), 'Chỉ nhận Có / Không', pick);
-      if (name && phone) guardians.push({ slot, fullName: name, relation: rel || 'Phụ huynh', phone, canPickup: canPickup ?? true });
+      if (phone) guardians.push({ slot, fullName: name, relation: rel || 'Phụ huynh', phone, canPickup: canPickup ?? true });
     }
     if (guardians.length === 2 && guardians[0].phone === guardians[1].phone) err('g2Phone', 'PH2 trùng SĐT với PH1', guardians[1].phone);
-    if (fullName && dob && g && className) rows.push({ row, fullName, dob, gender: g, className, allergies, healthNotes, address, enrolledAt, guardians });
+    rows.push({ row, fullName, dob: dob && dob <= today && dob >= minDob ? dob : null, gender: g, className, allergies, healthNotes, address, enrolledAt, guardians });
   }
   return { rows, errors, totalRows: raw.length, sheet: ws.name };
 }

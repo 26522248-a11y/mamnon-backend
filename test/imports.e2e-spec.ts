@@ -12,6 +12,8 @@ import { addDays, todayStr } from '../src/common/dates';
 import { seed } from '../src/database/seed';
 import * as ExcelJS from 'exceljs';
 import { buildTemplate } from '../src/imports/children-import';
+import * as fs from 'fs';
+import * as path from 'path';
 
 const nextMonth = (p: string) => { const [y, m] = p.split('-').map(Number); return m === 12 ? `${y + 1}-01` : `${y}-${String(m + 1).padStart(2, '0')}`; };
 
@@ -112,7 +114,7 @@ describe('Excel import: children + guardians (e2e)', () => {
     expect(at(10)).toEqual([]);
     expect(at(11)[0].message).toContain('tương lai');
     expect(at(12).map((e: any) => e.field).sort()).toEqual(['g1CanPickup', 'g2Phone']);
-    expect(r.body.preview.find((p: any) => p.row === 10)).toMatchObject({ action: 'skip_duplicate', existingChildId: k0.id });
+    expect(r.body.preview.find((p: any) => p.row === 10)).toMatchObject({ action: 'skip_duplicate', existingChildId: k0.id, guardians: [{ phone: '0977000009', account: 'skip' }] });
     expect(r.body.preview.find((p: any) => p.row === 2)).toMatchObject({ action: 'create', child: { gender: 'F', dob: '2022-03-05', className: 'Mầm 1', classAction: 'existing' },
       guardians: [{ phone: '0977000001', username: '0977000001', account: 'create', canPickup: true, relation: 'Bố' }] });
     expect(r.body.summary).toMatchObject({ childrenToCreate: 2, duplicatesToSkip: 1, parentAccountsToCreate: 2 });
@@ -181,6 +183,54 @@ describe('Excel import: children + guardians (e2e)', () => {
     expect(again.body.imported).toMatchObject({ children: 0, guardians: 0, parentAccountsCreated: 0, classesCreated: [] });
     expect(again.body.skippedDuplicates).toHaveLength(4);
     expect(await count('users')).toBe(users);
+  });
+
+  // ---- hotfix/import: files from other tools, all errors per row, skip account, 413 ----
+  const fx = (f: string) => fs.readFileSync(path.join(__dirname, 'fixtures/import', f));
+  const OK_FILES = [
+    'ok_openpyxl.xlsx', 'ok_libreoffice.xlsx',                         // tester's files (openpyxl used to fail: absolute rels targets)
+    'ok_gsheets_like.xlsx', 'ok_excel_like.xlsx', 'ok_inlinestr_text.xlsx', // hand-built package shapes (make_fixtures.py)
+    'exceljs_sst_serial.xlsx', 'exceljs_inline_text.xlsx', 'sheetjs_sst_serial.xlsx', 'sheetjs_inline_text.xlsx', // make_writer_fixtures.js
+  ];
+  it.each(OK_FILES)('reads %s (dryRun: 2 children, 3 parent accounts, same data whatever the writer)', async (f) => {
+    const r = await up(fx(f), '?dryRun=true', 'admin', f).expect(200);
+    expect(r.body).toMatchObject({ ok: true, totalRows: 2, sheet: 'Học sinh', errors: [],
+      summary: { childrenToCreate: 2, parentAccountsToCreate: 3, guardiansToCreate: 3, errorCount: 0 } });
+    expect(r.body.preview.map((p: any) => [p.row, p.child.fullName, p.child.dob, p.child.gender, p.child.className, p.guardians.map((g: any) => `${g.phone}:${g.canPickup}`)])).toEqual([
+      [2, 'QA Nhập Một', '2022-03-01', 'M', 'Mầm 1', ['0987000001:true']],
+      [3, 'QA Nhập Hai', '2022-04-02', 'F', 'Mầm 1', ['0987000002:true', '0987000003:false']],
+    ]);
+    expect(r.body.preview[1].child.allergies).toBe('Sữa');
+  });
+
+  it.each(['bad_multi_errors.xlsx', 'bad_multi_libreoffice.xlsx'])('%s: every error of a row is reported at once (incl. unknown class)', async (f) => {
+    const r = await up(fx(f), '?dryRun=true&createClasses=false', 'admin', f).expect(200);
+    expect(r.body).toMatchObject({ ok: false, totalRows: 2, preview: [] });
+    const fields = (row: number) => r.body.errors.filter((e: any) => e.row === row).map((e: any) => e.field).sort();
+    expect(fields(2)).toEqual(['className', 'dob', 'fullName', 'g1Name', 'g1Phone', 'gender']);
+    expect(fields(3)).toEqual(['className', 'dob', 'g2Phone']);
+    expect(r.body.errors.find((e: any) => e.row === 3 && e.field === 'className')).toMatchObject({ value: 'Lá 9', column: 'Lớp *' });
+    expect(r.body.summary).toMatchObject({ errorRows: 2, errorCount: 9, classesToCreate: [] });
+  });
+
+  it('class / in-file duplicate / staff-phone checks run even when the row already has field errors', async () => {
+    await ds.query(`UPDATE users SET username = '0966000002' WHERE username = 'ketoan'`);
+    try {
+      const r = await up(await xlsx([
+        base({ fullName: 'Bé Hai Lỗi', className: 'Lá 9', g1Phone: '0977000101', g2Name: 'Mẹ', g2Phone: '0977000101' }), // 2: PH2 = PH1 + unknown class
+        base({ fullName: 'Bé Hai Lỗi', gender: 'X', className: 'Lá 9', g1Phone: '0966000002' }),                        // 3: gender + dup row 2 + class + staff phone
+      ]), '?dryRun=true').expect(200);
+      const fields = (row: number) => r.body.errors.filter((e: any) => e.row === row).map((e: any) => e.field).sort();
+      expect(fields(2)).toEqual(['className', 'g2Phone']);
+      expect(fields(3)).toEqual(['className', 'fullName', 'g1Phone', 'gender']);
+      expect(r.body.preview).toEqual([]);
+    } finally { await ds.query(`UPDATE users SET username = 'ketoan' WHERE username = '0966000002'`); }
+  });
+
+  it('a file > 5MB is rejected with 413', async () => {
+    const big = Buffer.concat([Buffer.from('PK\x03\x04'), Buffer.alloc(5 * 1024 * 1024 + 10)]);
+    const r = await up(big, '?dryRun=true').expect(413);
+    expect(r.body.code).toBe('PAYLOAD_TOO_LARGE');
   });
   const login_ = (u: string) => login(u);
 });
