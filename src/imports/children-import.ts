@@ -38,6 +38,8 @@ export const norm = (s: string) => s.normalize('NFD').replace(/[\u0300-\u036f]/g
   .toLowerCase().replace(/\(.*?\)/g, ' ').replace(/[*:_\-–/]+/g, ' ').replace(/\s+/g, ' ').trim();
 const headerKey = (s: string) => norm(s).replace(/^phu huynh ?(\d)/, 'ph$1').replace(/\bso dien thoai\b|\bdien thoai\b/, 'sdt');
 const HEADER_MAP = new Map<string, Field>(COLUMNS.map((c) => [headerKey(c.header), c.field]));
+/** Person-name key for "same person?" checks: case- and whitespace-insensitive, diacritics KEPT ("nguyễn  thị hà" == "Nguyễn Thị Hà", but "Hà" != "Ha"). */
+export const personKey = (s: string) => s.normalize('NFC').trim().replace(/\s+/g, ' ').toLocaleLowerCase('vi');
 /** Normalised person / class name for matching ("  nguyễn  Gia An" == "Nguyễn Gia An"). */
 export const nameKey = (s: string) => s.normalize('NFC').trim().replace(/\s+/g, ' ').toLocaleLowerCase('vi');
 
@@ -66,6 +68,7 @@ export async function buildTemplate(): Promise<Buffer> {
     ['Ngày', 'dd/mm/yyyy, vd 05/03/2022 (hoặc định dạng ô là Ngày).'],
     ['SĐT', '10 số bắt đầu bằng 0 (chấp nhận +84…). SĐT là tên đăng nhập của phụ huynh. Một phụ huynh nhiều con: ghi cùng SĐT ở các dòng.'],
     ['Tài khoản', 'SĐT chưa có tài khoản → tạo tài khoản phụ huynh, mật khẩu tạm có trong file kết quả (chỉ tải được một lần), bắt đổi khi đăng nhập lần đầu. SĐT đã có tài khoản phụ huynh → gắn bé vào tài khoản đó.'],
+    ['SĐT đã có tài khoản', 'SĐT đã là tài khoản phụ huynh nhưng khác tên (không phân biệt hoa thường / khoảng trắng; CÓ phân biệt dấu) → LỖI, không gắn. Cùng một SĐT ghi tên khác nhau ở các dòng → LỖI. Nếu nhà trường đã xác minh đúng là cùng một người: xác nhận gắn trên màn hình nhập (từng dòng, từng phụ huynh).'],
     ['Trùng', 'Bé đã có trong hệ thống (cùng họ tên + ngày sinh) → bỏ qua dòng đó, không tạo trùng.'],
     ['Lớp', 'Tên lớp phải có sẵn trong hệ thống, trừ khi chọn "tự tạo lớp" khi nhập.'],
     ['Kiểm tra trước', 'Bấm "Kiểm tra" (dry run) để xem lỗi từng dòng; chỉ khi không còn lỗi mới nhập được. Nhập là tất cả hoặc không gì cả.'],
@@ -119,7 +122,8 @@ export function parsePhone(v: ExcelJS.CellValue): string | null {
 const yesNo = (s: string): boolean | null => { const k = norm(s); return !k ? true : ['co', 'x', 'yes', 'y', '1', 'true', 'duoc'].includes(k) ? true : ['khong', 'no', 'n', '0', 'false', 'k'].includes(k) ? false : null; };
 const gender = (s: string): 'M' | 'F' | null => { const k = norm(s); return ['nam', 'm', 'trai', 'be trai'].includes(k) ? 'M' : ['nu', 'f', 'gai', 'be gai'].includes(k) ? 'F' : null; };
 
-export interface RowError { row: number; column: string | null; field: Field | null; value?: string; message: string }
+export interface RowError { row: number; column: string | null; field: Field | null; value?: string; message: string; code?: string;
+  existingAccount?: { userId: string; name: string; childrenCount: number } | null; conflictRow?: number }
 export interface GuardianIn { slot: 1 | 2; fullName: string; relation: string; phone: string; canPickup: boolean }
 /**
  * One non-blank data row. Every row is returned (also rows with field errors) so the DB-aware checks
