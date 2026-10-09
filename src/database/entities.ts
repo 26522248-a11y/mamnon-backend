@@ -495,7 +495,7 @@ export class Announcement {
 export type NotificationType = 'announcement' | 'pickup_request' | 'pickup_decision' | 'invoice' | 'payment' | 'picked_up' | 'picker_registration' | 'picker_decision' | 'contact_change'
   | 'absence_report' | 'absence_cancelled' | 'absence_overridden' | 'kitchen_change' | 'medicine_request' | 'medicine_given' | 'late_pickup'
   | 'late_pickup_cancelled' | 'medicine_cancelled' | 'school_closure' | 'holiday_reminder' | 'photo_consent'
-  | 'transfer_claim' | 'transfer_claim_rejected';
+  | 'transfer_claim' | 'transfer_claim_rejected' | 'photo_post' | 'photo_hidden';
 @Entity('notifications')
 @Index('ix_notifications_user_read', ['userId', 'readAt'])
 @Index('ix_notifications_announcement', ['announcementId'])
@@ -753,7 +753,66 @@ export class TransferClaim {
   @ManyToOne(() => Payment, { onDelete: 'SET NULL', nullable: true }) @JoinColumn({ name: 'payment_id' }) payment!: Payment | null;
 }
 
+/** Class activity album post ("Vẽ tranh mùa thu"), one or more photos. Soft delete. */
+@Entity('photo_posts')
+@Index('ix_photo_posts_class_created', ['classId', 'createdAt'])
+export class PhotoPost {
+  @PrimaryGeneratedColumn('uuid') id!: string;
+  @Column({ name: 'class_id', type: 'uuid' }) classId!: string;
+  @ManyToOne(() => ClassRoom, { onDelete: 'CASCADE' }) @JoinColumn({ name: 'class_id' }) classRoom!: ClassRoom;
+  @Column({ type: 'varchar', length: 300, nullable: true }) caption!: string | null;
+  @Column({ name: 'author_id', type: 'uuid', nullable: true }) authorId!: string | null;
+  @ManyToOne(() => User, { onDelete: 'SET NULL', nullable: true }) @JoinColumn({ name: 'author_id' }) author!: User | null;
+  @CreateDateColumn({ name: 'created_at', type: 'timestamptz' }) createdAt!: Date;
+  @Column({ name: 'deleted_at', type: 'timestamptz', nullable: true }) deletedAt!: Date | null;
+  @Column({ name: 'deleted_by', type: 'uuid', nullable: true }) deletedBy!: string | null;
+  @OneToMany(() => Photo, (p) => p.post) photos!: Photo[];
+}
+
+/** One photo (stored as JPEG full + thumb under UPLOAD_DIR/photos/<classId>/). Hidden (consent withdrawn) ≠ deleted. */
+@Entity('photos')
+export class Photo {
+  @PrimaryGeneratedColumn('uuid') id!: string;
+  @Index() @Column({ name: 'post_id', type: 'uuid' }) postId!: string;
+  @ManyToOne(() => PhotoPost, (p) => p.photos, { onDelete: 'CASCADE' }) @JoinColumn({ name: 'post_id' }) post!: PhotoPost;
+  @Index() @Column({ name: 'class_id', type: 'uuid' }) classId!: string;
+  @Column({ type: 'integer', default: 0 }) position!: number;
+  @Column({ name: 'file_key', length: 120 }) fileKey!: string;
+  @Column({ name: 'thumb_key', length: 120 }) thumbKey!: string;
+  @Column({ type: 'integer' }) width!: number;
+  @Column({ type: 'integer' }) height!: number;
+  @Column({ type: 'boolean', default: false }) hidden!: boolean;
+  @Column({ name: 'hidden_reason', type: 'varchar', length: 40, nullable: true }) hiddenReason!: string | null;
+  /** Sticky: children because of whom the photo was hidden; only cleared by a successful unhide. */
+  @Column({ name: 'hidden_for_child_ids', type: 'uuid', array: true, default: () => "'{}'" }) hiddenForChildIds!: string[];
+  @Column({ name: 'hidden_at', type: 'timestamptz', nullable: true }) hiddenAt!: Date | null;
+  @CreateDateColumn({ name: 'created_at', type: 'timestamptz' }) createdAt!: Date;
+  @Column({ name: 'deleted_at', type: 'timestamptz', nullable: true }) deletedAt!: Date | null;
+  @Column({ name: 'deleted_by', type: 'uuid', nullable: true }) deletedBy!: string | null;
+  @OneToMany(() => PhotoTag, (t) => t.photo) tags!: PhotoTag[];
+}
+
+@Entity('photo_tags')
+export class PhotoTag {
+  @PrimaryColumn('uuid', { name: 'photo_id' }) photoId!: string;
+  @ManyToOne(() => Photo, (p) => p.tags, { onDelete: 'CASCADE' }) @JoinColumn({ name: 'photo_id' }) photo!: Photo;
+  @Index() @PrimaryColumn('uuid', { name: 'child_id' }) childId!: string;
+  @ManyToOne(() => Child, { onDelete: 'CASCADE' }) @JoinColumn({ name: 'child_id' }) child!: Child;
+  @Column({ name: 'created_by', type: 'uuid', nullable: true }) createdBy!: string | null;
+  @CreateDateColumn({ name: 'created_at', type: 'timestamptz' }) createdAt!: Date;
+}
+
+@Entity('photo_likes')
+export class PhotoLike {
+  @PrimaryColumn('uuid', { name: 'post_id' }) postId!: string;
+  @ManyToOne(() => PhotoPost, { onDelete: 'CASCADE' }) @JoinColumn({ name: 'post_id' }) post!: PhotoPost;
+  @PrimaryColumn('uuid', { name: 'user_id' }) userId!: string;
+  @ManyToOne(() => User, { onDelete: 'CASCADE' }) @JoinColumn({ name: 'user_id' }) user!: User;
+  @CreateDateColumn({ name: 'created_at', type: 'timestamptz' }) createdAt!: Date;
+}
+
 export const ENTITIES = [
+  PhotoPost, Photo, PhotoTag, PhotoLike,
   TransferClaim,
   Absence, AbsenceDay, AbsenceEvent, Holiday, Medicine, MedicineDose, LatePickup,
   AuthorizedPicker, AuthorizedPickerHistory, ChildContactHistory, AuditEvent, SensitiveAccessLog, PickupDuty, PickupCallAttempt, PushSubscription, NotificationDelivery,

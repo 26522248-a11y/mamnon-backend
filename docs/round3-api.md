@@ -2,7 +2,7 @@
 
 Base `/api/v1`, JWT, errors `{code, message, details?}`, lists `{items}` (same conventions as round2-api.md).
 Sources: `mamnon-design/mockups7.html` (screens 1–4 + reconciliation table), `qa/testcases-dot3.md` (QR-01…09, ALB-01…06).
-Status: **§1 QR payments implemented** (migration `Round3Qr`, tests `test/round3-qr.e2e-spec.ts`); §2 photo album: contract only.
+Status: **§1 QR payments implemented** (migration `Round3Qr`, tests `test/round3-qr.e2e-spec.ts`); §2 photo album implemented (migration `Round3Photos`, `sharp` dependency, tests `test/round3-photos.e2e-spec.ts`).
 
 ---
 
@@ -86,17 +86,18 @@ New NotificationType values: `transfer_claim`, `transfer_claim_rejected`.
 - Teachers post only to their own classes (403 otherwise, ALB-06); admin any class.
 
 ### 2.2 Upload
-- `multipart/form-data`: `files[]` (1–20, each ≤ 15 MB), JPEG/PNG/WebP/HEIC detected by **magic bytes** (extension/Content-Type ignored); anything else (exe, txt renamed .jpg) → `400 UNSUPPORTED_IMAGE` with the file name (ALB-05). HEIC/PNG/WebP are converted to JPEG; EXIF (incl. GPS) stripped; auto-rotated; stored as `full` (max 2048 px) + `thumb` (400 px) under `UPLOAD_DIR/photos/<classId>/`.
-- Too large → `413 FILE_TOO_LARGE`.
+- `multipart/form-data`: `files[]` (1–20, each ≤ 15 MB), JPEG/PNG/WebP/HEIC detected by **magic bytes** (extension/Content-Type ignored); anything else (exe, txt renamed .jpg) → `400 UNSUPPORTED_IMAGE`, `details: {file}` (ALB-05). All files are validated before anything is written (one bad file → nothing saved). HEIC/PNG/WebP are converted to JPEG; EXIF (incl. GPS) stripped; auto-rotated; stored as `full` (max 2048 px) + `thumb` (400 px) under `UPLOAD_DIR/photos/<classId>/`.
+- Too large → `413 FILE_TOO_LARGE`; more than 20 files → `400 TOO_MANY_FILES`; no file → `400 VALIDATION_ERROR`. Field name `files` (or `files[]`).
 
 ### 2.3 Endpoints
 - **POST /classes/:classId/photo-posts** — teacher (own class), admin. Fields: `files[]`, `caption` (≤300), `tags` = JSON array aligned with files, each an array of childIds (e.g. `[["id1","id2"],[],["id1"]]`). Every tagged child must be active, in that class (`400 CHILD_NOT_IN_CLASS`) and consenting (`422 PHOTO_CONSENT_MISSING`). → `201` post view. Notifies parents of the class (`type: 'photo_post'`, not important). Audit `photo_post.create` (photo ids, tags).
-- **GET /classes/:classId/photo-posts?before=<ISO>&limit=20** — class viewers. `{items: [{id, classId, caption, createdAt, author:{id,name}, likeCount, likedByMe, photos: [{id, width, height, childIds, mine (tags my child – parent), hidden, hiddenReason, hiddenForChildIds}]}], nextBefore}`. Parents get only non-hidden photos and only `childIds` of their own children (other kids' tags not revealed; `mine` flag drives "có bé An"). Teachers/admin see hidden photos with `hiddenReason` and `hiddenForChildIds` (+ names).
+- **GET /classes/:classId/photo-posts?before=<ISO>&limit=20** — class viewers. `{items: [{id, classId, caption, createdAt, author:{id,name}, likeCount, likedByMe, photos: [{id, width, height, childIds, children:[{childId,name}], mine (tags my child – parent), hidden, hiddenReason, hiddenForChildIds, hiddenFor:[{childId,name}], hiddenAt}]}], nextBefore}` (newest first; `nextBefore` = ISO cursor or null; limit ≤ 50). Parents don't see posts whose photos are all hidden.. Parents get only non-hidden photos and only `childIds` of their own children (other kids' tags not revealed; `mine` flag drives "có bé An"). Teachers/admin see hidden photos with `hiddenReason` and `hiddenForChildIds` (+ names).
+- **GET /photo-posts/:id** — single post view (same shape as a list item; 403/404 as for the list).
 - **GET /photos/:id/file?size=thumb|full&download=1** — streams the JPEG (`Cache-Control: private`). `download=1` (Content-Disposition attachment) for parents only if the photo tags their own child, else 403 ("Chỉ tải được ảnh có con mình").
-- **PUT /photos/:id/tags** `{childIds}` — teacher (own class), admin. Added children are checked as in POST (`422 PHOTO_CONSENT_MISSING`). Removing a tag (even of a child in `hiddenForChildIds`) is allowed but never unhides and never shrinks `hiddenForChildIds`. Audit `photo.tags` before/after (tags + hidden state).
-- **POST /photos/:id/unhide** — teacher (own class), admin. Requires consent for every child in `hiddenForChildIds` (tagged or not any more) and for every current tag; else `422 PHOTO_CONSENT_MISSING` `details.children: [{childId, name}]`. Audit `photo.unhide` (before has `hiddenForChildIds`).
-- **DELETE /photos/:id**, **DELETE /photo-posts/:id** — author teacher or admin; soft delete (file kept 30 days), audit.
-- **POST / DELETE /photo-posts/:id/like** — parents and teachers who can view; idempotent.
+- **PUT /photos/:id/tags** `{childIds}` — teacher (own class), admin. Added children are checked as in POST (`422 PHOTO_CONSENT_MISSING`). Removing a tag (even of a child in `hiddenForChildIds`) is allowed but never unhides and never shrinks `hiddenForChildIds`. Audit `photo.tags` before/after (tags + hidden state), `data {added, removed}`. Response = photo view. Tagged child outside the class → `400 CHILD_NOT_IN_CLASS`.
+- **POST /photos/:id/unhide** — teacher (own class), admin. Requires consent for every child in `hiddenForChildIds` (tagged or not any more) and for every current tag; else `422 PHOTO_CONSENT_MISSING` `details.children: [{childId, name}]`. Not hidden → `409 NOT_HIDDEN`. Response = photo view. Audit `photo.unhide` (before has `hiddenForChildIds`).
+- **DELETE /photos/:id**, **DELETE /photo-posts/:id** — author teacher or admin; soft delete (files kept on disk; a purge job after 30 days is not implemented yet) → 204, audit `photo.delete` / `photo_post.delete`.
+- **POST / DELETE /photo-posts/:id/like** — parents and teachers who can view; idempotent; → `{postId, likeCount, likedByMe}`.
 
 Album footer text (frontend): "Ảnh chỉ dành cho phụ huynh trong lớp. Vui lòng không chia sẻ ảnh có bé khác lên mạng xã hội."
 
@@ -114,3 +115,7 @@ New NotificationType values: `photo_post`, `photo_hidden`.
 | ALB-04 | 2.1 authenticated file endpoint (403 / 401) |
 | ALB-05 | 2.2 magic-byte check, HEIC → JPEG |
 | ALB-06 | 2.1 / 2.3 own class only |
+| ALB-07 | re-consent never unhides; unhide needs all hidden-for children + current tags consenting |
+| ALB-08 | 422 `details.children` names the children lacking consent |
+| ALB-09 | untagging allowed + audited, hiddenForChildIds sticky, still hidden |
+| QR-10 | `paymentStatus` separate; invoice status/debts unchanged while pending |

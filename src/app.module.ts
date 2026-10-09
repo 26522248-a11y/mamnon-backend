@@ -7,6 +7,7 @@ import { AbsencesService } from './absences/absences.service';
 import { HolidayReminderService } from './calendar/holiday-reminder.service';
 import { ParentMessagesController } from './messages/parent-messages.controller';
 import { PhotoConsentController } from './children/photo-consent.controller';
+import { PhotosController } from './photos/photos.controller';
 import { HolidaysController } from './calendar/holidays.controller';
 import { DataSource } from 'typeorm';
 import { todayStr } from './common/dates';
@@ -63,7 +64,7 @@ class SettingsController {
     TypeOrmModule.forFeature(ENTITIES),
     JwtModule.register({}),
   ],
-  controllers: [HealthController, SettingsController, AuthController, ClassesController, ChildrenController, AttendanceController, DashboardController, FeesController, HealthNutritionController, NotificationsController, ReportsController, UsersController, ImportsController, AuthorizedPickersController, ContactPhonesController, PickupDutiesController, PushController, AuditController, AbsencesController, HolidaysController, ParentMessagesController, PhotoConsentController],
+  controllers: [HealthController, SettingsController, AuthController, ClassesController, ChildrenController, AttendanceController, DashboardController, FeesController, HealthNutritionController, NotificationsController, ReportsController, UsersController, ImportsController, AuthorizedPickersController, ContactPhonesController, PickupDutiesController, PushController, AuditController, AbsencesController, HolidaysController, ParentMessagesController, PhotoConsentController, PhotosController],
   providers: [
     AccessService, UserContextService, AbsencesService, HolidayReminderService, NotificationsService, NotificationDispatcher, PickupSafetyService, LoginThrottleService,
     { provide: APP_GUARD, useClass: JwtAuthGuard },
