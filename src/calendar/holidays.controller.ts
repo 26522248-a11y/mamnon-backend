@@ -5,7 +5,7 @@ import { IsBoolean, IsDateString, IsIn, IsInt, IsNotEmpty, IsOptional, IsString,
 import { DataSource, In } from 'typeorm';
 import { AbsencesService } from '../absences/absences.service';
 import { AuthUser, CurrentUser, Roles } from '../common/auth';
-import { addDays, dayDiff } from '../common/dates';
+import { addDays, dayDiff, viDayLabel } from '../common/dates';
 import { AppError, BadRequest, NotFound } from '../common/errors';
 import { Attendance, AttendanceHistory, Holiday, User } from '../database/entities';
 import { Req } from '@nestjs/common';
@@ -231,7 +231,7 @@ export class HolidaysController {
       if (e?.driverError?.code === '23505') throw new AppError(409, 'HOLIDAY_EXISTS', 'Ngày này đã là ngày nghỉ', { dates: [date] });
       throw e;
     });
-    await this.notify.send(c.parents, { type: 'school_closure', important: true, title: `${name} ngày ${date.split('-').reverse().join('/')}`, body: reason,
+    await this.notify.send(c.parents, { type: 'school_closure', important: true, title: `${name} ${viDayLabel(date)}`, body: reason,
       data: { holidayId: h.id, date, reason }, refId: h.id, push: { requireInteraction: true, tag: `closure-${date}` } });
     return { holiday: (await this.views([h]))[0], parentsNotified: c.parents.length, childrenRefunded: c.refunded.length, childrenPresent: c.present.length, absentRowsCreated: c.missing.length,
       childrenWithoutParentCount: c.noParent.length, childrenWithoutParent: c.noParent };

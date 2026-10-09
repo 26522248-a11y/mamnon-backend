@@ -96,7 +96,7 @@ export class AbsencesController {
     });
 
     const [view] = await this.svc.views(u, [Object.assign(result.abs, { skippedDates: result.skipped })]);
-    const span = result.dates.length === 1 ? `ngày ${result.dates[0]}` : `${result.dates.length} ngày (${result.dates[0]} → ${result.dates[result.dates.length - 1]})`;
+    const span = result.dates.length === 1 ? viDayLabel(result.dates[0]) : `${result.dates.length} ngày (${viDayLabel(result.dates[0])} → ${viDayLabel(result.dates[result.dates.length - 1])})`;
     const msg = { title: `Báo vắng: ${child.fullName}${child.classRoom ? ` (${child.classRoom.name})` : ''} – ${span}`,
       body: `${REASON_LABEL[dto.reason!]}${dto.note ? `: ${dto.note}` : ''}`, data: { absenceId: result.abs.id, childId: id, dates: result.dates }, refId: result.abs.id };
     await this.notify.send(await this.svc.classTeacherIds(child.classId), { type: 'absence_report', ...msg });

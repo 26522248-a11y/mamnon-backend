@@ -14,7 +14,7 @@ import {
 import { DataSource, EntityManager, In, IsNull, Not, Repository } from 'typeorm';
 import { AccessService } from '../common/access';
 import { AuthUser, CurrentUser, Roles } from '../common/auth';
-import { addDays, overdueCutoff, todayStr } from '../common/dates';
+import { addDays, overdueCutoff, todayStr, viDayLabel } from '../common/dates';
 import { AppError, BadRequest, Forbidden, NotFound } from '../common/errors';
 import { vndInWords } from '../common/money';
 import { NotificationsService } from '../notifications/notifications.service';
@@ -451,7 +451,7 @@ export class FeesController {
     for (const i of list) {
       await this.notify.toParentsOfChild(i.childId, {
         type: 'invoice', title: `Hoá đơn học phí tháng ${i.period.slice(5)}/${i.period.slice(0, 4)}`,
-        body: `Số tiền: ${i.totalAmount.toLocaleString('vi-VN')}đ, hạn nộp ${i.dueDate.split('-').reverse().join('/')}.`,
+        body: `Số tiền: ${i.totalAmount.toLocaleString('vi-VN')}đ, hạn nộp ${viDayLabel(i.dueDate)}.`,
         data: { invoiceId: i.id, childId: i.childId, period: i.period, totalAmount: i.totalAmount },
       });
     }

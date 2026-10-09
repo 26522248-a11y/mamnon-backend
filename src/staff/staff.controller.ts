@@ -8,7 +8,7 @@ import { Request } from 'express';
 import { Between, DataSource, EntityManager, In, IsNull, LessThanOrEqual, MoreThanOrEqual, Not } from 'typeorm';
 import { recordAudit } from '../common/audit';
 import { AuthUser, CurrentUser, Roles } from '../common/auth';
-import { addDays, todayStr } from '../common/dates';
+import { addDays, todayStr, viDayLabel } from '../common/dates';
 import { AppError, BadRequest, Forbidden, NotFound } from '../common/errors';
 import {
   ClassRoom, LeaveSession, Medicine, MedicineDose, StaffCheckin, StaffLeave, StaffLeaveType, StaffShift, StaffShiftAssignment, StaffSubstitution, User,
@@ -119,7 +119,8 @@ export const LEAVE_TYPE_LABEL: Record<StaffLeaveType, string> = { sick: 'Ốm', 
 export const SESSION_LABEL: Record<LeaveSession, string> = { full: 'Cả ngày', morning: 'Buổi sáng', afternoon: 'Buổi chiều' };
 const SESSION_SUFFIX: Record<LeaveSession, string> = { full: '', morning: ' (buổi sáng)', afternoon: ' (buổi chiều)' };
 const dm = (d: string) => `${d.slice(8, 10)}/${d.slice(5, 7)}`;
-const rangeLabel = (l: { fromDate: string; toDate: string }) => (l.fromDate === l.toDate ? dm(l.fromDate) : `${dm(l.fromDate)}–${dm(l.toDate)}`);
+/** P14: notification dates use viDayLabel ('Thứ Tư 14/10'); ranges 'Thứ Hai 12/10 → Thứ Tư 14/10'. */
+const rangeLabel = (l: { fromDate: string; toDate: string }) => (l.fromDate === l.toDate ? viDayLabel(l.fromDate) : `${viDayLabel(l.fromDate)} → ${viDayLabel(l.toDate)}`);
 const clash = (a: LeaveSession, b: LeaveSession) => a === 'full' || b === 'full' || a === b;
 const annualAllowance = () => Number(process.env.ANNUAL_LEAVE_DAYS ?? 12) || 12;
 /** Monday..Friday of the week containing `d` */
@@ -769,7 +770,7 @@ export class StaffController {
   private async afterSub(saved: StaffSubstitution) {
     const full = (await this.subsQuery({ from: saved.date, to: saved.date }).andWhere('s.id = :id', { id: saved.id }).getOne())!;
     const cls = full.classRoom, shift = full.shift, sess = (full.session ?? 'full') as LeaveSession;
-    const when = `${dm(full.date)}${sess === 'full' ? '' : ` ${SESSION_LABEL[sess].toLowerCase()}`}`;
+    const when = `${viDayLabel(full.date)}${sess === 'full' ? '' : ` ${SESSION_LABEL[sess].toLowerCase()}`}`;
     const note = full.leaveId ? (await this.ds.getRepository(StaffLeave).findOneBy({ id: full.leaveId }))?.handoverNote ?? full.note : full.note;
     await this.notify.send([full.substituteUserId], { type: 'substitution', refId: full.id, title: `Trông thay lớp ${cls?.name ?? ''} · ${when}`,
       body: [`${shift.name} ${shift.startTime}–${shift.endTime}${full.absentUser ? ` · thay ${full.absentUser.name}` : ''}`, note && `Bàn giao: ${note}`].filter(Boolean).join('\n'),
@@ -779,7 +780,7 @@ export class StaffController {
         `SELECT DISTINCT g.user_id FROM guardians g JOIN children c ON c.id = g.child_id WHERE c.class_id = $1 AND c.status = 'active' AND g.user_id IS NOT NULL`, [full.classId])).map((r: any) => r.user_id);
       const subName = full.substituteUser?.name ?? '';
       if (parents.length) await this.notify.send(parents, { type: 'substitute_teacher', refId: full.id,
-        title: full.date === todayStr() ? '↔ Cô trông thay hôm nay' : `↔ Cô trông thay ngày ${dm(full.date)}`,
+        title: full.date === todayStr() ? '↔ Cô trông thay hôm nay' : `↔ Cô trông thay ${viDayLabel(full.date)}`,
         body: `${subName} trông lớp ${cls?.name ?? ''}${sess === 'full' ? '' : ` ${SESSION_LABEL[sess].toLowerCase()}`}${full.absentUser ? ` thay ${full.absentUser.name}` : ''}.`,
         data: { substitutionId: full.id, classId: full.classId, className: cls?.name ?? null, date: full.date, session: sess, substituteName: subName } });
     }
