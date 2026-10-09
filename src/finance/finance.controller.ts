@@ -19,7 +19,7 @@ import { NotificationsService } from '../notifications/notifications.service';
 /** Expenses above this amount (VND) recorded by the accountant wait for admin (BGH) approval. */
 export const APPROVAL_LIMIT = Number(process.env.FINANCE_APPROVAL_LIMIT || 10_000_000);
 const MONTH_RE = /^\d{4}-(0[1-9]|1[0-2])$/;
-const MAX_RECEIPT = 5 * 1024 * 1024;
+const MAX_RECEIPT = 10 * 1024 * 1024; // PM (B31): same as images; image receipts are resized, PDFs kept as-is
 const receiptUpload = { storage: memoryStorage(), limits: { fileSize: MAX_RECEIPT, files: 1 } };
 const METHOD = { cash: 'tiền mặt', transfer: 'chuyển khoản' } as const;
 
@@ -72,7 +72,7 @@ async function saveReceipt(file?: Express.Multer.File): Promise<{ key: string; n
     return { key, name };
   }
   if (!detectImage(file.buffer)) throw BadRequest('Hoá đơn phải là ảnh JPG/PNG/HEIC hoặc PDF', 'INVALID_FILE');
-  return { key: await saveImage(file), name };
+  return { key: await saveImage(file, 'document'), name }; // B31: image receipts resized to 2048px, PDFs untouched
 }
 
 @ApiTags('finance') @ApiBearerAuth()

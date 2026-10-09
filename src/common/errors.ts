@@ -3,7 +3,7 @@ import { QueryFailedError } from 'typeorm';
 
 const CODE_BY_STATUS: Record<number, string> = {
   400: 'BAD_REQUEST', 401: 'UNAUTHORIZED', 403: 'FORBIDDEN', 404: 'NOT_FOUND',
-  409: 'CONFLICT', 413: 'PAYLOAD_TOO_LARGE', 422: 'UNPROCESSABLE', 429: 'TOO_MANY_REQUESTS',
+  409: 'CONFLICT', 413: 'PAYLOAD_TOO_LARGE', 422: 'UNPROCESSABLE', 429: 'TOO_MANY_REQUESTS', 503: 'SERVICE_UNAVAILABLE',
 };
 
 /** Throw this to control the `code` field explicitly. */
@@ -31,6 +31,7 @@ export class AllExceptionsFilter implements ExceptionFilter {
       const r: any = exception.getResponse();
       if (exception instanceof AppError) body = { code: exception.code, message: r.message, ...(exception.extra ?? {}), ...(exception.details !== undefined ? { details: exception.details } : {}) };
       else if (status === 400 && Array.isArray(r?.message)) body = { code: 'VALIDATION_ERROR', message: 'Dữ liệu không hợp lệ', details: r.message };
+      else if (status === 413) body = { code: 'PAYLOAD_TOO_LARGE', message: 'File quá lớn so với giới hạn cho phép' }; // multer "File too large"
       else body = { code: CODE_BY_STATUS[status] ?? 'ERROR', message: typeof r === 'string' ? r : (Array.isArray(r?.message) ? r.message.join('; ') : r?.message ?? exception.message) };
     } else if (exception instanceof QueryFailedError) {
       const pg: any = (exception as any).driverError;

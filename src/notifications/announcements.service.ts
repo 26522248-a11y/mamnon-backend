@@ -3,6 +3,7 @@ import * as crypto from 'crypto';
 import { DataSource, EntityManager, In } from 'typeorm';
 import { BadRequest } from '../common/errors';
 import { storage } from '../common/storage';
+import { imageQueue } from '../common/image-queue';
 import { detectImage, heifToJpeg } from '../common/upload';
 import { Announcement, AnnouncementAttachment, Child, ClassTeacher, User } from '../database/entities';
 import { NotificationsService } from './notifications.service';
@@ -120,13 +121,15 @@ export class AnnouncementsService implements OnApplicationBootstrap, OnModuleDes
     const kind = detectImage(file.buffer);
     if (!kind) throw BadRequest('File không phải ảnh JPG/PNG/HEIC hợp lệ', 'INVALID_FILE');
     const sharp = require('sharp');
-    const src = kind === 'heif' ? await heifToJpeg(file.buffer) : file.buffer;
-    let full: Buffer, info: { width: number; height: number; size: number }, thumb: Buffer;
-    try {
-      const out = await sharp(src).rotate().resize({ width: 2560, height: 2560, fit: 'inside', withoutEnlargement: true }).jpeg({ quality: 85, mozjpeg: true }).toBuffer({ resolveWithObject: true });
-      full = out.data; info = out.info;
-      thumb = await sharp(full).resize(360, 360, { fit: 'cover' }).jpeg({ quality: 75 }).toBuffer();
-    } catch { throw BadRequest('Ảnh bị hỏng hoặc không đọc được', 'INVALID_FILE'); }
+    let full!: Buffer, info!: { width: number; height: number; size: number }, thumb!: Buffer;
+    await imageQueue().run(async () => { // B31: shared image queue (one at a time, 503 when full)
+      const src = kind === 'heif' ? await heifToJpeg(file.buffer) : file.buffer;
+      try {
+        const out = await sharp(src).rotate().resize({ width: 2560, height: 2560, fit: 'inside', withoutEnlargement: true }).jpeg({ quality: 85, mozjpeg: true }).toBuffer({ resolveWithObject: true });
+        full = out.data; info = out.info;
+        thumb = await sharp(full).resize(360, 360, { fit: 'cover' }).jpeg({ quality: 75 }).toBuffer();
+      } catch { throw BadRequest('Ảnh bị hỏng hoặc không đọc được', 'INVALID_FILE'); }
+    });
     const base = `announcements/${crypto.randomUUID()}`;
     await storage().put(`${base}.jpg`, full, 'image/jpeg');
     await storage().put(`${base}_thumb.jpg`, thumb, 'image/jpeg');

@@ -3,14 +3,16 @@ import { Response } from 'express';
 import { memoryStorage } from 'multer';
 import * as path from 'path';
 import { BadRequest, NotFound } from './errors';
+import { imageQueue } from './image-queue';
 import { storage, uploadDir } from './storage';
 
 /** Re-exported for older imports; the local driver lives in ./storage. */
 export { uploadDir };
-const MAX_BYTES = 3 * 1024 * 1024;
+/** PM (B31): 10 MB per image – everything is resized on upload, so the stored file stays small. */
+export const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
 
 /** Multer options: keep the upload in memory so the real content can be checked before anything touches disk. */
-export const imageUploadOptions = { storage: memoryStorage(), limits: { fileSize: MAX_BYTES, files: 1 } };
+export const imageUploadOptions = { storage: memoryStorage(), limits: { fileSize: MAX_IMAGE_BYTES, files: 1 } };
 
 const HEIF_BRANDS = new Set(['heic', 'heix', 'hevc', 'hevx', 'heim', 'heis', 'hevm', 'hevs', 'mif1', 'msf1', 'heif']);
 
@@ -45,17 +47,42 @@ export async function heifToJpeg(buf: Buffer): Promise<Buffer> {
 }
 
 /**
- * Validates and stores an uploaded image; returns the storage key (file name). Accepts JPG, PNG and HEIC/HEIF
- * (converted to JPEG on save). Anything else, including a non-image renamed to .heic/.jpg -> 400 INVALID_FILE.
- * B27: written through storage() (local dir or S3/R2), never straight to the container disk.
+ * B31: re-encode every uploaded photo before storing (Backblaze B2 free tier: 1 GB download/day). Auto-rotate from EXIF,
+ * cap the long edge, JPEG (alpha flattened on white), and NO metadata kept (sharp drops EXIF/GPS/XMP unless asked) – privacy.
  */
-export async function saveImage(file?: Express.Multer.File): Promise<string> {
+export const IMAGE_PROFILES = {
+  photo: { edge: 1280, quality: 80 },     // pickup / pickup-request / picker / medicine photos
+  avatar: { edge: 512, quality: 80 },     // child profile photo
+  document: { edge: 2048, quality: 85 },  // receipt images: keep small print readable
+} as const;
+export type ImageProfile = keyof typeof IMAGE_PROFILES;
+
+export async function normalizeImage(src: Buffer, profile: ImageProfile = 'photo'): Promise<Buffer> {
+  const { edge, quality } = IMAGE_PROFILES[profile];
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const sharp = require('sharp');
+    return await sharp(src).rotate().resize({ width: edge, height: edge, fit: 'inside', withoutEnlargement: true })
+      .flatten({ background: '#ffffff' }).jpeg({ quality, mozjpeg: true }).toBuffer();
+  } catch {
+    throw BadRequest('Ảnh bị hỏng hoặc không đọc được', 'INVALID_FILE');
+  }
+}
+
+/**
+ * Validates and stores an uploaded image; returns the storage key (file name). Accepts JPG, PNG and HEIC/HEIF
+ * (always stored as a resized, metadata-free JPEG). Anything else, including a non-image renamed to .heic/.jpg -> 400 INVALID_FILE.
+ * B27: written through storage() (local dir or S3/R2/B2), never straight to the container disk.
+ * Keys are a fresh UUID per upload, so a stored key never changes content (lets responses be cached / ETagged by key).
+ */
+export async function saveImage(file?: Express.Multer.File, profile: ImageProfile = 'photo'): Promise<string> {
   if (!file?.buffer?.length) throw BadRequest('Thiếu file ảnh', 'INVALID_FILE');
   const kind = detectImage(file.buffer);
   if (!kind) throw BadRequest('File không phải ảnh JPG/PNG/HEIC hợp lệ', 'INVALID_FILE');
-  const data = kind === 'heif' ? await heifToJpeg(file.buffer) : file.buffer;
-  const key = `${crypto.randomUUID()}.${kind === 'png' ? 'png' : 'jpg'}`;
-  await storage().put(key, data, contentTypeOf(key));
+  // one queue slot covers HEIC decode + resize (both are memory-heavy); 503 IMAGE_QUEUE_FULL when the queue is full
+  const data = await imageQueue().run(async () => normalizeImage(kind === 'heif' ? await heifToJpeg(file.buffer) : file.buffer, profile));
+  const key = `${crypto.randomUUID()}.jpg`;
+  await storage().put(key, data, 'image/jpeg');
   return key;
 }
 
@@ -69,20 +96,53 @@ export async function removeImage(stored?: string | null) {
   if (stored) await storage().remove(keyOf(stored)).catch(() => undefined);
 }
 
-/** Streams a stored file through the (already permission-checked) endpoint; 404 when the record has no file or it is gone. */
-export async function sendStored(res: Response, stored: string | null | undefined, notFound: string, extra: Record<string, string> = {}) {
-  if (!stored) throw NotFound(notFound);
-  const key = keyOf(stored);
-  const buf = await storage().get(key);
-  if (!buf) throw NotFound(notFound);
-  res.setHeader('Content-Type', contentTypeOf(key));
-  for (const [k, v] of Object.entries(extra)) res.setHeader(k, v);
-  res.setHeader('Cache-Control', 'private, no-store');
+/**
+ * B31 caching. Keys written by this app are `<uuid>.<ext>` (optionally under a folder, `_thumb` suffix) and are never
+ * overwritten → the key identifies the bytes, so ETag = hash(key) and a matching If-None-Match is answered 304 WITHOUT
+ * reading the object (no B2 GetObject). Other keys (seed `avatar-<childId>.png`, legacy names) can be rewritten → no ETag.
+ *  - 'immutable'  : the URL always maps to the same key (pickup, pickup-request, medicine, class & announcement photos)
+ *  - 'revalidate' : the URL's key can change (child photo, picker photo replaced) → `no-cache` + ETag (cheap 304)
+ *  - 'no-store'   : sensitive documents (finance receipts)
+ */
+export type CacheMode = 'immutable' | 'revalidate' | 'no-store';
+const IMMUTABLE_KEY = /^(?:[a-z0-9_-]+\/)*[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(?:_thumb)?\.(?:jpg|png|pdf)$/i;
+export const isImmutableKey = (key: string) => IMMUTABLE_KEY.test(key);
+export const etagOf = (key: string) => `"k-${crypto.createHash('sha256').update(key).digest('base64url').slice(0, 27)}"`;
+const matchesEtag = (header: string | string[] | undefined, tag: string) =>
+  !!header && String(header).split(',').map((t) => t.trim().replace(/^W\//, '')).some((t) => t === tag || t === '*');
+
+export function cacheHeaders(key: string, mode: CacheMode): { cacheControl: string; etag: string | null } {
+  if (mode === 'no-store') return { cacheControl: 'private, no-store', etag: null };
+  if (!isImmutableKey(key)) return { cacheControl: mode === 'immutable' ? 'private, max-age=3600' : 'private, no-cache', etag: null };
+  return { cacheControl: mode === 'immutable' ? 'private, max-age=31536000, immutable' : 'private, no-cache', etag: etagOf(key) };
+}
+
+/**
+ * Sends one stored object from an endpoint that has ALREADY checked permissions. 304 (no storage read) when the client
+ * already has this exact key; 404 when the object is gone.
+ */
+export async function sendKey(res: Response, key: string, opts: { mode: CacheMode; notFound: string; contentType?: string; extra?: Record<string, string> }) {
+  const { cacheControl, etag } = cacheHeaders(key, opts.mode);
+  res.setHeader('Cache-Control', cacheControl);
   res.setHeader('X-Content-Type-Options', 'nosniff');
+  if (etag) {
+    res.setHeader('ETag', etag);
+    if (matchesEtag(res.req?.headers['if-none-match'], etag)) { res.status(304).end(); return; }
+  }
+  const buf = await storage().get(key);
+  if (!buf) { res.removeHeader('ETag'); res.removeHeader('Cache-Control'); throw NotFound(opts.notFound); }
+  res.setHeader('Content-Type', opts.contentType ?? contentTypeOf(key));
+  for (const [k, v] of Object.entries(opts.extra ?? {})) res.setHeader(k, v);
   res.end(buf);
 }
 
-export const sendImage = (res: Response, stored?: string | null) => sendStored(res, stored, 'Không có ảnh');
+/** Streams a stored file through the (already permission-checked) endpoint; 404 when the record has no file or it is gone. */
+export async function sendStored(res: Response, stored: string | null | undefined, notFound: string, extra: Record<string, string> = {}, mode: CacheMode = 'no-store') {
+  if (!stored) throw NotFound(notFound);
+  await sendKey(res, keyOf(stored), { mode, notFound, extra });
+}
+
+export const sendImage = (res: Response, stored: string | null | undefined, mode: CacheMode = 'immutable') => sendStored(res, stored, 'Không có ảnh', {}, mode);
 
 /**
  * B29: multer/busboy hands `originalname` over as latin1-decoded bytes, so "hóa đơn.pdf" arrives as "hÃ³a Ä‘Æ¡n.pdf".

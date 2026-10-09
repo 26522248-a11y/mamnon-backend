@@ -132,8 +132,11 @@ Mọi file tải lên đi qua cùng một lớp lưu trữ (`src/common/storage.
 | `S3_SECRET` | Secret Access Key của token |
 | `S3_REGION` | `auto` |
 | `S3_PUBLIC_BASE` | để trống (ảnh trẻ không bao giờ public) |
+| `STORAGE_CACHE_MB` | tuỳ chọn, mặc định `24` – bộ nhớ đệm ảnh trong API (giảm lượt đọc bucket, vd giới hạn Backblaze B2 miễn phí 2.500 lượt/ngày); `0` = tắt |
 
 Thiếu một trong `S3_ENDPOINT/S3_BUCKET/S3_ACCESS_KEY/S3_SECRET` thì API báo lỗi ngay khi lưu/đọc file đầu tiên (`STORAGE_DRIVER=s3 needs …`).
+
+**Giới hạn & xử lý ảnh (B31):** mỗi ảnh tải lên tối đa **10 MB** (hoá đơn ảnh/PDF cũng 10 MB); ảnh được xoay đúng chiều, xoá EXIF/GPS và thu nhỏ trước khi lưu (ảnh đón bé/người đón/dặn thuốc 1280px, ảnh hồ sơ bé 512px, ảnh hoá đơn 2048px). Ảnh được xử lý lần lượt từng cái (`IMAGE_PROCESS_CONCURRENCY`, `IMAGE_QUEUE_MAX`).
 
 **Ổ đĩa:** `STORAGE_DRIVER=local` (mặc định) ghi vào `UPLOAD_DIR`; chỉ bền khi gắn Persistent Disk (gói trả phí, `UPLOAD_DIR=/var/data/uploads`).
 
@@ -175,5 +178,6 @@ DATABASE_URL='<Neon direct URL>' npm run demo:purge   # xoá ĐÚNG các dòng d
 | `FINANCE_APPROVAL_LIMIT` | tuỳ chọn | mặc định 10000000 |
 | `CRON_SECRET` | nên có | header `X-Cron-Secret` cho cron ngoài; trống = tắt endpoint (401) |
 | `KEEPALIVE_URL`, `KEEPALIVE_INTERVAL_MS` | nên có (Free) | tự gọi `/api/v1/health/ping` để không ngủ; mặc định 10 phút |
+| `IMAGE_PROCESS_CONCURRENCY`, `IMAGE_QUEUE_MAX` | tuỳ chọn | số ảnh xử lý (thu nhỏ/HEIC) cùng lúc, mặc định `1`; số ảnh chờ tối đa, mặc định `10` – vượt quá thì API trả 503 `IMAGE_QUEUE_FULL` "Máy chủ đang xử lý nhiều ảnh cùng lúc…" (giữ RAM dưới 512 MB của gói Free) |
 | `ANNOUNCEMENT_TICK_MS` | tuỳ chọn | chu kỳ kiểm tra hẹn giờ, mặc định 30000; 0 = tắt |
 | `STORAGE_DRIVER`, `S3_ENDPOINT/S3_BUCKET/S3_ACCESS_KEY/S3_SECRET/S3_REGION` | ✔ trên gói Free | `s3` (R2) – bắt buộc khi không có Persistent Disk; `local` (mặc định) chỉ khi có Disk. `S3_PUBLIC_BASE` để trống |

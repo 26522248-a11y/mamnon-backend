@@ -10,7 +10,7 @@ import { ArrayMaxSize, ArrayMinSize, IsArray, IsBoolean, IsIn, IsInt, IsISO8601,
 import { Brackets, DataSource, In, IsNull, Not, Repository } from 'typeorm';
 import { AccessService } from '../common/access';
 import { AuthUser, CurrentUser, Public, Roles } from '../common/auth';
-import { storage } from '../common/storage';
+import { sendKey } from '../common/upload';
 import { AppError, BadRequest, Forbidden, NotFound } from '../common/errors';
 import { Announcement, AnnouncementAttachment, Audience, Child, ClassTeacher, Notification, User } from '../database/entities';
 import { AnnouncementsService, attView, MAX_ATTACHMENTS, vnIso } from './announcements.service';
@@ -203,12 +203,7 @@ export class NotificationsController {
   private async sendAttachment(u: AuthUser, id: string, thumb: boolean, res: Response) {
     const x = await this.ds.getRepository(AnnouncementAttachment).findOne({ where: { id }, relations: { announcement: true } });
     if (!x || !(await this.canSeeAttachment(u, x))) throw NotFound('Không tìm thấy ảnh');
-    const buf = await storage().get(thumb ? x.thumbKey : x.fileKey);
-    if (!buf) throw NotFound('Không tìm thấy file ảnh');
-    res.setHeader('Content-Type', 'image/jpeg');
-    res.setHeader('Cache-Control', 'private, max-age=86400');
-    res.setHeader('X-Content-Type-Options', 'nosniff');
-    res.end(buf);
+    await sendKey(res, thumb ? x.thumbKey : x.fileKey, { mode: 'immutable', notFound: 'Không tìm thấy file ảnh', contentType: 'image/jpeg' }); // B31
   }
 
   private async canSeeAttachment(u: AuthUser, x: AnnouncementAttachment) {

@@ -153,7 +153,7 @@ describe('Mầm non API (e2e)', () => {
       expect(r1.body).toMatchObject({ status: 'pending', photoUrl: `/api/v1/pickup-requests/${r1.body.id}/photo` });
       await request(http).get(r1.body.photoUrl).expect(401);
       const ph = await request(http).get(r1.body.photoUrl).set('Authorization', `Bearer ${tokens.ph1}`).expect(200);
-      expect(ph.headers['content-type']).toBe('image/png');
+      expect(ph.headers['content-type']).toBe('image/jpeg'); // B31: re-encoded
       expect((await as('gv1').post(`/attendance/${attId}/pickup`, { pickupRequestId: r1.body.id }).expect(403)).body.code).toBe('PICKUP_REQUEST_PENDING');
       // parent sees pending request for own child; other parent does not, and cannot confirm
       const mine = await as('ph1').get('/pickup-requests?status=pending').expect(200);
@@ -202,7 +202,9 @@ describe('Mầm non API (e2e)', () => {
       expect((await upload('admin', s.kids[0].id, exe, 'x.jpg', 'image/jpeg').expect(400)).body.code).toBe('INVALID_FILE');
       await upload('admin', s.kids[0].id, Buffer.from('<svg xmlns="http://www.w3.org/2000/svg"/>'), 'x.png', 'image/png').expect(400);
       await upload('admin', s.kids[0].id, Buffer.from('GIF89a......'), 'x.gif', 'image/gif').expect(400);
-      const jpg = Buffer.concat([Buffer.from([0xff, 0xd8, 0xff, 0xe0]), Buffer.alloc(100)]);
+      const broken = Buffer.concat([Buffer.from([0xff, 0xd8, 0xff, 0xe0]), Buffer.alloc(100)]);
+      expect((await upload('gv1', s.kids[0].id, broken, 'x.jpg', 'image/jpeg').expect(400)).body.code).toBe('INVALID_FILE'); // B31: JPEG magic but undecodable
+      const jpg = await require('sharp')({ create: { width: 8, height: 8, channels: 3, background: '#ff0000' } }).jpeg().toBuffer();
       await upload('gv1', s.kids[0].id, jpg, 'renamed.bin', 'application/octet-stream').expect(201); // real JPEG, odd name OK
       await upload('gv1', s.kids[1].id, png, 'a.png', 'image/png').expect(403);
     });
@@ -214,8 +216,8 @@ describe('Mầm non API (e2e)', () => {
       expect((await as('ph1').get(`/children/${s.kids[0].id}`).expect(200)).body.photoUrl).toBe(url);
       await request(http).get(url).expect(401);
       const ok = await request(http).get(url).set('Authorization', `Bearer ${tokens.ph1}`).expect(200);
-      expect(ok.headers['content-type']).toBe('image/png');
-      expect(Buffer.compare(ok.body, png)).toBe(0);
+      expect(ok.headers['content-type']).toBe('image/jpeg'); // B31: stored as re-encoded JPEG (no metadata)
+      expect(ok.body.subarray(0, 3)).toEqual(Buffer.from([0xff, 0xd8, 0xff]));
       await request(http).get(url).set('Authorization', `Bearer ${tokens.gv1}`).expect(200);
       await request(http).get(url).set('Authorization', `Bearer ${tokens.admin}`).expect(200);
       await request(http).get(url).set('Authorization', `Bearer ${tokens.ph2}`).expect(403);

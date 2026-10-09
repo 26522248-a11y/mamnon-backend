@@ -119,7 +119,7 @@ describe('An toàn đón trẻ – đợt 1 (e2e, tester cases PK-*)', () => {
       await request(http).get(url).expect(401);
       await request(http).get(url).set('Authorization', `Bearer ${tokens.ph2}`).expect(403);
       await request(http).get(url).set('Authorization', `Bearer ${tokens.gv2}`).expect(403);
-      expect((await request(http).get(url).set('Authorization', `Bearer ${tokens.gv1}`).expect(200)).headers['content-type']).toBe('image/png');
+      expect((await request(http).get(url).set('Authorization', `Bearer ${tokens.gv1}`).expect(200)).headers['content-type']).toBe('image/jpeg'); // B31: re-encoded
       await request(http).get(url).set('Authorization', `Bearer ${tokens.ph1}`).expect(200);
       await as('ph2').get(`/children/${s.kids[0].id}/pickup-people`).expect(403);
       await as('gv2').get(`/children/${s.kids[0].id}/pickup-people`).expect(403);
