@@ -495,7 +495,7 @@ export class Announcement {
 export type NotificationType = 'announcement' | 'pickup_request' | 'pickup_decision' | 'invoice' | 'payment' | 'picked_up' | 'picker_registration' | 'picker_decision' | 'contact_change'
   | 'absence_report' | 'absence_cancelled' | 'absence_overridden' | 'kitchen_change' | 'medicine_request' | 'medicine_given' | 'late_pickup'
   | 'late_pickup_cancelled' | 'medicine_cancelled' | 'school_closure' | 'holiday_reminder' | 'photo_consent'
-  | 'transfer_claim' | 'transfer_claim_rejected' | 'staff_leave' | 'staff_leave_decision' | 'substitution';
+  | 'transfer_claim' | 'transfer_claim_rejected' | 'staff_leave' | 'staff_leave_decision' | 'substitution' | 'finance_approval' | 'finance_decision';
 @Entity('notifications')
 @Index('ix_notifications_user_read', ['userId', 'readAt'])
 @Index('ix_notifications_announcement', ['announcementId'])
@@ -870,6 +870,46 @@ export class StaffSubstitution {
   @CreateDateColumn({ name: 'created_at', type: 'timestamptz' }) createdAt!: Date;
 }
 
+
+// ───────────── Finance (thu chi tổng) ─────────────
+@Entity('finance_categories')
+@Unique('uq_finance_category_kind_name', ['kind', 'name'])
+export class FinanceCategory {
+  @PrimaryGeneratedColumn('uuid') id!: string;
+  @Column({ type: 'varchar', length: 3 }) kind!: 'in' | 'out';
+  @Column({ length: 80 }) name!: string;
+  @Column({ name: 'sort_order', type: 'integer', default: 0 }) sortOrder!: number;
+  @Column({ name: 'is_active', default: true }) isActive!: boolean;
+  @CreateDateColumn({ name: 'created_at', type: 'timestamptz' }) createdAt!: Date;
+}
+
+export type FinanceEntryStatus = 'approved' | 'pending' | 'rejected' | 'void';
+/** Manual income / expense. Fee income is NOT stored here: it is read live from `payments`. */
+@Entity('finance_entries')
+@Index('ix_finance_entries_date', ['date'])
+export class FinanceEntry {
+  @PrimaryGeneratedColumn('uuid') id!: string;
+  @Column({ type: 'varchar', length: 3 }) kind!: 'in' | 'out';
+  @Column({ type: 'date' }) date!: string;
+  @Column({ length: 200 }) title!: string;
+  @Column({ type: 'bigint', transformer: { to: (v: number) => v, from: (v: string | null) => (v == null ? v : Number(v)) } }) amount!: number;
+  @Index() @Column({ name: 'category_id', type: 'uuid' }) categoryId!: string;
+  @ManyToOne(() => FinanceCategory, { onDelete: 'RESTRICT' }) @JoinColumn({ name: 'category_id' }) category!: FinanceCategory;
+  @Index() @Column({ type: 'varchar', length: 10 }) status!: FinanceEntryStatus;
+  @Column({ name: 'requires_approval', default: false }) requiresApproval!: boolean;
+  @Column({ type: 'text', nullable: true }) note!: string | null;
+  @Column({ name: 'receipt_key', type: 'varchar', length: 80, nullable: true }) receiptKey!: string | null;
+  @Column({ name: 'receipt_name', type: 'varchar', length: 200, nullable: true }) receiptName!: string | null;
+  @Column({ name: 'created_by', type: 'uuid', nullable: true }) createdBy!: string | null;
+  @ManyToOne(() => User, { onDelete: 'SET NULL', nullable: true }) @JoinColumn({ name: 'created_by' }) creator!: User | null;
+  @Column({ name: 'decided_by', type: 'uuid', nullable: true }) decidedBy!: string | null;
+  @ManyToOne(() => User, { onDelete: 'SET NULL', nullable: true }) @JoinColumn({ name: 'decided_by' }) decider!: User | null;
+  @Column({ name: 'decided_at', type: 'timestamptz', nullable: true }) decidedAt!: Date | null;
+  @Column({ name: 'decision_note', type: 'text', nullable: true }) decisionNote!: string | null;
+  @CreateDateColumn({ name: 'created_at', type: 'timestamptz' }) createdAt!: Date;
+  @UpdateDateColumn({ name: 'updated_at', type: 'timestamptz' }) updatedAt!: Date;
+}
+
 export const ENTITIES = [
   StaffShift, StaffShiftAssignment, StaffCheckin, StaffLeave, StaffSubstitution,
   Enrollment,
@@ -882,5 +922,5 @@ export const ENTITIES = [
   Announcement, Notification,
   AttendanceHistory, PickupRequest,
   User, ClassRoom, ClassTeacher, Child, Guardian, Attendance, Pickup,
-  FeeItem, Invoice, InvoiceLine, Payment, GrowthRecord, MenuItem, DailyNote,
+  FeeItem, Invoice, InvoiceLine, Payment, GrowthRecord, MenuItem, DailyNote, FinanceCategory, FinanceEntry,
 ];

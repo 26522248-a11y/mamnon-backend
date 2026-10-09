@@ -341,3 +341,19 @@ Swagger tag `staff`. Ngày theo giờ VN (UTC+7). Quyền: **admin** quản lý 
 
 Trạng thái ngày: `full` (đúng giờ) · `late` (sau giờ vào + grace) · `substitute` (đã vào ca và đang trông thay lớp khác) · `leave` (phép đã duyệt) · `absent` (có ca, không chấm công) · `pending` (ca hôm nay chưa kết thúc) · `off` (không có ca).
 Migration `1791557233777-StaffModule` chỉ thêm bảng `staff_*` (không đụng dữ liệu cũ). Test: `test/staff.e2e-spec.ts`.
+
+## Thu chi tổng (`/finance`) – chỉ BGH (admin) + kế toán (accountant); giáo viên / phụ huynh 403
+
+Swagger tag `finance`. Tháng theo giờ VN.
+
+| Method | Path | Quyền | Mô tả |
+|---|---|---|---|
+| GET | `/finance/summary?month=YYYY-MM` | admin, kế toán | `totalIn` (học phí **tự cộng** từ phiếu thu `payments` + thu khác), `totalOut` (chi đã duyệt + hoàn tiền phụ huynh từ `refund_payouts`), `net`, `in{fees, other, groups}`, `outGroups` (chi theo nhóm, giảm dần), `prev` + `change{totalInPct,totalOutPct,netPct}` so tháng trước, `pending{count, amount}`, `approvalLimit` |
+| GET | `/finance/transactions?month&kind&status&categoryId` | admin, kế toán | Học phí gộp theo ngày + hình thức (`auto: true`), hoàn tiền phụ huynh (auto), thu/chi nhập tay (mọi trạng thái: `approved/pending/rejected/void`), có `hasReceipt`, `receiptUrl` |
+| GET / POST / PATCH | `/finance/categories[/:id]` | đọc: admin, kế toán · ghi: admin | Nhóm thu/chi (`kind in/out`). Migration tạo sẵn: Lương & BH, Tiền ăn, Điện nước, Đồ dùng học tập, Sửa chữa bảo trì, Chi khác, Thu khác |
+| POST | `/finance/entries` (JSON hoặc multipart, file `receipt`) | admin, kế toán | `{kind?=out, date, title, amount, categoryId, note?}`. Học phí không nhập tay. **Chi > 10.000.000đ** (env `FINANCE_APPROVAL_LIMIT`) do kế toán ghi → `pending`, báo BGH, chưa tính vào tổng; BGH tự ghi → duyệt luôn |
+| POST | `/finance/entries/:id/receipt` · GET `/finance/entries/:id/receipt` | admin, kế toán | Hoá đơn JPG/PNG/HEIC/PDF ≤ 5MB (kiểm tra theo nội dung file), lưu riêng tư |
+| POST | `/finance/entries/:id/approve` · `/reject` (cần `note`) | admin | 409 `ALREADY_DECIDED`; báo lại kế toán |
+| POST | `/finance/entries/:id/void` (cần `note`) | admin; kế toán chỉ khoản mình ghi còn chờ duyệt | Huỷ khoản (không xoá, giữ lịch sử) |
+
+Mọi thao tác ghi đều vào nhật ký (`finance.expense.create`, `finance.entry.approve|reject|void`, `finance.receipt.attach`, `finance_category.*`). Migration `1791557748627-Finance` chỉ thêm bảng `finance_*`. Test: `test/finance.e2e-spec.ts`.

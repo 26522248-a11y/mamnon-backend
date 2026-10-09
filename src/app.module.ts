@@ -30,6 +30,7 @@ import { PushController } from './pickup/push.controller';
 import { AuditController } from './audit/audit.controller';
 import { SensitiveAuditController } from './audit/sensitive.controller';
 import { StaffController } from './staff/staff.controller';
+import { FinanceController } from './finance/finance.controller';
 import { ImportsController } from './imports/imports.controller';
 import { ReportsController } from './reports/reports.controller';
 import { UsersController } from './users/users.controller';
@@ -65,7 +66,7 @@ class SettingsController {
     TypeOrmModule.forFeature(ENTITIES),
     JwtModule.register({}),
   ],
-  controllers: [HealthController, SettingsController, AuthController, ClassesController, ChildrenController, AttendanceController, DashboardController, FeesController, HealthNutritionController, NotificationsController, ReportsController, UsersController, ImportsController, AuthorizedPickersController, ContactPhonesController, PickupDutiesController, PushController, AuditController, SensitiveAuditController, StaffController, AbsencesController, HolidaysController, ParentMessagesController, PhotoConsentController],
+  controllers: [HealthController, SettingsController, AuthController, ClassesController, ChildrenController, AttendanceController, DashboardController, FeesController, HealthNutritionController, NotificationsController, ReportsController, UsersController, ImportsController, AuthorizedPickersController, ContactPhonesController, PickupDutiesController, PushController, AuditController, SensitiveAuditController, StaffController, FinanceController, AbsencesController, HolidaysController, ParentMessagesController, PhotoConsentController],
   providers: [
     AccessService, UserContextService, AbsencesService, HolidayReminderService, NotificationsService, NotificationDispatcher, PickupSafetyService, LoginThrottleService,
     { provide: APP_GUARD, useClass: JwtAuthGuard },
