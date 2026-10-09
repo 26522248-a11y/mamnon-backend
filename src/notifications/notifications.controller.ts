@@ -158,7 +158,7 @@ export class NotificationsController {
     if (!/([zZ]|[+-]\d{2}:?\d{2})$/.test(iso)) throw BadRequest('scheduledAt cần có múi giờ, vd 2026-10-10T07:30:00+07:00', 'VALIDATION_ERROR');
     const d = new Date(iso);
     if (Number.isNaN(d.getTime())) throw BadRequest('scheduledAt không hợp lệ', 'VALIDATION_ERROR');
-    if (d.getTime() < Date.now() + 60_000) throw BadRequest('Thời gian hẹn gửi phải ở tương lai', 'SCHEDULE_IN_PAST');
+    if (d.getTime() < Date.now() + 60_000) throw BadRequest('Hẹn giờ phải sau thời điểm hiện tại ít nhất 1 phút', 'SCHEDULE_IN_PAST');
     if (d.getTime() > Date.now() + 90 * 86400_000) throw BadRequest('Chỉ hẹn gửi trong vòng 90 ngày', 'SCHEDULE_TOO_FAR');
     return d;
   }
