@@ -10,7 +10,7 @@ describe('demo dataset load/purge', () => {
   const counts = async () => Object.fromEntries(await Promise.all(['users', 'classes', 'children', 'guardians', 'attendance', 'daily_notes', 'invoices', 'payments', 'invoice_lines',
     'fee_items', 'staff_shifts', 'staff_shift_assignments', 'staff_checkins', 'staff_leaves', 'staff_substitutions', 'finance_entries', 'announcements', 'notifications', 'menus', 'class_teachers']
     .map(async (t) => [t, Number((await ds.query(`SELECT COUNT(*)::int AS n FROM "${t}"`))[0].n)])));
-  beforeAll(async () => { ds = await dataSource.initialize(); await ds.runMigrations(); await seed(ds); await ds.query('DELETE FROM menus'); });
+  beforeAll(async () => { ds = await dataSource.initialize(); await ds.runMigrations(); await ds.query('DROP TABLE IF EXISTS demo_registry'); await seed(ds); await ds.query('DELETE FROM menus'); });
   afterAll(async () => { await ds?.destroy(); });
 
   it('load → marked rows; second load refused; purge → back to exactly the previous data', async () => {
