@@ -114,3 +114,10 @@ New NotificationType values: `photo_post`, `photo_hidden`.
 | ALB-04 | 2.1 authenticated file endpoint (403 / 401) |
 | ALB-05 | 2.2 magic-byte check, HEIC → JPEG |
 | ALB-06 | 2.1 / 2.3 own class only |
+
+## 2.4 A1 / A2 additions (implemented 10/10)
+- **POST /classes/:classId/photo-posts** also accepts `hiddenForChildIds` = JSON array aligned with files (`[["childId"],[]]`) – the "🙈 Ẩn bé đi" choice. A tagged child **without** consent is accepted only if listed there for that photo; the photo is then saved `hidden: true, hiddenReason: 'CONSENT_MISSING'` (parents never see it; teachers see it greyed; unhide rules as above). Otherwise that photo is `rejected` (`code: PHOTO_CONSENT_MISSING`, `children`), other photos in the request are still saved (`results[]` per photo, matched by `clientId`/`index`); if nothing could be saved → `422 PHOTO_CONSENT_MISSING` with message "Chưa đăng được: phụ huynh của … chưa cho đăng hình. Bỏ ảnh có bé hoặc ẩn bé rồi đăng lại." and `details: {children, results}`.
+- Files > 15 MB → `413 PAYLOAD_TOO_LARGE`. Retry with a saved `clientId` → `duplicate: true` (no new photo).
+- **GET /classes/:classId/photo-consent-summary** (teacher of class, admin) → `{items: [{childId, fullName, photoConsent, asked}], notAllowed: [...]}` – the "🚫 n bé chưa cho đăng hình" list.
+- **GET/PUT /children/:id/photo-consent** now return `asked` (parent answered at least once → don't ask again on app open). The first answer is recorded even if it equals the default (`false`), audit `before.consent = null` → history "Chưa hỏi → Có/Không". PUT response adds `hiddenPhotos` (photos auto-hidden because consent was turned off).
+- Sensitive-change history texts for photo consent: label "Đồng ý đăng hình", values "Có" / "Không" / "Chưa hỏi".

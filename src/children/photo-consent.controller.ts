@@ -10,6 +10,7 @@ import { AuthUser, CurrentUser, Roles } from '../common/auth';
 import { AppError, Forbidden } from '../common/errors';
 import { Child, User } from '../database/entities';
 import { NotificationsService } from '../notifications/notifications.service';
+import { hidePhotosForChild } from '../photos/photos.controller';
 
 export class PhotoConsentDto {
   @ApiPropertyOptional({ description: 'Đồng ý chụp/đăng ảnh của bé' }) @IsOptional() @IsBoolean() consent?: boolean;
@@ -38,7 +39,7 @@ export class PhotoConsentController {
       FROM audit_events e LEFT JOIN users u ON u.id = e.actor_id
       WHERE e.child_id = $1 AND e.action = 'child.photo_consent' ORDER BY e.created_at DESC LIMIT 100`, [c.id]);
     return {
-      childId: c.id, consent: c.photoConsent, photoConsent: c.photoConsent,
+      childId: c.id, consent: c.photoConsent, photoConsent: c.photoConsent, /** A2: parent answered at least once (else ask on first app open) */ asked: !!c.photoConsentUpdatedAt,
       updatedBy: by ? { id: by.id, name: by.name } : null, updatedAt: c.photoConsentUpdatedAt,
       history: hist.map((h) => ({
         before: h.before?.consent ?? null, after: h.after?.consent ?? null,
@@ -57,15 +58,21 @@ export class PhotoConsentController {
     const consent = dto.consent ?? dto.photoConsent;
     if (consent === undefined) throw new AppError(400, 'VALIDATION_ERROR', 'Thiếu consent', { details: ['consent must be a boolean'] });
     const c = await this.child(u, id, true);
-    if (c.photoConsent !== consent) {
+    let hidden: string[] = [];
+    // A2: the first answer is recorded even when it equals the default (false) so the question is not asked again; "Chưa hỏi" → value in history.
+    if (c.photoConsent !== consent || !c.photoConsentUpdatedAt) {
       await this.ds.transaction(async (m) => {
         await m.update(Child, id, { photoConsent: consent, photoConsentUpdatedAt: new Date(), photoConsentUpdatedBy: u.id });
         await recordAudit(m, u, { action: 'child.photo_consent', entityType: 'child', entityId: id, childId: id,
-          before: { consent: c.photoConsent }, after: { consent }, reason: dto.note?.trim() || null, ip: req.ip });
+          before: { consent: c.photoConsentUpdatedAt ? c.photoConsent : null }, after: { consent }, reason: dto.note?.trim() || null, ip: req.ip });
+        if (!consent) hidden = await hidePhotosForChild(m, id);
       });
-      await this.notify.send(await this.absences.classTeacherIds(c.classId), {
-        type: 'photo_consent', title: `${c.fullName}: ${consent ? 'đồng ý' : 'KHÔNG đồng ý'} chụp/đăng ảnh`, data: { childId: id, consent }, refId: id });
+      const teachers = await this.absences.classTeacherIds(c.classId);
+      await this.notify.send(teachers, {
+        type: 'photo_consent', title: `${c.fullName}: ${consent ? 'đồng ý' : 'KHÔNG đồng ý'} đăng hình lên nhóm lớp`, data: { childId: id, consent }, refId: id });
+      if (hidden.length) await this.notify.send(teachers, { type: 'photo_hidden', title: `Đã ẩn ${hidden.length} ảnh có bé ${c.fullName}`,
+        body: 'Phụ huynh vừa tắt đồng ý đăng hình', data: { childId: id, photoIds: hidden, url: '/photos' }, refId: id } as any);
     }
-    return this.view(await this.access.getChildOr404(id));
+    return { ...(await this.view(await this.access.getChildOr404(id))), hiddenPhotos: hidden.length };
   }
 }

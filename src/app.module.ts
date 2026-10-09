@@ -44,6 +44,7 @@ import { AllExceptionsFilter } from './common/errors';
 import { dataSourceOptions } from './database/data-source';
 import { corsOriginList, isAllowedOrigin } from './common/deploy-config';
 import { ENTITIES } from './database/entities';
+import { PhotosController } from './photos/photos.controller';
 
 @Controller('health')
 class HealthController {
@@ -70,7 +71,7 @@ class SettingsController {
     TypeOrmModule.forFeature(ENTITIES),
     JwtModule.register({}),
   ],
-  controllers: [HealthController, SettingsController, AuthController, ClassesController, ChildrenController, AttendanceController, DashboardController, FeesController, HealthNutritionController, NotificationsController, ReportsController, UsersController, ImportsController, AuthorizedPickersController, ContactPhonesController, PickupDutiesController, PushController, AuditController, SensitiveAuditController, StaffController, FinanceController, AbsencesController, HolidaysController, ParentMessagesController, PhotoConsentController],
+  controllers: [HealthController, SettingsController, AuthController, ClassesController, ChildrenController, AttendanceController, DashboardController, FeesController, HealthNutritionController, NotificationsController, ReportsController, UsersController, ImportsController, AuthorizedPickersController, ContactPhonesController, PickupDutiesController, PushController, AuditController, SensitiveAuditController, StaffController, FinanceController, AbsencesController, HolidaysController, ParentMessagesController, PhotoConsentController, PhotosController],
   providers: [
     AccessService, AnnouncementsService, UserContextService, AbsencesService, HolidayReminderService, NotificationsService, NotificationDispatcher, PickupSafetyService, LoginThrottleService,
     { provide: APP_GUARD, useClass: JwtAuthGuard },

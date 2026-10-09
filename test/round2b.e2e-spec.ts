@@ -170,7 +170,7 @@ describe('round 2 batch 2/2b: medicine, late pickup, feed, notes, attention, pho
       const p = await as('ph1').put(`/children/${kid}/photo-consent`, { consent: true, note: 'Đồng ý đăng ảnh lớp' }).expect(200);
       expect(p.body).toMatchObject({ consent: true, updatedBy: { id: s.users.ph1.id, name: s.users.ph1.name } });
       expect(p.body.updatedAt).toBeTruthy();
-      expect(p.body.history).toEqual([expect.objectContaining({ before: false, after: true, note: 'Đồng ý đăng ảnh lớp', by: expect.objectContaining({ id: s.users.ph1.id, role: 'parent' }) })]);
+      expect(p.body.history).toEqual([expect.objectContaining({ before: null /* A2: chưa hỏi */, after: true, note: 'Đồng ý đăng ảnh lớp', by: expect.objectContaining({ id: s.users.ph1.id, role: 'parent' }) })]);
       await as('ph1').put(`/children/${kid}/photo-consent`, { consent: true }).expect(200); // unchanged → no new event
       await as('admin').put(`/children/${kid}/photo-consent`, { photoConsent: false, note: 'PH gọi điện rút lại' }).expect(200);
       const ev = (await as('admin').get(`/audit-events?childId=${kid}&action=child.photo_consent`).expect(200)).body;

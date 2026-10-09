@@ -57,7 +57,7 @@ export class CreatePickupRequestDto {
   @ApiProperty({ example: '0909123456' }) @Matches(/^[0-9+ ]{8,20}$/) pickerPhone!: string;
   @ApiPropertyOptional({ example: 'Chú ruột' }) @IsOptional() @IsString() @MaxLength(40) relation?: string;
   @ApiProperty({ example: 'Mẹ bé gọi báo nhờ chú đón', description: 'BẮT BUỘC (thiếu/rỗng → 400 VALIDATION_ERROR): ai báo, báo lúc nào' }) @IsString() @MinLength(1) @MaxLength(500) note!: string;
-  @ApiPropertyOptional({ example: '079123456789', description: 'CCCD người đón (12 số, tuỳ chọn) – dùng cảnh báo một người đón nhiều bé' }) @IsOptional() @Matches(/^\d{12}$/, { message: 'CCCD phải đúng 12 chữ số' }) pickerIdNumber?: string;
+  @ApiPropertyOptional({ example: '079123456789', description: 'CCCD người đón (12 số, tuỳ chọn) – dùng cảnh báo một người đón nhiều bé' }) @IsOptional() @Matches(/^\d{12}$/, { message: 'Số giấy tờ tùy thân phải đủ 12 chữ số' }) pickerIdNumber?: string;
   @ApiPropertyOptional({ type: 'string', format: 'binary', description: 'Ảnh người đón (tuỳ chọn)' }) @IsOptional() photo?: any;
 }
 export class DecisionDto {

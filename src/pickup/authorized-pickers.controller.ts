@@ -14,7 +14,7 @@ import { recordAudit } from '../common/audit';
 import { NotificationsService } from '../notifications/notifications.service';
 import { ID_NUMBER_RE, maskId, PickupSafetyService } from './pickup-safety.service';
 
-const CCCD_MSG = 'Số căn cước phải đúng 12 chữ số';
+const CCCD_MSG = 'Số giấy tờ tùy thân phải đủ 12 chữ số (hoặc để trống)';
 const EMPTY_OR_ID = new RegExp(`(^$)|(${ID_NUMBER_RE.source})`);
 const blank = (v?: string | null) => (v?.trim() ? v.trim() : null);
 export class CreatePickerDto {
@@ -118,7 +118,7 @@ export class AuthorizedPickersController {
     const phone2 = dto.phone2?.trim() ? phoneOr400(dto.phone2, 'phone2') : null;
     if (phone2 === phone1) throw BadRequest('SĐT 2 trùng SĐT 1', 'VALIDATION_ERROR');
     const idNumber = blank(dto.idNumber);
-    if (idNumber && await this.repo().exist({ where: { childId: id, idNumber, deletedAt: IsNull() } })) throw new AppError(409, 'DUPLICATE_PICKER', 'Người này (cùng CCCD) đã có trong danh sách của bé');
+    if (idNumber && await this.repo().exist({ where: { childId: id, idNumber, deletedAt: IsNull() } })) throw new AppError(409, 'DUPLICATE_PICKER', 'Người này (cùng số giấy tờ) đã có trong danh sách của bé');
     // same rule as the Excel import: same person = same phone + same name (NFC, case/whitespace-insensitive, diacritics kept)
     const samePhone = await this.repo().find({ where: { childId: id, phone1: phone1, deletedAt: IsNull() } });
     if (samePhone.some((x) => personKey(x.fullName) === personKey(dto.fullName))) throw new AppError(409, 'DUPLICATE_PICKER', 'Người này (cùng tên + SĐT) đã có trong danh sách của bé');

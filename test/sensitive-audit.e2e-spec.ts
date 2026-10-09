@@ -51,7 +51,7 @@ describe('B18 sensitive-change history (e2e)', () => {
   it('the three kinds of change write rows; list is typed, labelled, masked, newest first', async () => {
     const kid = s.kids[0];
     await as('ph1').patch(`/children/${kid.id}/contact-phones`, { phone1: '0977000001', phone2: '0988000002' }).expect(200);
-    const was = (await as('admin').get(`/children/${kid.id}/photo-consent`).expect(200)).body.consent;
+    const was0 = (await as('admin').get(`/children/${kid.id}/photo-consent`).expect(200)).body; const wasAsked = was0.asked; const was = was0.consent;
     await as('admin').put(`/children/${kid.id}/photo-consent`, { consent: !was, note: 'PH gọi điện' }).expect(200);
     await as('admin').patch(`/users/${s.users.gv1.id}`, { phone: '0901234567' }).expect(200);
     await as('admin').patch(`/users/${s.users.gv1.id}`, { name: 'Cô Lan' }).expect(200); // no phone change → no row
@@ -74,7 +74,7 @@ describe('B18 sensitive-change history (e2e)', () => {
     expect(unlink.afterPhones).toBeNull();
     expect(userPhone.afterPhones).toEqual([{ slot: 'phone', value: '0901 *** 567', changed: true }]);
     expect(userPhone).toMatchObject({ action: 'user.phone', target: { entity: 'user', id: s.users.gv1.id }, after: { phone: '0901 *** 567' }, afterText: '0901 *** 567' });
-    expect(consent).toMatchObject({ reason: 'PH gọi điện', before: { consent: was }, after: { consent: !was } });
+    expect(consent).toMatchObject({ reason: 'PH gọi điện', before: { consent: wasAsked ? was : null }, after: { consent: !was } });
     expect(contact).toMatchObject({ action: 'child.contact_phones', after: { phone1: '0977 *** 001', phone2: '0988 *** 002' },
       afterText: '0977 *** 001 / 0988 *** 002', actor: { username: 'ph1', role: 'parent', self: true }, createdAt: expect.any(String) });
     const json = JSON.stringify(r);

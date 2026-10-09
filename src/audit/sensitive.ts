@@ -9,7 +9,7 @@ export const TYPE_ACTIONS: Record<SensitiveType, string[]> = {
   phone_change: ['child.contact_phones', 'user.phone'],
   photo_consent: ['child.photo_consent'],
 };
-export const TYPE_LABELS: Record<SensitiveType, string> = { guardian_unlink: 'Gỡ liên kết', phone_change: 'SĐT', photo_consent: 'Đồng ý ảnh' };
+export const TYPE_LABELS: Record<SensitiveType, string> = { guardian_unlink: 'Gỡ liên kết', phone_change: 'SĐT', photo_consent: 'Đồng ý đăng hình' };
 export const actionType = (action: string): SensitiveType | null =>
   (Object.keys(TYPE_ACTIONS) as SensitiveType[]).find((t) => TYPE_ACTIONS[t].includes(action)) ?? null;
 
@@ -36,7 +36,7 @@ export function maskPhones<T>(v: T): T {
   return v;
 }
 
-const consentText = (c: unknown) => (c === true ? 'Đồng ý' : c === false ? 'Không đồng ý' : 'Chưa chọn');
+const consentText = (c: unknown) => (c === true ? 'Có' : c === false ? 'Không' : 'Chưa hỏi');
 const phonesText = (o: any) => {
   if (!o) return '—';
   if ('phone' in o) return o.phone ?? '—';

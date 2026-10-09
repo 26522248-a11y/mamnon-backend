@@ -518,7 +518,7 @@ export class AnnouncementAttachment {
 export type NotificationType = 'announcement' | 'pickup_request' | 'pickup_decision' | 'invoice' | 'payment' | 'picked_up' | 'picker_registration' | 'picker_decision' | 'contact_change'
   | 'absence_report' | 'absence_cancelled' | 'absence_overridden' | 'kitchen_change' | 'medicine_request' | 'medicine_given' | 'late_pickup'
   | 'late_pickup_cancelled' | 'medicine_cancelled' | 'school_closure' | 'holiday_reminder' | 'photo_consent'
-  | 'transfer_claim' | 'transfer_claim_rejected' | 'staff_leave' | 'staff_leave_decision' | 'substitution' | 'finance_approval' | 'finance_decision' | 'substitute_teacher';
+  | 'transfer_claim' | 'transfer_claim_rejected' | 'staff_leave' | 'staff_leave_decision' | 'substitution' | 'finance_approval' | 'finance_decision' | 'substitute_teacher' | 'photo_post' | 'photo_hidden';
 @Entity('notifications')
 @Index('ix_notifications_user_read', ['userId', 'readAt'])
 @Index('ix_notifications_announcement', ['announcementId'])
