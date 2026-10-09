@@ -43,7 +43,12 @@ Tạo migration mới sau khi sửa entity: `npm run typeorm -- migration:genera
 | `ph1` | phụ huynh | bé Nguyễn Gia An (Mầm 1) |
 | `ph2` | phụ huynh | bé Trần Minh Bình (Chồi 1) |
 
-Dữ liệu mẫu: 3 lớp, 30 trẻ, mỗi trẻ có 2 người giám hộ (bé An có thêm "Bà nội" với `canPickup=false`), điểm danh của ngày hôm qua.
+Dữ liệu mẫu:
+- 3 lớp, 30 trẻ. Mỗi trẻ có 2 người giám hộ; bé An có thêm "Bà nội" với `canPickup=false`.
+- Điểm danh và nhật ký ăn ngủ của ngày hôm qua, có kèm lịch sử sửa.
+- Khoản thu: Học phí 1.500.000đ, Tiền ăn 900.000đ, Tiếng Anh 300.000đ cho lớp Lá 1, Năng khiếu vẽ 200.000đ riêng cho bé An, Đồng phục 250.000đ thu một lần.
+- Hoá đơn tháng trước và tháng này. Tháng trước có hoá đơn đã trả đủ, trả một phần và chưa trả; tháng này 1/3 số trẻ đã trả.
+- 2 lần đo chiều cao, cân nặng cho mỗi trẻ, và thực đơn tuần này (thứ Hai đến thứ Sáu).
 
 ## Xác thực
 
@@ -70,7 +75,26 @@ Dữ liệu mẫu: 3 lớp, 30 trẻ, mỗi trẻ có 2 người giám hộ (bé
 | GET | `/children/:id/attendance?from&to` | admin, giáo viên của lớp, phụ huynh của trẻ |
 | GET | `/classes/:id/attendance?date=YYYY-MM-DD` → `{classId,date,items[]}` | admin, giáo viên của lớp |
 | PUT | `/classes/:id/attendance` `{date, items:[{childId,status,note?}]}` | admin, giáo viên của lớp |
-| POST | `/attendance/:id/pickup` `{guardianId? \| pickedUpByName+note, relation?, pickedUpAt?}` | admin, giáo viên của lớp |
+| GET | `/attendance/:id/history` (ai sửa, lúc nào, giá trị cũ, giá trị mới) | admin, giáo viên của lớp |
+| POST | `/attendance/:id/pickup` `{guardianId \| pickupRequestId, pickedUpAt?, note?}` | admin, giáo viên của lớp |
+| POST | `/attendance/:id/pickup-requests` (JSON hoặc multipart: `pickerName, pickerPhone, note, relation?`, ảnh `photo` tuỳ chọn) | admin, giáo viên của lớp |
+| GET | `/pickup-requests?status&childId&date` | admin; giáo viên: lớp mình; phụ huynh: con mình |
+| POST | `/pickup-requests/:id/confirm`, `/pickup-requests/:id/reject` `{note?}` | admin, phụ huynh của trẻ |
+| GET | `/children/attendance-summary?month=YYYY-MM&classId` (chỉ số ngày) | admin, kế toán; giáo viên: lớp mình; phụ huynh: con mình |
+| GET | `/dashboard/summary?date=` | tất cả (theo phạm vi, xem dưới) |
+| GET/POST/PATCH/DELETE | `/fee-items`, `/fee-items/:id` (scope `school`/`class`/`child`, type `monthly`/`one_time`) | admin, kế toán |
+| POST | `/invoices/generate` `{period, classId?, dueDate?}` | admin, kế toán |
+| POST | `/invoices` `{childId, period, lines:[{feeItemId? \| description+unitPrice, quantity?}]}` (unitPrice âm = giảm trừ) | admin, kế toán |
+| GET | `/invoices?period&classId&childId&status(unpaid\|partial\|paid\|void\|outstanding)&page&limit`, `/invoices/:id` | admin, kế toán; phụ huynh: con mình |
+| POST | `/invoices/:id/void` `{reason}` (chỉ huỷ được khi chưa có thanh toán) | admin, kế toán |
+| POST | `/invoices/:id/payments` `{amount, method: cash\|transfer, paidAt?, payerName?, note?}` → dữ liệu phiếu thu | admin, kế toán |
+| GET | `/payments/:id/receipt` (số phiếu, số tiền bằng chữ, các dòng hoá đơn) | admin, kế toán; phụ huynh: con mình |
+| GET | `/children/:id/balance` | admin, kế toán; phụ huynh: con mình |
+| GET | `/debts?classId&upToPeriod` | admin, kế toán |
+| GET / POST | `/children/:id/growth` (ghi lại theo ngày), DELETE `/growth/:id` | đọc: admin, giáo viên của lớp, phụ huynh của trẻ; ghi: admin, giáo viên của lớp |
+| GET / PUT | `/menus?week=`, `/menus` `{weekStart (thứ Hai), items:[{date, meal: breakfast\|lunch\|snack, dishes}]}` | đọc: admin, giáo viên, phụ huynh; ghi: admin |
+| GET / PUT | `/classes/:id/daily-notes?date=` `{date, items:[{childId, eating, sleepMinutes, mood, toilet, note}]}` | admin, giáo viên của lớp |
+| GET | `/children/:id/daily-notes?from&to` | admin, giáo viên của lớp, phụ huynh của trẻ |
 
 Mỗi phần tử trong bảng điểm danh có dạng `{ attendanceId, childId, fullName, allergies, status, note, recorded, pickup }`. Trẻ chưa được điểm danh có `status: null` và `recorded: false`.
 
@@ -80,12 +104,22 @@ Mỗi phần tử trong bảng điểm danh có dạng `{ attendanceId, childId,
 - Phụ huynh chỉ xem được trẻ có `guardians.user_id` trùng với mình. Đổi ID trên URL sẽ nhận **403**.
 - Kế toán chỉ thấy `id, fullName, classId, className, status` của trẻ. Không xem được sức khoẻ, người giám hộ, điểm danh (403).
 - Sửa điểm danh: giáo viên được sửa từ hôm nay lùi tối đa 3 ngày (theo giờ Việt Nam). Cũ hơn thì nhận 403 `EDIT_WINDOW_EXPIRED`, chỉ admin sửa được. Không ai được điểm danh cho ngày tương lai.
-- Đón trẻ: người giám hộ có `canPickup=true` thì được đón (`isAuthorized=true`). Nếu `canPickup=false` thì nhận 403 `PICKUP_NOT_ALLOWED`. Người không có trong danh sách vẫn được ghi nhận nhưng bắt buộc có `pickedUpByName` và `note`, và bị đánh dấu `isAuthorized=false`. Quy tắc này **tạm thời, chờ PM chốt**. Trẻ vắng thì không ghi nhận đón được.
+- Mọi lần tạo hoặc sửa điểm danh đều được ghi vào `attendance_history`. Lưu lại thao tác không làm thay đổi gì thì không sinh bản ghi.
+- Đón trẻ: người giám hộ có `canPickup=true` thì được giao trẻ. Nếu `canPickup=false` thì nhận 403 `PICKUP_NOT_ALLOWED`.
+  - Với người không có trong danh sách, giáo viên tạo yêu cầu đón (chỉ cho ngày hôm nay), trạng thái ban đầu là `pending`.
+  - Phụ huynh của trẻ hoặc admin xác nhận hay từ chối. Khi đó giáo viên mới gọi `POST /attendance/:id/pickup {pickupRequestId}`.
+  - Yêu cầu còn chờ thì nhận 403 `PICKUP_REQUEST_PENDING`, yêu cầu bị từ chối thì nhận 403 `PICKUP_REQUEST_REJECTED`. Yêu cầu đã xử lý rồi thì nhận 409 `ALREADY_DECIDED`.
+- Dashboard: admin xem toàn trường và từng lớp (`byClass`). Giáo viên xem các lớp của mình kèm `byClass`. Kế toán chỉ xem tổng. Phụ huynh xem con mình kèm trạng thái từng bé.
+- Học phí: admin và kế toán quản lý. Phụ huynh chỉ xem hoá đơn, phiếu thu, công nợ của con mình. Giáo viên không truy cập được (403).
+  - Mỗi trẻ chỉ có 1 hoá đơn còn hiệu lực cho mỗi kỳ; huỷ hoá đơn thì lập lại được.
+  - Không cho thu vượt số còn nợ (`OVERPAYMENT`). Số tiền tính bằng VND, kiểu số nguyên.
+  - Khi lập hoá đơn tháng, khoản `one_time` không tự động được thêm vào.
+- Sức khoẻ và dinh dưỡng: kế toán không truy cập được (403). Phụ huynh chỉ được đọc. Nhật ký ăn ngủ có cùng giới hạn sửa 3 ngày như điểm danh.
 
 ## Định dạng lỗi
 
 Mọi lỗi đều có dạng `{ "code": "FORBIDDEN", "message": "..." }`. Lỗi validate có thêm `details[]`.
-Các mã lỗi: `UNAUTHORIZED`, `TOKEN_INVALID`, `INVALID_CREDENTIALS`, `NO_REFRESH_TOKEN`, `FORBIDDEN`, `EDIT_WINDOW_EXPIRED`, `PICKUP_NOT_ALLOWED`, `NOT_FOUND`, `VALIDATION_ERROR`, `BAD_REQUEST`, `CONFLICT`, `USERNAME_TAKEN`, `CHILD_NOT_IN_CLASS`, `CLASS_NOT_EMPTY`, `DATE_IN_FUTURE`, `NOTE_REQUIRED`, `INVALID_GUARDIAN`, `INVALID_FILE`, `INTERNAL_ERROR`.
+Các mã lỗi: `UNAUTHORIZED`, `TOKEN_INVALID`, `INVALID_CREDENTIALS`, `NO_REFRESH_TOKEN`, `FORBIDDEN`, `EDIT_WINDOW_EXPIRED`, `PICKUP_NOT_ALLOWED`, `NOT_FOUND`, `VALIDATION_ERROR`, `BAD_REQUEST`, `CONFLICT`, `USERNAME_TAKEN`, `PICKUP_REQUEST_PENDING`, `PICKUP_REQUEST_REJECTED`, `ALREADY_DECIDED`, `INVOICE_EXISTS`, `HAS_PAYMENTS`, `ALREADY_VOID`, `ALREADY_PAID`, `OVERPAYMENT`, `INVOICE_VOID`, `INVALID_SCOPE`, `NEGATIVE_TOTAL`, `INVALID_WEEK_START`, `CHILD_NOT_IN_CLASS`, `CLASS_NOT_EMPTY`, `DATE_IN_FUTURE`, `NOTE_REQUIRED`, `INVALID_GUARDIAN`, `INVALID_FILE`, `INTERNAL_ERROR`.
 
 ## Cấu trúc
 
@@ -94,10 +128,10 @@ src/database/entities.ts      # users, classes, class_teachers, children, guardi
 src/database/migrations/      # migration TypeORM
 src/database/seed.ts          # dữ liệu mẫu
 src/common/                   # guard JWT, quy tắc phân quyền (access.ts), bộ lọc lỗi, xử lý ngày
-src/auth, classes, children, attendance/   # controller
-test/app.e2e-spec.ts          # 12 test e2e
+src/auth, classes, children, attendance, dashboard, fees, health/   # controller
+test/app.e2e-spec.ts          # 24 test e2e
 ```
 
 ## Chưa làm (các tuần sau)
 
-Học phí và công nợ (kế toán), sức khoẻ và dinh dưỡng (cân nặng, chiều cao, thực đơn), nhật ký ngày, thông báo, báo cáo, API quản lý user và đổi mật khẩu, giới hạn số lần đăng nhập sai, lưu ảnh lên S3 (hiện ảnh nằm trong thư mục `uploads/` trên máy chủ).
+Thông báo đẩy cho phụ huynh khi có yêu cầu đón, thông báo chung, báo cáo thu chi, xuất PDF phiếu thu, API quản lý user và đổi mật khẩu, giới hạn số lần đăng nhập sai, lưu ảnh lên S3 (hiện ảnh nằm trong thư mục `uploads/` trên máy chủ).

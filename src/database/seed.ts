@@ -2,13 +2,13 @@ import * as bcrypt from 'bcryptjs';
 import { DataSource } from 'typeorm';
 import { addDays, todayStr } from '../common/dates';
 import dataSource from './data-source';
-import { Attendance, AttendanceHistory, Child, ClassRoom, ClassTeacher, Guardian, User } from './entities';
+import { Attendance, AttendanceHistory, Child, DailyNote, FeeItem, GrowthRecord, Invoice, MenuItem, Payment, ClassRoom, ClassTeacher, Guardian, User } from './entities';
 
 export const SEED_PASSWORD = '123456';
 
 /** Wipes all app tables and inserts deterministic sample data. Returns handy ids (used by e2e tests). */
 export async function seed(ds: DataSource) {
-  await ds.query('TRUNCATE pickup_requests, attendance_history, pickups, attendance, guardians, children, class_teachers, classes, users RESTART IDENTITY CASCADE');
+  await ds.query('TRUNCATE payments, invoice_lines, invoices, fee_items, growth_records, menus, daily_notes, pickup_requests, attendance_history, pickups, attendance, guardians, children, class_teachers, classes, users RESTART IDENTITY CASCADE');
   const hash = await bcrypt.hash(SEED_PASSWORD, 10);
   const mk = (username: string, name: string, role: User['role'], phone: string | null = null) =>
     ds.getRepository(User).save({ username, name, role, phone, passwordHash: hash });
@@ -65,7 +65,70 @@ export async function seed(ds: DataSource) {
     attendanceId: a.id, action: 'create' as const, oldStatus: null, oldNote: null, newStatus: a.status, newNote: a.note, changedBy: admin.id,
   })));
 
-  return { users: { admin, gv1, gv2, gv3, ketoan, ph1, ph2 }, classes: { c1, c2, c3 }, kids };
+  await ds.query('ALTER SEQUENCE invoice_no_seq RESTART WITH 1');
+  await ds.query('ALTER SEQUENCE receipt_no_seq RESTART WITH 1');
+
+  // ── fees: school-wide monthly tuition + meals, class add-on, one child-specific item
+  const fRepo = ds.getRepository(FeeItem);
+  const tuition = await fRepo.save({ name: 'Học phí', amount: 1_500_000, type: 'monthly', scope: 'school' });
+  const meals = await fRepo.save({ name: 'Tiền ăn', amount: 900_000, type: 'monthly', scope: 'school' });
+  const english = await fRepo.save({ name: 'Tiếng Anh', amount: 300_000, type: 'monthly', scope: 'class', classId: c3.id });
+  const art = await fRepo.save({ name: 'Năng khiếu vẽ', amount: 200_000, type: 'monthly', scope: 'child', childId: kids[0].id });
+  await fRepo.save({ name: 'Đồng phục', amount: 250_000, type: 'one_time', scope: 'school' });
+  const today = todayStr(), thisMonth = today.slice(0, 7);
+  const [yy, mm] = thisMonth.split('-').map(Number);
+  const lastMonth = mm === 1 ? `${yy - 1}-12` : `${yy}-${String(mm - 1).padStart(2, '0')}`;
+  const iRepo = ds.getRepository(Invoice), pRepo = ds.getRepository(Payment);
+  const nextNo = async (seq: string, prefix: string, period: string) =>
+    `${prefix}${period.replace('-', '')}-${String((await ds.query(`SELECT nextval('${seq}') AS n`))[0].n).padStart(5, '0')}`;
+  for (const period of [lastMonth, thisMonth]) {
+    for (const [i, k] of kids.entries()) {
+      const fees = [tuition, meals, ...(k.classId === c3.id ? [english] : []), ...(k.id === kids[0].id ? [art] : [])];
+      const total = fees.reduce((sum, f) => sum + f.amount, 0);
+      // last month: most paid, every 6th partial, every 10th unpaid; this month: a third paid
+      const paid = period === lastMonth ? (i % 10 === 9 ? 0 : i % 6 === 5 ? 1_000_000 : total) : (i % 3 === 0 ? total : 0);
+      const inv = await iRepo.save(iRepo.create({
+        invoiceNo: await nextNo('invoice_no_seq', 'HD', period), childId: k.id, classId: k.classId, period,
+        issueDate: `${period}-01`, dueDate: `${period}-10`, totalAmount: total, paidAmount: paid,
+        status: paid === 0 ? 'unpaid' : paid >= total ? 'paid' : 'partial', createdBy: ketoan.id,
+        lines: fees.map((f) => ({ feeItemId: f.id, description: f.name, quantity: 1, unitPrice: f.amount, amount: f.amount })) as any,
+      }));
+      if (paid > 0) await pRepo.save({ receiptNo: await nextNo('receipt_no_seq', 'PT', period), invoiceId: inv.id, amount: paid,
+        method: i % 2 ? 'cash' : 'transfer', paidAt: new Date(`${period}-0${(i % 8) + 2}T09:00:00+07:00`), receivedBy: ketoan.id,
+        payerName: null });
+    }
+  }
+
+  // ── health: two growth measurements per child
+  const gr = ds.getRepository(GrowthRecord);
+  for (const [i, k] of kids.entries()) {
+    const ci = classes.findIndex((c) => c.id === k.classId);
+    const h = 95 + ci * 7 + (i % 5), w = 14 + ci * 2 + (i % 4) * 0.5;
+    await gr.save([
+      { childId: k.id, date: `${lastMonth}-05`, heightCm: h, weightKg: w, recordedBy: admin.id },
+      { childId: k.id, date: `${thisMonth}-05` <= today ? `${thisMonth}-05` : `${lastMonth}-25`, heightCm: h + 0.8, weightKg: w + 0.3, recordedBy: admin.id },
+    ]);
+  }
+  // ── weekly menu for this week (Mon–Fri)
+  const dow = new Date(today + 'T00:00:00Z').getUTCDay();
+  const monday = addDays(today, dow === 0 ? -6 : 1 - dow);
+  const menu = [
+    ['Cháo thịt bằm, sữa tươi', 'Cơm, canh bí đỏ, cá kho', 'Sữa chua, chuối'],
+    ['Bún bò, sữa tươi', 'Cơm, canh rau ngót, thịt rim', 'Bánh flan'],
+    ['Mì gà, sữa tươi', 'Cơm, canh chua, trứng chiên', 'Đu đủ'],
+    ['Phở bò, sữa tươi', 'Cơm, canh cải, tôm rim', 'Sữa đậu nành, bánh quy'],
+    ['Xôi đậu xanh, sữa tươi', 'Cơm, canh mồng tơi, gà kho gừng', 'Thanh long'],
+  ];
+  await ds.getRepository(MenuItem).save(menu.flatMap((d, i) => (['breakfast', 'lunch', 'snack'] as const).map((meal, j) =>
+    ({ date: addDays(monday, i), meal, dishes: d[j], updatedBy: admin.id }))));
+  // ── daily notes for yesterday
+  await ds.getRepository(DailyNote).save(kids.map((k, i) => ({
+    childId: k.id, classId: k.classId!, date: y, eating: (['all', 'most', 'half', 'all', 'little'] as const)[i % 5],
+    sleepMinutes: 90 + (i % 4) * 15, mood: i % 6 === 0 ? 'Hơi mệt' : 'Vui vẻ', toilet: 'Bình thường',
+    note: null, recordedBy: admin.id,
+  })).filter((_, i) => i % 9 !== 0)); // absent kids have no note
+
+  return { users: { admin, gv1, gv2, gv3, ketoan, ph1, ph2 }, classes: { c1, c2, c3 }, kids, fees: { tuition, meals, english, art }, periods: { lastMonth, thisMonth } };
 }
 
 if (require.main === module) {

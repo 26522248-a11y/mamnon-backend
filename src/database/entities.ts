@@ -137,7 +137,7 @@ export class FeeItem {
 }
 
 @Entity('invoices')
-@Unique('uq_invoice_child_period', ['childId', 'period'])
+@Index('uq_invoice_child_period_live', ['childId', 'period'], { unique: true, where: `status <> 'void'` })
 export class Invoice {
   @PrimaryGeneratedColumn('uuid') id!: string;
   @Index({ unique: true }) @Column({ name: 'invoice_no', length: 30 }) invoiceNo!: string;

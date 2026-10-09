@@ -8,6 +8,9 @@ import { NestExpressApplication } from '@nestjs/platform-express';
 import * as path from 'path';
 import { AttendanceController } from './attendance/attendance.controller';
 import { AuthController } from './auth/auth.controller';
+import { DashboardController } from './dashboard/dashboard.controller';
+import { HealthController as HealthNutritionController } from './health/health.controller';
+import { FeesController } from './fees/fees.controller';
 import { ChildrenController } from './children/children.controller';
 import { ClassesController } from './classes/classes.controller';
 import { AccessService } from './common/access';
@@ -27,7 +30,7 @@ class HealthController {
     TypeOrmModule.forFeature(ENTITIES),
     JwtModule.register({}),
   ],
-  controllers: [HealthController, AuthController, ClassesController, ChildrenController, AttendanceController],
+  controllers: [HealthController, AuthController, ClassesController, ChildrenController, AttendanceController, DashboardController, FeesController, HealthNutritionController],
   providers: [
     AccessService, UserContextService,
     { provide: APP_GUARD, useClass: JwtAuthGuard },
