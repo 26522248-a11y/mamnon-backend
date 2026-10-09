@@ -6,7 +6,7 @@ import { Response } from 'express';
 import { DataSource } from 'typeorm';
 import { Roles } from '../common/auth';
 import { addDays } from '../common/dates';
-import { csvCell, describe, maskPhones, SENSITIVE_TYPES, SensitiveType, TYPE_ACTIONS, TYPE_LABELS, actionType } from './sensitive';
+import { csvCell, describe, maskPhones, phoneSlots, SENSITIVE_TYPES, SensitiveType, TYPE_ACTIONS, TYPE_LABELS, actionType } from './sensitive';
 
 export class SensitiveQuery {
   @ApiPropertyOptional({ description: 'guardian_unlink | phone_change | photo_consent (có thể nhiều, cách nhau dấu phẩy). Bỏ trống = tất cả' })
@@ -59,7 +59,7 @@ export class SensitiveAuditController {
       return {
         id: r.id, createdAt: r.created_at, type, typeLabel: TYPE_LABELS[type], action: r.action,
         target: { entity: r.entity_type, id: r.entity_id, label: r.target_label ?? null, childId: r.child_id, childName: r.child_name ?? null },
-        before, after, ...describe(r.action, before, after), reason: r.reason,
+        before, after, ...describe(r.action, before, after), afterPhones: phoneSlots(r.action, r.before, r.after), reason: r.reason,
         actor: { id: r.actor_id, name: r.actor_name ?? null, username: r.actor_username, role: r.actor_role,
           self: r.action === 'child.contact_phones' && r.actor_role === 'parent' },
         ip: r.ip,

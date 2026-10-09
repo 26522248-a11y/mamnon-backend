@@ -65,3 +65,18 @@ export function csvCell(v: unknown): string {
   if (/^[=+\-@\t\r]/.test(s)) s = `'${s}`;
   return `"${s.replace(/"/g, '""')}"`;
 }
+
+export type PhoneSlot = { slot: string; value: string | null; changed: boolean };
+const PHONE_SLOTS = ['phone1', 'phone2', 'phone'];
+const digits = (v: unknown) => (v === null || v === undefined ? '' : String(v).replace(/\D/g, ''));
+
+/**
+ * Phone-change rows: one entry per number in `after`, masked, with `changed` = this number was not among the numbers in
+ * `before` (compared on RAW digits server-side, so swapped order is not a change). Raw numbers never leave the server.
+ */
+export function phoneSlots(action: string, rawBefore: any, rawAfter: any): PhoneSlot[] | null {
+  if (action !== 'child.contact_phones' && action !== 'user.phone') return null;
+  const old = new Set(PHONE_SLOTS.map((k) => digits(rawBefore?.[k])).filter(Boolean));
+  return PHONE_SLOTS.filter((k) => rawAfter && k in rawAfter)
+    .map((k) => ({ slot: k, value: maskPhone(rawAfter[k]), changed: !!digits(rawAfter[k]) && !old.has(digits(rawAfter[k])) }));
+}

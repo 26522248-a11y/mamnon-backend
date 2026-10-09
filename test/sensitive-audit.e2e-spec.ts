@@ -71,6 +71,8 @@ describe('B18 sensitive-change history (e2e)', () => {
     });
     expect(unlink.target.label).toContain(' · '); // child · class
     expect(unlink.beforeText).toContain(grandma.fullName);
+    expect(unlink.afterPhones).toBeNull();
+    expect(userPhone.afterPhones).toEqual([{ slot: 'phone', value: '0901 *** 567', changed: true }]);
     expect(userPhone).toMatchObject({ action: 'user.phone', target: { entity: 'user', id: s.users.gv1.id }, after: { phone: '0901 *** 567' }, afterText: '0901 *** 567' });
     expect(consent).toMatchObject({ reason: 'PH gọi điện', before: { consent: was }, after: { consent: !was } });
     expect(contact).toMatchObject({ action: 'child.contact_phones', after: { phone1: '0977 *** 001', phone2: '0988 *** 002' },
@@ -98,6 +100,16 @@ describe('B18 sensitive-change history (e2e)', () => {
     expect(api[0]).toMatchObject({ beforeText: expect.stringMatching(/^0933 \*\*\* 222/), afterText: '0933 *** 333 / 0933 *** 444' });
     expect(api[1].beforeText).not.toBe('—');
     expect(api[1].afterText).toBe('0933 *** 222');
+    // per-number changed flag (compared on raw values server-side), values stay masked
+    expect(api[0].afterPhones).toEqual([{ slot: 'phone1', value: '0933 *** 333', changed: true }, { slot: 'phone2', value: '0933 *** 444', changed: true }]);
+    expect(api[1].afterPhones).toEqual([{ slot: 'phone1', value: '0933 *** 222', changed: true }, { slot: 'phone2', value: null, changed: false }]);
+    // keep phone1, change phone2 only → only phone2 flagged; swapping order is not a change
+    await as('admin').patch(`/children/${kid.id}/contact-phones`, { phone1: '0933111333', phone2: '0933111555' }).expect(200);
+    await as('admin').patch(`/children/${kid.id}/contact-phones`, { phone1: '0933111555', phone2: '0933111333' }).expect(200);
+    const api2 = (await as('admin').get(`/audit/sensitive?type=phone_change&q=${encodeURIComponent(kid.fullName)}`).expect(200)).body.items;
+    expect(api2[1].afterPhones.map((x: any) => x.changed)).toEqual([false, true]);
+    expect(api2[0].afterPhones.map((x: any) => x.changed)).toEqual([false, false]);
+    expect(JSON.stringify(api2)).not.toMatch(/0933111\d{3}/);
     // keep the counts used by the next test unchanged
     await ds.query(`DELETE FROM audit_events WHERE action = 'child.contact_phones' AND child_id = $1`, [kid.id]);
   });
