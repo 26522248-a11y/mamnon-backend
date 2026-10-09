@@ -17,6 +17,8 @@ export interface FileStorage {
   readonly driver: 'local' | 's3';
   put(key: string, data: Buffer, contentType: string): Promise<void>;
   get(key: string): Promise<Buffer | null>;
+  /** B33: existence check WITHOUT transferring the body (S3: HeadObject, local: stat). */
+  exists(key: string): Promise<boolean>;
   remove(key: string): Promise<void>;
   /** Keys starting with `prefix` (flat keys only; used by seed cleanup / maintenance scripts). */
   list(prefix: string): Promise<string[]>;
@@ -35,6 +37,7 @@ export class LocalStorage implements FileStorage {
   private file(key: string) { return path.join(this.dir, safeKey(key)); }
   async put(key: string, data: Buffer) { const f = this.file(key); fs.mkdirSync(path.dirname(f), { recursive: true }); fs.writeFileSync(f, data); }
   async get(key: string) { const f = this.file(key); return fs.existsSync(f) ? fs.readFileSync(f) : null; }
+  async exists(key: string) { try { return (await fs.promises.stat(this.file(key))).isFile(); } catch (e: any) { if (e?.code === 'ENOENT' || e?.code === 'ENOTDIR') return false; throw e; } }
   async remove(key: string) { fs.rmSync(this.file(key), { force: true }); }
   async list(prefix: string) { return fs.existsSync(this.dir) ? fs.readdirSync(this.dir).filter((f) => f.startsWith(prefix)) : []; }
   publicUrl() { return null; }
@@ -68,6 +71,16 @@ export class S3Storage implements FileStorage {
       const chunks: Buffer[] = []; for await (const c of b) chunks.push(Buffer.from(c)); return Buffer.concat(chunks);
     } catch (e: any) {
       if (e?.name === 'NoSuchKey' || e?.$metadata?.httpStatusCode === 404) return null;
+      throw e;
+    }
+  }
+  /** B33: HeadObject – still a Class B call on B2 but 0 bytes downloaded. 404/NotFound → false; auth/network errors rethrow. */
+  async exists(key: string) {
+    try {
+      await this.client.send(new this.sdk.HeadObjectCommand({ Bucket: this.bucket, Key: safeKey(key) }));
+      return true;
+    } catch (e: any) {
+      if (e?.name === 'NotFound' || e?.name === 'NoSuchKey' || e?.$metadata?.httpStatusCode === 404) return false;
       throw e;
     }
   }
@@ -113,6 +126,7 @@ export class CachedStorage implements FileStorage {
   }
   async put(key: string, data: Buffer, contentType: string) { this.drop(key); await this.inner.put(key, data, contentType); this.add(key, data); }
   async remove(key: string) { this.drop(key); await this.inner.remove(key); }
+  async exists(key: string) { return this.map.has(key) || this.inner.exists(key); }
   list(prefix: string) { return this.inner.list(prefix); }
   publicUrl(key: string) { return this.inner.publicUrl(key); }
 }
