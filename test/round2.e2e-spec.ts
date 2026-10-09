@@ -147,6 +147,7 @@ describe('round 2 batch 1: absences, cutoff, holidays (e2e)', () => {
     expect(await att(kid, mon)).toBeUndefined();
     expect(await att(kid, fri)).toBeDefined();
     expect((await notes('gv1', 'absence_cancelled')).length).toBe(1);
+    expect((await notes('gv1', 'absence_cancelled'))[0].title).toMatch(new RegExp(` – ${viDayLabel(mon)}$`)); // P14
     // the freed day can be reported again
     const again = await as('ph1').post(`/children/${kid}/absences`, { from: mon, reason: 'family' }).expect(201);
     await as('ph1').del(`/absences/${again.body.id}`).expect(200);
@@ -158,6 +159,7 @@ describe('round 2 batch 1: absences, cutoff, holidays (e2e)', () => {
     expect(c2.body.cancelledAt).toBeTruthy();
     expect(c2.body.history.map((h: any) => h.action)).toEqual(['created', 'cancelled', 'cancelled']);
     expect(await att(kid, fri)).toBeUndefined();
+    expect((await notes('gv1', 'absence_cancelled')).map((n: any) => n.title)).toContainEqual(expect.stringMatching(new RegExp(` – ${viDayLabel(fri)}, ${viDayLabel(tue)}$`))); // P14: multi-date joined with ', '
     expect((await as('ph1').del(`/absences/${r.body.id}`).expect(409)).body.code).toBe('CANCEL_AFTER_CUTOFF');
   });
 
@@ -238,6 +240,7 @@ describe('round 2 batch 1: absences, cutoff, holidays (e2e)', () => {
     expect((await as('ph1').get(`/children/${kid}/absences?from=${addDays(thu, 1)}&to=${addDays(thu, 5)}`).expect(200)).body.items.map((x: any) => x.id)).not.toContain(r.body.id);
     expect(await att(kid, wed)).toBeUndefined();
     expect((await notes('ph1', 'absence_cancelled')).length).toBeGreaterThanOrEqual(1);
+    expect((await notes('ph1', 'absence_cancelled')).map((n: any) => n.title)).toContain(`Trường nghỉ Ngày hội trường: báo vắng ${viDayLabel(wed)} không còn cần thiết`); // P14
     expect((await as('admin').post('/holidays', { date: wed, to: thu, name: 'x' }).expect(409)).body).toMatchObject({ code: 'HOLIDAY_EXISTS', details: { dates: [wed] } });
     // new reports skip the holiday
     await as('ph1').del(`/absences/${r.body.id}`).expect(200);

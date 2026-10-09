@@ -126,7 +126,7 @@ export class AbsencesService {
     for (const { absence, dates } of items) {
       const parents = await this.notify.parentIdsOfChildren([absence.childId]);
       await this.notify.send(parents, {
-        type: 'absence_cancelled', title: `Trường nghỉ ${holidayName}: báo vắng ngày ${dates.join(', ')} không còn cần thiết`,
+        type: 'absence_cancelled', title: `Trường nghỉ ${holidayName}: báo vắng ${dates.map(viDayLabel).join(', ')} không còn cần thiết`,
         data: { absenceId: absence.id, childId: absence.childId, dates, reason: 'HOLIDAY' }, refId: absence.id,
       });
     }
