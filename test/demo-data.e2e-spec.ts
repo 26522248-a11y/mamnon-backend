@@ -27,8 +27,12 @@ describe('demo dataset load/purge', () => {
     expect(await demoLoaded(ds)).toBeGreaterThan(100);
     await expect(demoLoad(ds)).rejects.toThrow(/already loaded/);
     // tester activity on demo data after loading (unregistered rows) must not block the purge
-    const kid = (await ds.query(`SELECT c.id FROM children c JOIN demo_registry r ON r.table_name = 'children' AND r.row_id = c.id::text LIMIT 1`))[0].id;
-    const inv = (await ds.query(`SELECT id FROM invoices WHERE child_id = $1 AND status <> 'paid' LIMIT 1`, [kid]))[0].id;
+    // B30: pick a demo child that HAS an open invoice. "LIMIT 1" without ORDER BY returned an arbitrary demo child, and about a third
+    // of them have every invoice paid (demo.ts: last month mostly paid, this month i % 3 === 0 paid) → flaky "reading 'id'" failure.
+    const [open] = await ds.query(`SELECT i.id AS inv, i.child_id AS kid FROM invoices i JOIN demo_registry r ON r.table_name = 'children' AND r.row_id = i.child_id::text
+      WHERE i.status <> 'paid' ORDER BY i.child_id, i.id LIMIT 1`);
+    expect(open).toBeDefined();
+    const { kid, inv } = open;
     await ds.query(`INSERT INTO payments (receipt_no, invoice_id, child_id, amount, method, paid_at) VALUES ('PT-TESTER-1', $1, $2, 1000, 'cash', now())`, [inv, kid]);
     // demo parent login + sensitive-change audit row on a demo child (created after load, not registered)
     const [pu] = await ds.query(`INSERT INTO users (username, name, role, password_hash) VALUES ('demo_ph_test', 'PH demo', 'parent', 'x') RETURNING id`);
