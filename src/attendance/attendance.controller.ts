@@ -397,7 +397,7 @@ export class AttendanceController {
       guardians: gs.map((g) => ({ kind: 'guardian', id: g.id, fullName: g.fullName, relation: g.relation, phone: g.phone, idNumberMasked: maskId(g.idNumber),
         hasAccount: !!g.userId, canPickup: g.canPickup, canHandOver: !done && g.canPickup && a.status !== 'absent', blockers: g.canPickup ? [] : ['NOT_ALLOWED'] })),
       authorizedPickers: aps.map((p) => ({ kind: 'authorized_picker', id: p.id, fullName: p.fullName, relation: p.relation, phone1: p.phone1, phone2: p.phone2,
-        idNumberMasked: maskId(p.idNumber), photoUrl: `/api/v1/authorized-pickers/${p.id}/photo`, status: p.status,
+        idNumberMasked: maskId(p.idNumber), photoUrl: p.photoUrl ? `/api/v1/authorized-pickers/${p.id}/photo` : null, status: p.status,
         canHandOver: !done && p.status === 'approved' && a.status !== 'absent', blockers: p.status === 'approved' ? [] : [p.status === 'pending' ? 'NOT_APPROVED_YET' : 'REJECTED'] })),
       requests: await Promise.all(reqs.map(async (r) => {
         const v = await this.staffView(r, names);
@@ -419,7 +419,7 @@ export class AttendanceController {
     } else if (q.kind === 'authorized_picker') {
       const p = await this.ds.getRepository(AuthorizedPicker).findOne({ where: { id: q.id } });
       if (!p || p.childId !== a.childId || p.deletedAt) throw NotFound('Không tìm thấy người đón của bé này');
-      out = { fullName: p.fullName, relation: p.relation, idNumber: p.idNumber, photoUrl: `/api/v1/authorized-pickers/${p.id}/photo`, phones: [p.phone1, p.phone2].filter(Boolean) as string[] };
+      out = { fullName: p.fullName, relation: p.relation, idNumber: p.idNumber, photoUrl: p.photoUrl ? `/api/v1/authorized-pickers/${p.id}/photo` : null, phones: [p.phone1, p.phone2].filter(Boolean) as string[] };
     } else {
       const r = await this.requests.findOne({ where: { id: q.id } });
       if (!r || r.attendanceId !== a.id) throw NotFound('Không tìm thấy yêu cầu đón của bé này');

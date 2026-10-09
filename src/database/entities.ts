@@ -349,10 +349,10 @@ export class AuthorizedPicker {
   @Index() @Column({ name: 'child_id', type: 'uuid' }) childId!: string;
   @ManyToOne(() => Child, { onDelete: 'CASCADE' }) @JoinColumn({ name: 'child_id' }) child!: Child;
   @Column({ name: 'full_name', length: 120 }) fullName!: string;
-  @Column({ length: 40 }) relation!: string;
-  @Column({ name: 'photo_url', type: 'text' }) photoUrl!: string;
+  @Column({ type: 'varchar', length: 40, nullable: true }) relation!: string | null;
+  @Column({ name: 'photo_url', type: 'text', nullable: true }) photoUrl!: string | null;
   /** CCCD (12 digits). Sensitive: masked in every list; full value only via the audited identity endpoint. */
-  @Index() @Column({ name: 'id_number', length: 20 }) idNumber!: string;
+  @Index() @Column({ name: 'id_number', type: 'varchar', length: 20, nullable: true }) idNumber!: string | null;
   @Index() @Column({ length: 20 }) phone1!: string;
   @Column({ type: 'varchar', length: 20, nullable: true }) phone2!: string | null;
   @Index() @Column({ type: 'varchar', length: 10, default: 'pending' }) status!: StepStatus;

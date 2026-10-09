@@ -14,19 +14,21 @@ import { recordAudit } from '../common/audit';
 import { NotificationsService } from '../notifications/notifications.service';
 import { ID_NUMBER_RE, maskId, PickupSafetyService } from './pickup-safety.service';
 
-const CCCD_MSG = 'CCCD phải đúng 12 chữ số';
+const CCCD_MSG = 'Số căn cước phải đúng 12 chữ số';
+const EMPTY_OR_ID = new RegExp(`(^$)|(${ID_NUMBER_RE.source})`);
+const blank = (v?: string | null) => (v?.trim() ? v.trim() : null);
 export class CreatePickerDto {
   @ApiProperty({ example: 'Trần Văn Tư' }) @IsString() @MinLength(1) @MaxLength(120) fullName!: string;
-  @ApiProperty({ example: 'Chú ruột' }) @IsString() @MinLength(1) @MaxLength(40) relation!: string;
-  @ApiProperty({ example: '079123456789', description: 'CCCD 12 số (bắt buộc)' }) @Matches(ID_NUMBER_RE, { message: CCCD_MSG }) idNumber!: string;
+  @ApiPropertyOptional({ example: 'Chú/Bác', description: 'Không bắt buộc (U5)' }) @IsOptional() @IsString() @MaxLength(40) relation?: string;
+  @ApiPropertyOptional({ example: '079123456789', description: 'Số căn cước 12 số (không bắt buộc; "" = bỏ trống)' }) @IsOptional() @Matches(EMPTY_OR_ID, { message: CCCD_MSG }) idNumber?: string;
   @ApiProperty({ example: '0912345678', description: 'SĐT liên hệ 1 (bắt buộc)' }) @IsString() phone1!: string;
   @ApiPropertyOptional({ example: '0987654321', description: 'SĐT liên hệ 2' }) @IsOptional() @IsString() phone2?: string;
-  @ApiProperty({ type: 'string', format: 'binary', description: 'Ảnh chân dung JPG/PNG (bắt buộc, kiểm tra nội dung file)' }) @IsOptional() photo?: any;
+  @ApiProperty({ type: 'string', format: 'binary', description: 'Ảnh chân dung JPG/PNG/HEIC (không bắt buộc; cô giáo có thể chụp ở lần đón đầu)' }) @IsOptional() photo?: any;
 }
 export class UpdatePickerDto {
   @ApiPropertyOptional() @IsOptional() @IsString() @MinLength(1) @MaxLength(120) fullName?: string;
-  @ApiPropertyOptional() @IsOptional() @IsString() @MinLength(1) @MaxLength(40) relation?: string;
-  @ApiPropertyOptional() @IsOptional() @Matches(ID_NUMBER_RE, { message: CCCD_MSG }) idNumber?: string;
+  @ApiPropertyOptional({ description: '"" = bỏ trống' }) @IsOptional() @IsString() @MaxLength(40) relation?: string;
+  @ApiPropertyOptional({ description: '"" = bỏ trống' }) @IsOptional() @Matches(EMPTY_OR_ID, { message: CCCD_MSG }) idNumber?: string;
   @ApiPropertyOptional() @IsOptional() @IsString() phone1?: string;
   @ApiPropertyOptional({ description: 'Chuỗi rỗng = xoá SĐT 2' }) @IsOptional() @IsString() phone2?: string;
   @ApiPropertyOptional({ type: 'string', format: 'binary' }) @IsOptional() photo?: any;
@@ -39,7 +41,7 @@ export class PickerQuery {
 
 const view = (p: AuthorizedPicker & { child?: Child }, names: Map<string, string> = new Map()) => ({
   id: p.id, childId: p.childId, childName: p.child?.fullName, fullName: p.fullName, relation: p.relation, phone1: p.phone1, phone2: p.phone2,
-  idNumberMasked: maskId(p.idNumber), photoUrl: `/api/v1/authorized-pickers/${p.id}/photo`,
+  idNumberMasked: maskId(p.idNumber), photoUrl: p.photoUrl ? `/api/v1/authorized-pickers/${p.id}/photo` : null,
   status: p.status, onList: p.status === 'approved', decidedBy: p.decidedBy, decidedByName: p.decidedBy ? names.get(p.decidedBy) ?? null : null,
   decidedAt: p.decidedAt, decisionNote: p.decisionNote, createdBy: p.createdBy, createdByName: p.createdBy ? names.get(p.createdBy) ?? null : null, createdAt: p.createdAt, updatedAt: p.updatedAt,
 });
@@ -95,7 +97,7 @@ export class AuthorizedPickersController {
     const names = await this.names(ps);
     return {
       childId: id,
-      guardians: gs.map((g) => ({ id: g.id, fullName: g.fullName, relation: g.relation, phone: g.phone, idNumberMasked: maskId(g.idNumber), canPickup: g.canPickup, isParentAccount: !!g.userId, onList: g.canPickup })),
+      guardians: gs.map((g) => ({ id: g.id, fullName: g.fullName, relation: g.relation, phone: g.phone, idNumberMasked: maskId(g.idNumber), canPickup: g.canPickup, isParentAccount: !!g.userId, isMe: !!g.userId && g.userId === u.id, onList: g.canPickup })),
       authorizedPickers: ps.map((p) => view(p, names)),
     };
   }
@@ -112,21 +114,21 @@ export class AuthorizedPickersController {
   @ApiConsumes('multipart/form-data') @UseInterceptors(FileInterceptor('photo', imageUploadOptions))
   async create(@CurrentUser() u: AuthUser, @Param('id', ParseUUIDPipe) id: string, @Body() dto: CreatePickerDto, @UploadedFile() file?: Express.Multer.File) {
     const child = await this.assertWrite(u, id);
-    if (!file) throw BadRequest('Bắt buộc có ảnh chân dung người đón (JPG/PNG)', 'PHOTO_REQUIRED');
     const phone1 = phoneOr400(dto.phone1, 'phone1');
     const phone2 = dto.phone2?.trim() ? phoneOr400(dto.phone2, 'phone2') : null;
     if (phone2 === phone1) throw BadRequest('SĐT 2 trùng SĐT 1', 'VALIDATION_ERROR');
-    if (await this.repo().exist({ where: { childId: id, idNumber: dto.idNumber, deletedAt: IsNull() } })) throw new AppError(409, 'DUPLICATE_PICKER', 'Người này (cùng CCCD) đã có trong danh sách của bé');
+    const idNumber = blank(dto.idNumber);
+    if (idNumber && await this.repo().exist({ where: { childId: id, idNumber, deletedAt: IsNull() } })) throw new AppError(409, 'DUPLICATE_PICKER', 'Người này (cùng CCCD) đã có trong danh sách của bé');
     // same rule as the Excel import: same person = same phone + same name (NFC, case/whitespace-insensitive, diacritics kept)
     const samePhone = await this.repo().find({ where: { childId: id, phone1: phone1, deletedAt: IsNull() } });
     if (samePhone.some((x) => personKey(x.fullName) === personKey(dto.fullName))) throw new AppError(409, 'DUPLICATE_PICKER', 'Người này (cùng tên + SĐT) đã có trong danh sách của bé');
-    const photo = await saveImage(file); // magic bytes: JPG/PNG/HEIC (-> JPEG), else 400
-    const p = await this.repo().save(this.repo().create({ childId: id, fullName: cleanName(dto.fullName), relation: cleanName(dto.relation), idNumber: dto.idNumber, phone1, phone2,
+    const photo = file ? await saveImage(file) : null; // magic bytes: JPG/PNG/HEIC (-> JPEG), else 400
+    const p = await this.repo().save(this.repo().create({ childId: id, fullName: cleanName(dto.fullName), relation: blank(dto.relation) ? cleanName(dto.relation!) : null, idNumber, phone1, phone2,
       photoUrl: photo, status: 'pending', createdBy: u.id }));
     await this.history(p.id, 'create', snap(p), u.id);
     const admins = await this.ds.getRepository(User).find({ where: { role: 'admin', isActive: true }, select: { id: true } });
     await this.notify.send(admins.map((a) => a.id), { type: 'picker_registration', refId: p.id, title: `Duyệt người đón hộ cho bé ${child.fullName}`,
-      body: `${p.fullName} (${p.relation}), SĐT ${p.phone1} – do ${u.name} đăng ký`, data: { authorizedPickerId: p.id, childId: id } });
+      body: `${p.fullName}${p.relation ? ` (${p.relation})` : ''}, SĐT ${p.phone1} – do ${u.name} đăng ký`, data: { authorizedPickerId: p.id, childId: id } });
     return view({ ...p, child }, await this.names([p]));
   }
 
@@ -139,8 +141,8 @@ export class AuthorizedPickersController {
     const before = snap(p);
     const patch: Partial<AuthorizedPicker> = {};
     if (dto.fullName !== undefined) patch.fullName = cleanName(dto.fullName);
-    if (dto.relation !== undefined) patch.relation = cleanName(dto.relation);
-    if (dto.idNumber !== undefined) patch.idNumber = dto.idNumber;
+    if (dto.relation !== undefined) patch.relation = blank(dto.relation) ? cleanName(dto.relation) : null;
+    if (dto.idNumber !== undefined) patch.idNumber = blank(dto.idNumber);
     if (dto.phone1 !== undefined) patch.phone1 = phoneOr400(dto.phone1, 'phone1');
     if (dto.phone2 !== undefined) patch.phone2 = dto.phone2.trim() ? phoneOr400(dto.phone2, 'phone2') : null;
     let oldPhoto: string | null = null;
@@ -196,7 +198,7 @@ export class AuthorizedPickersController {
       before: { status: p.status }, after: { status, fullName: p.fullName, relation: p.relation, idNumber: maskId(p.idNumber) }, reason: note?.trim() || null });
     const parents = await this.notify.parentIdsOfChildren([p.childId]);
     await this.notify.send(parents, { type: 'picker_decision', refId: id, title: `Người đón hộ ${p.fullName} ${status === 'approved' ? 'đã được duyệt' : 'bị từ chối'}`,
-      body: status === 'approved' ? `${p.fullName} (${p.relation}) có thể đón bé ${p.child.fullName}.` : `Lý do: ${note}`, data: { authorizedPickerId: id, childId: p.childId, status } });
+      body: status === 'approved' ? `${p.fullName}${p.relation ? ` (${p.relation})` : ''} có thể đón bé ${p.child.fullName}.` : `Lý do: ${note}`, data: { authorizedPickerId: id, childId: p.childId, status } });
     const after = await this.getOr404(id);
     return view(after, await this.names([after]));
   }
@@ -211,6 +213,7 @@ export class AuthorizedPickersController {
     const p = await this.repo().findOne({ where: { id } });
     if (!p) throw NotFound('Không tìm thấy người đón hộ');
     await this.assertRead(u, p.childId);
+    if (!p.photoUrl) throw NotFound('Chưa có ảnh người đón');
     sendImage(res, p.photoUrl);
   }
 }

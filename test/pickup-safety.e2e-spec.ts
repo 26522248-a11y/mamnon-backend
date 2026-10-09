@@ -99,10 +99,8 @@ describe('An toàn đón trẻ – đợt 1 (e2e, tester cases PK-*)', () => {
       await create('ph1', s.kids[0].id).attach('photo', PNG, { filename: 'a.png', contentType: 'image/png' }).expect(409);
     });
 
-    it('PK-A02 / A03: missing photo or CCCD -> 400; bad CCCD / phone / fake image -> 400', async () => {
-      expect((await create('ph1', s.kids[0].id).expect(400)).body.code).toBe('PHOTO_REQUIRED');
-      await as('ph1').multipart(`/children/${s.kids[0].id}/authorized-pickers`).field('fullName', 'A').field('relation', 'Cô').field('phone1', '0912345678')
-        .attach('photo', PNG, { filename: 'a.png', contentType: 'image/png' }).expect(400);
+    it('PK-A02 / A03: bad CCCD / phone / fake image -> 400', async () => {
+      // U5: photo + CCCD are optional now (covered in parent-ux-u spec); only bad values are rejected
       await as('ph1').multipart(`/children/${s.kids[0].id}/authorized-pickers`).field('fullName', 'A').field('relation', 'Cô').field('idNumber', '07912345678a').field('phone1', '0912345678')
         .attach('photo', PNG, { filename: 'a.png', contentType: 'image/png' }).expect(400);
       await as('ph1').multipart(`/children/${s.kids[0].id}/authorized-pickers`).field('fullName', 'A').field('relation', 'Cô').field('idNumber', '079123456780').field('phone1', '12345')

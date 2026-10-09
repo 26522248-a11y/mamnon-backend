@@ -375,3 +375,9 @@ Mọi thao tác ghi đều vào nhật ký (`finance.expense.create`, `finance.e
 
 ## Triển khai
 Vercel (web) + Render (API, `render.yaml`) + Neon (Postgres): xem [DEPLOY.md](DEPLOY.md). VPS/Docker: `deploy/`.
+
+### U5 – người đón hộ chỉ cần tên + SĐT
+- `POST /children/:id/authorized-pickers` (multipart): bắt buộc `fullName`, `phone1`; **không bắt buộc** `relation`, `idNumber` (12 số; `""` = trống), `phone2`, `photo`. Thiếu ảnh → `photoUrl: null`; `GET /authorized-pickers/:id/photo` → 404 khi chưa có ảnh.
+- Lần giao bé đầu tiên: ảnh cô chụp ở `POST /attendance/:id/pickup` (field `photo`) thành ảnh của người đón hộ nếu họ chưa có ảnh.
+- `GET /children/:id/pickup-people`: mỗi guardian có thêm `isMe` (trang Tài khoản phụ huynh, U7).
+- Migration `PickerOptionalFields` (bỏ NOT NULL `relation`, `photo_url`, `id_number` của `authorized_pickers`).

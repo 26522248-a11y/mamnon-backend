@@ -81,4 +81,34 @@ describe('parent UX U1/U4 (e2e)', () => {
     expect(d.map((x: any) => x.channel)).toEqual(expect.arrayContaining(['sms', 'zalo']));
     process.env.NOTIFY_CHANNELS = prev;
   });
+
+  it('U5: picker with only name + phone → 201 (no relation/photo/ID); teacher\'s first-pickup photo becomes the picker photo', async () => {
+    tok.admin = (await request(http).post('/api/v1/auth/login').send({ username: 'admin', password: '123456' })).body.accessToken;
+    const kid = ids.kids[0];
+    const r = await request(http).post(`/api/v1/children/${kid.id}/authorized-pickers`).set('Authorization', `Bearer ${tok.ph1}`)
+      .field('fullName', 'Lê Thị Năm').field('phone1', '0905111222').expect(201);
+    expect(r.body).toMatchObject({ fullName: 'Lê Thị Năm', phone1: '0905111222', relation: null, photoUrl: null, idNumberMasked: null, status: 'pending' });
+    // empty optional fields are treated as blank; still validated when present
+    await request(http).post(`/api/v1/children/${kid.id}/authorized-pickers`).set('Authorization', `Bearer ${tok.ph1}`)
+      .field('fullName', 'Ông Sáu').field('phone1', '0905111333').field('relation', '').field('idNumber', '').expect(201);
+    await request(http).post(`/api/v1/children/${kid.id}/authorized-pickers`).set('Authorization', `Bearer ${tok.ph1}`)
+      .field('fullName', 'X').field('phone1', '0905111444').field('idNumber', '123').expect(400);
+    await request(http).post(`/api/v1/children/${kid.id}/authorized-pickers`).set('Authorization', `Bearer ${tok.ph1}`).field('fullName', 'Y').expect(400);
+    await request(http).get(`/api/v1/authorized-pickers/${r.body.id}/photo`).set('Authorization', `Bearer ${tok.ph1}`).expect(404);
+    await request(http).post(`/api/v1/authorized-pickers/${r.body.id}/approve`).set('Authorization', `Bearer ${tok.admin}`).send({}).expect((x) => expect([200, 201]).toContain(x.status));
+    const att = (await ds.query(`SELECT id FROM attendance WHERE child_id = $1 AND date = $2`, [kid.id, todayStr()]))[0].id;
+    await ds.query(`DELETE FROM pickups WHERE attendance_id = $1`, [att]);
+    const card = (await request(http).get(`/api/v1/attendance/${att}/pickup-options`).set('Authorization', `Bearer ${tok.gv1}`)).body;
+    const opt = card?.authorizedPickers?.find((p: any) => p.id === r.body.id);
+    if (opt) expect(opt).toMatchObject({ photoUrl: null, relation: null });
+    const img = await sharp({ create: { width: 320, height: 320, channels: 3, background: '#88cc88' } }).jpeg().toBuffer();
+    await request(http).post(`/api/v1/attendance/${att}/pickup`).set('Authorization', `Bearer ${tok.gv1}`).field('authorizedPickerId', r.body.id).attach('photo', img, 'p.jpg').expect(201);
+    const people = (await request(http).get(`/api/v1/children/${kid.id}/pickup-people`).set('Authorization', `Bearer ${tok.ph1}`).expect(200)).body;
+    expect(people.guardians.filter((g: any) => g.isMe)).toHaveLength(1); // U7 account page: own name/relation/phone
+    const after = people.authorizedPickers.find((p: any) => p.id === r.body.id);
+    expect(after.photoUrl).toBe(`/api/v1/authorized-pickers/${r.body.id}/photo`);
+    expect((await request(http).get(after.photoUrl).set('Authorization', `Bearer ${tok.ph1}`).expect(200)).headers['content-type']).toMatch(/image\/jpeg/);
+    const n = (await request(http).get('/api/v1/notifications').set('Authorization', `Bearer ${tok.ph1}`).expect(200)).body.items.find((x: any) => x.type === 'picked_up' && x.data?.authorizedPickerId === undefined && x.data?.pickedUpByName === 'Lê Thị Năm');
+    expect(n.body).toMatch(/^Lê Thị Năm đón lúc/);
+  });
 });
