@@ -9,7 +9,8 @@ import { AuthUser, CurrentUser, Roles } from '../common/auth';
 import { AppError, BadRequest, Forbidden, NotFound } from '../common/errors';
 import { imageUploadOptions, removeImage, saveImage, sendImage } from '../common/upload';
 import { AuthorizedPicker, AuthorizedPickerHistory, Child, ChildContactHistory, Guardian, User } from '../database/entities';
-import { parsePhone } from '../imports/children-import';
+import { cleanName, parsePhone, personKey } from '../imports/children-import';
+import { audit } from '../common/audit';
 import { NotificationsService } from '../notifications/notifications.service';
 import { ID_NUMBER_RE, maskId, PickupSafetyService } from './pickup-safety.service';
 
@@ -116,8 +117,11 @@ export class AuthorizedPickersController {
     const phone2 = dto.phone2?.trim() ? phoneOr400(dto.phone2, 'phone2') : null;
     if (phone2 === phone1) throw BadRequest('SĐT 2 trùng SĐT 1', 'VALIDATION_ERROR');
     if (await this.repo().exist({ where: { childId: id, idNumber: dto.idNumber, deletedAt: IsNull() } })) throw new AppError(409, 'DUPLICATE_PICKER', 'Người này (cùng CCCD) đã có trong danh sách của bé');
+    // same rule as the Excel import: same person = same phone + same name (NFC, case/whitespace-insensitive, diacritics kept)
+    const samePhone = await this.repo().find({ where: { childId: id, phone1: phone1, deletedAt: IsNull() } });
+    if (samePhone.some((x) => personKey(x.fullName) === personKey(dto.fullName))) throw new AppError(409, 'DUPLICATE_PICKER', 'Người này (cùng tên + SĐT) đã có trong danh sách của bé');
     const photo = await saveImage(file); // magic bytes: JPG/PNG/HEIC (-> JPEG), else 400
-    const p = await this.repo().save(this.repo().create({ childId: id, fullName: dto.fullName.trim(), relation: dto.relation.trim(), idNumber: dto.idNumber, phone1, phone2,
+    const p = await this.repo().save(this.repo().create({ childId: id, fullName: cleanName(dto.fullName), relation: cleanName(dto.relation), idNumber: dto.idNumber, phone1, phone2,
       photoUrl: photo, status: 'pending', createdBy: u.id }));
     await this.history(p.id, 'create', snap(p), u.id);
     const admins = await this.ds.getRepository(User).find({ where: { role: 'admin', isActive: true }, select: { id: true } });
@@ -134,14 +138,14 @@ export class AuthorizedPickersController {
     await this.assertWrite(u, p.childId);
     const before = snap(p);
     const patch: Partial<AuthorizedPicker> = {};
-    if (dto.fullName !== undefined) patch.fullName = dto.fullName.trim();
-    if (dto.relation !== undefined) patch.relation = dto.relation.trim();
+    if (dto.fullName !== undefined) patch.fullName = cleanName(dto.fullName);
+    if (dto.relation !== undefined) patch.relation = cleanName(dto.relation);
     if (dto.idNumber !== undefined) patch.idNumber = dto.idNumber;
     if (dto.phone1 !== undefined) patch.phone1 = phoneOr400(dto.phone1, 'phone1');
     if (dto.phone2 !== undefined) patch.phone2 = dto.phone2.trim() ? phoneOr400(dto.phone2, 'phone2') : null;
     let oldPhoto: string | null = null;
     if (file) { oldPhoto = p.photoUrl; patch.photoUrl = await saveImage(file); }
-    const identity = (patch.fullName !== undefined && patch.fullName !== p.fullName) || (patch.idNumber !== undefined && patch.idNumber !== p.idNumber) || !!file;
+    const identity = (patch.fullName !== undefined && personKey(patch.fullName) !== personKey(p.fullName)) || (patch.idNumber !== undefined && patch.idNumber !== p.idNumber) || !!file;
     if (identity && u.role !== 'admin') Object.assign(patch, { status: 'pending', decidedBy: null, decidedAt: null, decisionNote: null });
     if (!Object.keys(patch).length) throw BadRequest('Không có gì thay đổi', 'NOTHING_TO_UPDATE');
     await this.repo().update(id, patch);
@@ -157,6 +161,7 @@ export class AuthorizedPickersController {
     await this.assertWrite(u, p.childId);
     await this.repo().update(id, { deletedAt: new Date(), deletedBy: u.id });
     await this.history(id, 'delete', snap(p), u.id);
+    audit('authorized_picker.delete', u, { pickerId: id, childId: p.childId, fullName: p.fullName, idNumber: maskId(p.idNumber) });
   }
 
   @Get('authorized-pickers/:id/history') @Roles('admin', 'teacher', 'parent')
@@ -187,6 +192,7 @@ export class AuthorizedPickersController {
     if (p.status !== 'pending') throw new AppError(409, 'ALREADY_DECIDED', 'Người đón hộ này đã được duyệt/từ chối');
     await this.repo().update(id, { status, decidedBy: u.id, decidedAt: new Date(), decisionNote: note?.trim() || null });
     await this.history(id, status === 'approved' ? 'approve' : 'reject', { note: note?.trim() || null }, u.id);
+    audit(`authorized_picker.${status === 'approved' ? 'approve' : 'reject'}`, u, { pickerId: id, childId: p.childId, fullName: p.fullName, idNumber: maskId(p.idNumber), note: note?.trim() || null });
     const parents = await this.notify.parentIdsOfChildren([p.childId]);
     await this.notify.send(parents, { type: 'picker_decision', refId: id, title: `Người đón hộ ${p.fullName} ${status === 'approved' ? 'đã được duyệt' : 'bị từ chối'}`,
       body: status === 'approved' ? `${p.fullName} (${p.relation}) có thể đón bé ${p.child.fullName}.` : `Lý do: ${note}`, data: { authorizedPickerId: id, childId: p.childId, status } });
@@ -251,6 +257,7 @@ export class ContactPhonesController {
       await m.getRepository(Child).update(id, { contactPhone1: phone1, contactPhone2: phone2, contactPhonesUpdatedBy: u.id, contactPhonesUpdatedAt: new Date() });
       await m.getRepository(ChildContactHistory).insert({ childId: id, before, after: { phone1, phone2 }, changedBy: u.id });
     });
+    audit('child.contact_phones', u, { childId: id, before, after: { phone1, phone2 } });
     if (u.role === 'parent') {
       const admins = await this.ds.getRepository(User).find({ where: { role: 'admin', isActive: true }, select: { id: true } });
       await this.notify.send(admins.map((a) => a.id), { type: 'contact_change', refId: id, title: `PH đổi số liên hệ đón bé ${c.fullName}`,

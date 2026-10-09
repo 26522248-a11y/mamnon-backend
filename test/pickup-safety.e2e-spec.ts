@@ -3,6 +3,7 @@ process.env.JWT_ACCESS_SECRET = 'test-access';
 process.env.JWT_REFRESH_SECRET = 'test-refresh';
 process.env.UPLOAD_DIR = require('path').join(require('os').tmpdir(), 'mamnon-test-uploads');
 process.env.NOTIFY_CHANNELS = 'inapp,webpush,sms,zalo';
+process.env.AUDIT_LOG_DIR = require('path').join(require('os').tmpdir(), 'mamnon-test-audit');
 process.env.PUBLIC_API_BASE = 'https://api.test';
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const vapid = require('web-push').generateVAPIDKeys();
@@ -514,6 +515,34 @@ describe('An toàn đón trẻ – đợt 1 (e2e, tester cases PK-*)', () => {
       expect(opts.requests.find((x: any) => x.id === target.id)).toMatchObject({ canHandOver: false, blockers: ['YOU_APPROVED'] });
       expect((await handover('gv1', 4, { pickupRequestId: target.id }, 403)).body.code).toBe('APPROVER_CANNOT_HAND_OVER');
       expect((await handover('admin', 4, { pickupRequestId: target.id }, 201)).body.handedOverBy).toBe(s.users.admin.id);
+    });
+  });
+
+  describe('hotfix/import integration', () => {
+    it('same person = same phone + same name (NFC / case / spaces) -> 409; names stored NFC', async () => {
+      const nfd = 'Phạm  Thị   Hằng'.normalize('NFD');
+      const a = await as('ph1').multipart(`/children/${s.kids[0].id}/authorized-pickers`).field('fullName', nfd).field('relation', 'Dì').field('idNumber', '079000000881').field('phone1', '0911000881')
+        .attach('photo', PNG, { filename: 'a.png', contentType: 'image/png' }).expect(201);
+      expect(a.body.fullName).toBe('Phạm Thị Hằng'.normalize('NFC'));
+      expect((await as('ph1').multipart(`/children/${s.kids[0].id}/authorized-pickers`).field('fullName', 'phạm thị hằng').field('relation', 'Dì').field('idNumber', '079000000882').field('phone1', '0911000881')
+        .attach('photo', PNG, { filename: 'a.png', contentType: 'image/png' }).expect(409)).body.code).toBe('DUPLICATE_PICKER');
+      // diacritics differ -> a different person
+      await as('ph1').multipart(`/children/${s.kids[0].id}/authorized-pickers`).field('fullName', 'Pham Thi Hang').field('relation', 'Dì').field('idNumber', '079000000883').field('phone1', '0911000881')
+        .attach('photo', PNG, { filename: 'a.png', contentType: 'image/png' }).expect(201);
+    });
+
+    it('deleting a guardian keeps past pickups (guardian_id -> NULL, name kept) and drops it from the call list', async () => {
+      const k = c1Kids[9];
+      const gs = (await as('admin').get(`/children/${k.id}/guardians`).expect(200)).body;
+      const mom = gs.find((g: any) => g.relation === 'Mẹ');
+      const p = (await handover('gv1', 9, { guardianId: mom.id }, 201)).body;
+      await as('admin').del(`/children/${k.id}/guardians/${mom.id}`, { reason: 'Nhập nhầm' }).expect(200);
+      const [row] = await ds.query('SELECT guardian_id, picked_up_by_name, picker_kind FROM pickups WHERE id = $1', [p.id]);
+      expect(row).toEqual({ guardian_id: null, picked_up_by_name: mom.fullName, picker_kind: 'guardian' });
+      const day = (await as('gv1').get(`/classes/${s.classes.c1.id}/attendance?date=${todayStr()}`).expect(200)).body;
+      expect(day.items.find((x: any) => x.childId === k.id).pickup).toMatchObject({ pickedUpByName: mom.fullName });
+      const opts = (await as('gv1').get(`/attendance/${await attId(9)}/pickup-options`).expect(200)).body;
+      expect(opts.guardians.map((g: any) => g.id)).not.toContain(mom.id);
     });
   });
 });

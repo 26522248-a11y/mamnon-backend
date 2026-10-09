@@ -40,6 +40,8 @@ const headerKey = (s: string) => norm(s).replace(/^phu huynh ?(\d)/, 'ph$1').rep
 const HEADER_MAP = new Map<string, Field>(COLUMNS.map((c) => [headerKey(c.header), c.field]));
 /** Person-name key for "same person?" checks: case- and whitespace-insensitive, diacritics KEPT ("nguyễn  thị hà" == "Nguyễn Thị Hà", but "Hà" != "Ha"). */
 export const personKey = (s: string) => s.normalize('NFC').trim().replace(/\s+/g, ' ').toLocaleLowerCase('vi');
+/** Display form of a person name: NFC, trimmed, single spaces (diacritics and case kept). */
+export const cleanName = (s: string) => s.normalize('NFC').trim().replace(/\s+/g, ' ');
 /** Normalised person / class name for matching ("  nguyễn  Gia An" == "Nguyễn Gia An"). */
 export const nameKey = (s: string) => s.normalize('NFC').trim().replace(/\s+/g, ' ').toLocaleLowerCase('vi');
 
