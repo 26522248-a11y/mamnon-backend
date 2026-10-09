@@ -22,3 +22,11 @@ export function overdueCutoff(now = new Date()): string {
   const minutes = vn.getUTCHours() * 60 + vn.getUTCMinutes();
   return minutes >= 1 ? today : addDays(today, -1);
 }
+
+const VI_WEEKDAY = ['Chủ Nhật', 'Thứ Hai', 'Thứ Ba', 'Thứ Tư', 'Thứ Năm', 'Thứ Sáu', 'Thứ Bảy'];
+/** P14: YYYY-MM-DD (school-local calendar date) → "Thứ Bảy 10/10" for user-facing notification text. */
+export function viDayLabel(d: string): string {
+  if (!isDateStr(d)) return d;
+  const wd = new Date(Date.parse(d + 'T00:00:00Z')).getUTCDay();
+  return `${VI_WEEKDAY[wd]} ${d.slice(8, 10)}/${d.slice(5, 7)}`;
+}

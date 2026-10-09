@@ -1,7 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { DataSource, EntityManager, In, IsNull } from 'typeorm';
 import { AuthUser } from '../common/auth';
-import { addDays, todayStr } from '../common/dates';
+import { addDays, todayStr, viDayLabel } from '../common/dates';
 import { AppError } from '../common/errors';
 import { beforeAbsenceCutoff, kitchenNotifyRoles } from '../common/school';
 import { Absence, AbsenceDay, AbsenceEvent, Attendance, AttendanceHistory, Holiday, User } from '../database/entities';
@@ -139,7 +139,7 @@ export class AbsencesService {
   }
   async notifyOverride(childId: string, childName: string, className: string | null, date: string, absenceId: string, teacherName: string) {
     const msg = {
-      title: `${childName}${className ? ` (${className})` : ''} có mặt ngày ${date} dù đã báo vắng`,
+      title: `${childName}${className ? ` (${className})` : ''} có mặt ${viDayLabel(date)} dù đã báo vắng`,
       body: `${teacherName} điểm danh có mặt – không hoàn tiền ăn ngày này, bếp tính thêm 1 suất.`,
       data: { childId, date, absenceId }, refId: absenceId,
     };
