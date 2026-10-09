@@ -2,13 +2,13 @@ import * as bcrypt from 'bcryptjs';
 import { DataSource } from 'typeorm';
 import { addDays, todayStr } from '../common/dates';
 import dataSource from './data-source';
-import { Attendance, Child, ClassRoom, ClassTeacher, Guardian, User } from './entities';
+import { Attendance, AttendanceHistory, Child, ClassRoom, ClassTeacher, Guardian, User } from './entities';
 
 export const SEED_PASSWORD = '123456';
 
 /** Wipes all app tables and inserts deterministic sample data. Returns handy ids (used by e2e tests). */
 export async function seed(ds: DataSource) {
-  await ds.query('TRUNCATE pickups, attendance, guardians, children, class_teachers, classes, users RESTART IDENTITY CASCADE');
+  await ds.query('TRUNCATE pickup_requests, attendance_history, pickups, attendance, guardians, children, class_teachers, classes, users RESTART IDENTITY CASCADE');
   const hash = await bcrypt.hash(SEED_PASSWORD, 10);
   const mk = (username: string, name: string, role: User['role'], phone: string | null = null) =>
     ds.getRepository(User).save({ username, name, role, phone, passwordHash: hash });
@@ -57,9 +57,12 @@ export async function seed(ds: DataSource) {
 
   // attendance for yesterday in every class
   const y = addDays(todayStr(), -1);
-  await ds.getRepository(Attendance).save(kids.map((k, i) => ({
+  const attRows = await ds.getRepository(Attendance).save(kids.map((k, i) => ({
     childId: k.id, classId: k.classId!, date: y, status: (i % 9 === 0 ? 'absent' : i % 5 === 0 ? 'late' : 'present') as any,
     note: i % 9 === 0 ? 'Phụ huynh xin nghỉ' : null, recordedBy: admin.id,
+  })));
+  await ds.getRepository(AttendanceHistory).save(attRows.map((a) => ({
+    attendanceId: a.id, action: 'create' as const, oldStatus: null, oldNote: null, newStatus: a.status, newNote: a.note, changedBy: admin.id,
   })));
 
   return { users: { admin, gv1, gv2, gv3, ketoan, ph1, ph2 }, classes: { c1, c2, c3 }, kids };

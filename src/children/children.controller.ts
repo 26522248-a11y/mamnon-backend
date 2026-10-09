@@ -53,6 +53,12 @@ export class CreateGuardianDto {
   @ApiPropertyOptional({ type: ParentAccountDto, description: 'Tạo mới tài khoản phụ huynh (nhà trường cấp)' })
   @IsOptional() @ValidateNested() @Type(() => ParentAccountDto) account?: ParentAccountDto;
 }
+export class AttendanceSummaryQuery {
+  @ApiProperty({ example: '2026-10', description: 'Tháng YYYY-MM' }) @Matches(/^\d{4}-(0[1-9]|1[0-2])$/) month!: string;
+  @ApiPropertyOptional() @IsOptional() @IsUUID() classId?: string;
+  @ApiPropertyOptional({ default: 1 }) @IsOptional() @Type(() => Number) @IsInt() @Min(1) page?: number;
+  @ApiPropertyOptional({ default: 50, maximum: 300 }) @IsOptional() @Type(() => Number) @IsInt() @Min(1) @Max(300) limit?: number;
+}
 export class ChildAttendanceQuery {
   @ApiPropertyOptional({ description: 'YYYY-MM-DD, mặc định 30 ngày trước' }) @IsOptional() @IsDateString() from?: string;
   @ApiPropertyOptional({ description: 'YYYY-MM-DD, mặc định hôm nay' }) @IsOptional() @IsDateString() to?: string;
@@ -94,6 +100,41 @@ export class ChildrenController {
     qb.orderBy('cl.name', 'ASC', 'NULLS LAST').addOrderBy('c.fullName', 'ASC').skip((page - 1) * limit).take(limit);
     const [rows, total] = await qb.getManyAndCount();
     return { items: rows.map((c) => this.view(u, c)), page, limit, total };
+  }
+
+  /**
+   * Monthly day counts per child (no daily detail). Accountant uses this for meal-fee calculation.
+   * Scope: admin/accountant all, teacher own classes, parent own children.
+   */
+  @Get('attendance-summary')
+  async attendanceSummary(@CurrentUser() u: AuthUser, @Query() q: AttendanceSummaryQuery) {
+    const page = q.page ?? 1, limit = q.limit ?? 50;
+    const from = `${q.month}-01`;
+    const [y, m] = q.month.split('-').map(Number);
+    const to = new Date(Date.UTC(y, m, 0)).toISOString().slice(0, 10);
+    const qb = this.children.createQueryBuilder('c').leftJoinAndSelect('c.classRoom', 'cl').where("c.status = 'active'");
+    if (u.role === 'teacher') qb.andWhere('c.class_id = ANY(:cids)', { cids: u.classIds });
+    if (u.role === 'parent') qb.andWhere('c.id = ANY(:kids)', { kids: u.childIds });
+    if (q.classId) qb.andWhere('c.class_id = :classId', { classId: q.classId });
+    qb.orderBy('cl.name', 'ASC', 'NULLS LAST').addOrderBy('c.fullName', 'ASC').skip((page - 1) * limit).take(limit);
+    const [kids, total] = await qb.getManyAndCount();
+    const counts: { child_id: string; present: string; late: string; absent: string }[] = kids.length
+      ? await this.attendance.createQueryBuilder('a').select('a.child_id', 'child_id')
+          .addSelect("COUNT(*) FILTER (WHERE a.status = 'present')", 'present')
+          .addSelect("COUNT(*) FILTER (WHERE a.status = 'late')", 'late')
+          .addSelect("COUNT(*) FILTER (WHERE a.status = 'absent')", 'absent')
+          .where('a.child_id IN (:...ids)', { ids: kids.map((k) => k.id) }).andWhere('a.date BETWEEN :from AND :to', { from, to })
+          .groupBy('a.child_id').getRawMany()
+      : [];
+    return {
+      month: q.month, from, to, page, limit, total,
+      items: kids.map((k) => {
+        const c = counts.find((x) => x.child_id === k.id);
+        const present = Number(c?.present ?? 0), late = Number(c?.late ?? 0), absent = Number(c?.absent ?? 0);
+        return { childId: k.id, fullName: k.fullName, classId: k.classId, className: k.classRoom?.name ?? null,
+          attendedDays: present + late, presentDays: present, lateDays: late, absentDays: absent, recordedDays: present + late + absent };
+      }),
+    };
   }
 
   @Get(':id')
