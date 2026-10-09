@@ -84,9 +84,46 @@ export class S3Storage implements FileStorage {
   publicUrl(key: string) { return this.publicBase ? `${this.publicBase.replace(/\/+$/, '')}/${safeKey(key)}` : null; }
 }
 
+/**
+ * B31: small in-process LRU for hot objects in front of a remote bucket (B2 free tier: 2,500 GetObject + 1 GB/day).
+ * Bounded by total bytes (default 48 MB, STORAGE_CACHE_MB; 0 = off) and per-object size (2 MB) – fits Render Free 512 MB.
+ * Writes/deletes through this process keep it coherent; keys written by the app are per-upload UUIDs anyway.
+ */
+export class CachedStorage implements FileStorage {
+  readonly driver: FileStorage['driver'];
+  private map = new Map<string, Buffer>();
+  private bytes = 0;
+  stats = { hits: 0, misses: 0 };
+  constructor(private inner: FileStorage, private maxBytes = 48 * 1024 * 1024, private maxItem = 2 * 1024 * 1024) { this.driver = inner.driver; }
+  get size() { return { items: this.map.size, bytes: this.bytes }; }
+  private drop(key: string) { const b = this.map.get(key); if (b) { this.bytes -= b.length; this.map.delete(key); } }
+  private add(key: string, b: Buffer) {
+    this.drop(key);
+    if (b.length > this.maxItem || b.length > this.maxBytes) return;
+    this.map.set(key, b); this.bytes += b.length;
+    for (const k of this.map.keys()) { if (this.bytes <= this.maxBytes) break; this.drop(k); } // oldest first
+  }
+  async get(key: string) {
+    const hit = this.map.get(key);
+    if (hit) { this.map.delete(key); this.map.set(key, hit); this.stats.hits++; return hit; }
+    this.stats.misses++;
+    const b = await this.inner.get(key);
+    if (b) this.add(key, b);
+    return b;
+  }
+  async put(key: string, data: Buffer, contentType: string) { this.drop(key); await this.inner.put(key, data, contentType); this.add(key, data); }
+  async remove(key: string) { this.drop(key); await this.inner.remove(key); }
+  list(prefix: string) { return this.inner.list(prefix); }
+  publicUrl(key: string) { return this.inner.publicUrl(key); }
+}
+
 let current: FileStorage | null = null;
 export function storage(): FileStorage {
-  return (current ??= (process.env.STORAGE_DRIVER || 'local').toLowerCase() === 's3' ? S3Storage.fromEnv() : new LocalStorage());
+  if (current) return current;
+  if ((process.env.STORAGE_DRIVER || 'local').toLowerCase() !== 's3') return (current = new LocalStorage());
+  const mb = Number(process.env.STORAGE_CACHE_MB ?? 48);
+  const s3 = S3Storage.fromEnv();
+  return (current = mb > 0 ? new CachedStorage(s3, mb * 1024 * 1024) : s3);
 }
 /** tests */
 export function setStorage(s: FileStorage | null) { current = s; }

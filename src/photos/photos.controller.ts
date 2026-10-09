@@ -12,7 +12,7 @@ import { recordAudit } from '../common/audit';
 import { AuthUser, CurrentUser, Roles } from '../common/auth';
 import { AppError, BadRequest, Forbidden, NotFound } from '../common/errors';
 import { storage } from '../common/storage';
-import { decodeOriginalName, detectImage, heifToJpeg } from '../common/upload';
+import { decodeOriginalName, detectImage, heifToJpeg, sendKey } from '../common/upload';
 import { NotificationsService } from '../notifications/notifications.service';
 
 const MAX_FILES = 20, MAX_BYTES = 15 * 1024 * 1024;
@@ -218,11 +218,9 @@ export class PhotosController {
     if (u.role === 'parent' && p.hidden) throw NotFound('Không tìm thấy ảnh');
     const download = !!q.download;
     if (download && u.role === 'parent' && !(p.child_ids ?? []).some((c: string) => u.childIds.includes(c))) throw Forbidden('Chỉ tải được ảnh có con mình');
-    const buf = await storage().get(q.size === 'full' || download ? p.full_key : p.thumb_key);
-    if (!buf) throw NotFound('Không tìm thấy tệp ảnh');
-    res.setHeader('Content-Type', 'image/jpeg'); res.setHeader('Cache-Control', 'private, no-store'); res.setHeader('X-Content-Type-Options', 'nosniff');
-    if (download) res.setHeader('Content-Disposition', `attachment; filename="anh-lop-${id.slice(0, 8)}.jpg"`);
-    res.end(buf);
+    // B31: keys are per-upload UUIDs → immutable + ETag (304 without a storage read); checks above always run first
+    await sendKey(res, q.size === 'full' || download ? p.full_key : p.thumb_key, { mode: 'immutable', notFound: 'Không tìm thấy tệp ảnh', contentType: 'image/jpeg',
+      extra: download ? { 'Content-Disposition': `attachment; filename="anh-lop-${id.slice(0, 8)}.jpg"` } : {} });
   }
 
   @Put('photos/:id/tags') @Roles('teacher', 'admin')

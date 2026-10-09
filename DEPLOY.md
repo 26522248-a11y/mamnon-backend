@@ -132,6 +132,7 @@ Mọi file tải lên đi qua cùng một lớp lưu trữ (`src/common/storage.
 | `S3_SECRET` | Secret Access Key của token |
 | `S3_REGION` | `auto` |
 | `S3_PUBLIC_BASE` | để trống (ảnh trẻ không bao giờ public) |
+| `STORAGE_CACHE_MB` | tuỳ chọn, mặc định `48` – bộ nhớ đệm ảnh trong API (giảm lượt đọc bucket, vd giới hạn Backblaze B2 miễn phí 2.500 lượt/ngày); `0` = tắt |
 
 Thiếu một trong `S3_ENDPOINT/S3_BUCKET/S3_ACCESS_KEY/S3_SECRET` thì API báo lỗi ngay khi lưu/đọc file đầu tiên (`STORAGE_DRIVER=s3 needs …`).
 

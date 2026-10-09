@@ -40,7 +40,7 @@ describe('B27 uploads on S3/R2 (mocked client)', () => {
     post: (url: string, body?: any) => request(http).post('/api/v1' + url).set('Authorization', `Bearer ${tok[who]}`).send(body),
     upload: (url: string) => request(http).post('/api/v1' + url).set('Authorization', `Bearer ${tok[who]}`),
   });
-  const PNG = Buffer.from('89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4890000000d49444154789c6360000002000154a24f5d0000000049454e44ae426082', 'hex');
+  const PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==', 'base64'); // valid 1×1 PNG (B31 re-encodes uploads, so fixtures must decode)
 
   beforeAll(async () => {
     setStorage(new S3Storage('mamnon-uploads', fake));
@@ -77,8 +77,8 @@ describe('B27 uploads on S3/R2 (mocked client)', () => {
     expect(objects.get(key)).toMatchObject({ type: 'image/jpeg' });
     const ph = await as('ph1').get(`/attendance/${att}/pickup-photo`).expect(200);
     expect(ph.headers['content-type']).toMatch(/image\/jpeg/);
-    expect(ph.headers['cache-control']).toBe('private, no-store');
-    expect(Buffer.compare(ph.body, img)).toBe(0);
+    expect(ph.headers['cache-control']).toBe('private, max-age=31536000, immutable'); // B31
+    expect(Buffer.compare(ph.body, objects.get(key)!.body)).toBe(0); // B31: stored bytes are the re-encoded JPEG
     await as('ph2').get(`/attendance/${att}/pickup-photo`).expect(404); // not their child
     // object gone (the B27 symptom) → clean 404, not 500
     objects.delete(key);
@@ -96,9 +96,9 @@ describe('B27 uploads on S3/R2 (mocked client)', () => {
     const e = (await as('ketoan').upload('/finance/entries').field('kind', 'out').field('date', todayStr()).field('title', 'B27 hoá đơn')
       .field('amount', '120000').field('categoryId', cat).attach('receipt', PNG, 'hoa-don.png').expect(201)).body;
     const k1 = (await ds.query(`SELECT receipt_key FROM finance_entries WHERE id = $1`, [e.id]))[0].receipt_key;
-    expect(objects.get(k1)).toMatchObject({ type: 'image/png' });
+    expect(objects.get(k1)).toMatchObject({ type: 'image/jpeg' }); // B31: image receipt re-encoded
     const r1 = await as('admin').get(`/finance/entries/${e.id}/receipt`).expect(200);
-    expect(r1.headers['content-type']).toBe('image/png');
+    expect(r1.headers['content-type']).toBe('image/jpeg'); // B31: image receipt re-encoded
     expect(r1.headers['content-disposition']).toBe(`inline; filename="hoa-don.png"; filename*=UTF-8''hoa-don.png`);
     const pdf = Buffer.from('%PDF-1.4\n%test\n');
     await as('ketoan').upload(`/finance/entries/${e.id}/receipt`).attach('receipt', pdf, 'dien.pdf').expect(200);

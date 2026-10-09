@@ -72,7 +72,7 @@ async function saveReceipt(file?: Express.Multer.File): Promise<{ key: string; n
     return { key, name };
   }
   if (!detectImage(file.buffer)) throw BadRequest('Hoá đơn phải là ảnh JPG/PNG/HEIC hoặc PDF', 'INVALID_FILE');
-  return { key: await saveImage(file), name };
+  return { key: await saveImage(file, 'document'), name }; // B31: image receipts resized to 2048px, PDFs untouched
 }
 
 @ApiTags('finance') @ApiBearerAuth()

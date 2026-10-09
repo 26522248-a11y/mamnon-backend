@@ -26,7 +26,7 @@ describe('Finance (e2e)', () => {
   const T = todayStr(), M = T.slice(0, 7);
   const [y, mo] = M.split('-').map(Number);
   const PM = mo === 1 ? `${y - 1}-12` : `${y}-${String(mo - 1).padStart(2, '0')}`;
-  const PNG = Buffer.from('89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4890000000d49444154789c6360000002000154a24f5d0000000049454e44ae426082', 'hex');
+  const PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==', 'base64'); // valid 1×1 PNG (B31 re-encodes uploads, so fixtures must decode)
   let cat: Record<string, string> = {};
   const feeSum = async (month: string) => Number((await ds.query(
     `SELECT COALESCE(SUM(amount),0)::bigint AS s FROM payments WHERE to_char(paid_at AT TIME ZONE 'Asia/Ho_Chi_Minh', 'YYYY-MM') = $1`, [month]))[0].s);
@@ -67,7 +67,7 @@ describe('Finance (e2e)', () => {
       .attach('receipt', PNG, 'hoa-don.png').expect(201)).body;
     expect(e).toMatchObject({ kind: 'out', status: 'approved', pending: false, amount: 6200000, hasReceipt: true, receiptName: 'hoa-don.png', category: { name: 'Tiền ăn' }, createdBy: { username: 'ketoan' } });
     const img = await as('admin').get(`/finance/entries/${e.id}/receipt`).expect(200);
-    expect(img.headers['content-type']).toMatch(/image\/png/);
+    expect(img.headers['content-type']).toMatch(/image\/jpeg/); // B31: image receipts stored as resized JPEG
     // attach a PDF to another entry
     const e2 = (await as('ketoan').post('/finance/entries', { date: T, title: 'Tiền điện T9', amount: 5100000, categoryId: cat['Điện nước'] }).expect(201)).body;
     expect(e2.hasReceipt).toBe(false);

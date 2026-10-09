@@ -183,7 +183,7 @@ export class ChildrenController {
   async photo(@CurrentUser() u: AuthUser, @Param('id', ParseUUIDPipe) id: string, @UploadedFile() file?: Express.Multer.File) {
     const c = await this.access.getChildOr404(id);
     if (!this.access.canOperateClass(u, c.classId)) throw Forbidden('Không có quyền với trẻ này');
-    const key = await saveImage(file); // 400 INVALID_FILE unless real JPEG/PNG/HEIC
+    const key = await saveImage(file, 'avatar'); // 400 INVALID_FILE unless real JPEG/PNG/HEIC
     await this.children.update(id, { photoUrl: key });
     await removeImage(c.photoUrl);
     return { photoUrl: `/api/v1/children/${id}/photo` };
@@ -193,7 +193,7 @@ export class ChildrenController {
   @Get(':id/photo')
   async getPhoto(@CurrentUser() u: AuthUser, @Param('id', ParseUUIDPipe) id: string, @Res() res: Response) {
     const c = await this.access.assertChildRead(u, id, true);
-    await sendImage(res, c.photoUrl);
+    await sendImage(res, c.photoUrl, 'revalidate'); // same URL after a new photo → revalidate (304 by ETag, no storage read)
   }
 
   @Get(':id/guardians')

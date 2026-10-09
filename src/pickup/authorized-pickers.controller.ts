@@ -214,7 +214,7 @@ export class AuthorizedPickersController {
     if (!p) throw NotFound('Không tìm thấy người đón hộ');
     await this.assertRead(u, p.childId);
     if (!p.photoUrl) throw NotFound('Chưa có ảnh người đón');
-    await sendImage(res, p.photoUrl);
+    await sendImage(res, p.photoUrl, 'revalidate'); // photo can be replaced (PATCH / first pick-up)
   }
 }
 
