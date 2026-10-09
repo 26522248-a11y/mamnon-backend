@@ -28,6 +28,7 @@ x-api-env: &api_env
   LOGIN_IP_MAX_FAILS: ${LOGIN_IP_MAX_FAILS:-30}
   LOGIN_LOCK_MINUTES: ${LOGIN_LOCK_MINUTES:-15}
   UPLOAD_DIR: /data/uploads
+  IMPORT_CREATE_CLASSES: ${IMPORT_CREATE_CLASSES:-false}
 
 services:
   db:

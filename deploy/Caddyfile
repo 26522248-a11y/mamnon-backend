@@ -18,7 +18,7 @@
 	# API (incl. Swagger at /api/docs). Photos are only served by the API with auth; there is no public /uploads.
 	handle /api/* {
 		request_body {
-			max_size 5MB
+			max_size 6MB
 		}
 		reverse_proxy api:3001
 	}

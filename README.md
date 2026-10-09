@@ -98,6 +98,8 @@ Dữ liệu mẫu:
 | POST | `/invoices/:id/payments` `{amount, method: cash\|transfer, paidAt?, payerName?, note?}` → dữ liệu phiếu thu | admin, kế toán |
 | GET | `/payments/:id/receipt` (số phiếu, số tiền bằng chữ, các dòng hoá đơn, `school`) | admin, kế toán; phụ huynh: con mình |
 | GET | `/invoices/:id/receipt` (phiếu thu mới nhất của hoá đơn; chưa có / hoá đơn 0đ → 404 `NO_RECEIPT`) | admin, kế toán; phụ huynh: con mình |
+| GET | `/imports/children/template` → file mẫu **.xlsx** (giống `deploy/templates/mau-nhap-hoc-sinh.xlsx`) | admin |
+| POST | `/imports/children?dryRun=true\|false&createClasses=true\|false` (multipart, trường `file` = .xlsx ≤ 5MB, ≤ 1000 dòng) – xem "Nhập học sinh từ Excel" | admin |
 | GET | `/settings/school` → `{name, address, phone}` từ env `SCHOOL_NAME/SCHOOL_ADDRESS/SCHOOL_PHONE` | **công khai** (trang đăng nhập, tiêu đề in) |
 | GET | `/children/:id/balance` | admin, kế toán; phụ huynh: con mình |
 | GET | `/debts?classId&upToPeriod&overdueOnly` (mỗi dòng có `childStatus`, `leaveDate`) | admin, kế toán |
@@ -236,6 +238,24 @@ docker compose ps           # migrate: exited (0); db, api, web, caddy, backup: 
   ```
 - **Cập nhật phiên bản:** `git pull` cả 2 repo → `docker compose up -d --build` (migrate tự chạy migration mới trước khi API khởi động).
 - Lưu ý: giới hạn đăng nhập lưu trong bộ nhớ → chạy 1 instance `api`. Nên chặn `/api/docs` ở môi trường thật nếu không cần (thêm `respond /api/docs* 404` trong Caddyfile).
+
+## Nhập học sinh từ Excel
+
+Mẫu: `deploy/templates/mau-nhap-hoc-sinh.xlsx` (tạo lại: `npm run import:template`; hoặc `GET /imports/children/template`). Sheet `Học sinh`, dòng 1 là tiêu đề (khớp theo tên cột, không phân biệt dấu/hoa thường), dữ liệu từ dòng 2; sheet `Hướng dẫn` giải thích từng cột.
+
+Cột: `Họ tên bé *`, `Ngày sinh *` (dd/mm/yyyy hoặc ô ngày), `Giới tính *` (Nam/Nữ), `Lớp *`, `Dị ứng`, `Ghi chú sức khỏe`, `Địa chỉ`, `Ngày nhập học` (mặc định hôm nay), `PH1 - Họ tên *`, `PH1 - Quan hệ` (mặc định "Phụ huynh"), `PH1 - SĐT *`, `PH1 - Được đón` (Có/Không, mặc định Có), `PH2 - …` (tuỳ chọn; có tên thì phải có SĐT).
+
+- **Kiểm tra file:** phải là .xlsx thật (chữ ký zip + đọc được), ≤ 5MB (413), ≤ 1000 dòng dữ liệu (400 `TOO_MANY_ROWS`), đúng mẫu (400 `TEMPLATE_MISMATCH`, `details.missingColumns`), có dữ liệu (400 `EMPTY_FILE`); file khác → 400 `INVALID_FILE`.
+- **`dryRun=true`** → 200 `{dryRun, createClasses, maxRows, sheet, totalRows, ok, summary, errors, warnings, preview}`; không ghi gì.
+  - `summary`: `validRows, errorRows, errorCount, childrenToCreate, duplicatesToSkip, classesToCreate[], parentAccountsToCreate, parentAccountsToLink, guardiansToCreate`.
+  - `errors[]`: `{row (số dòng Excel), column (tên cột), field, value?, message}` – lỗi định dạng, thiếu dữ liệu, ngày sai / tương lai / quá 8 tuổi, SĐT sai, PH2 trùng SĐT PH1, trùng bé trong file, lớp chưa có, SĐT đã là tên đăng nhập của nhân viên.
+  - `warnings[]`: `{row|null, message}` – bé đã có (bỏ qua), SĐT đã có tài khoản phụ huynh với tên khác, tài khoản bị khoá, SĐT trùng SĐT nhân viên, vượt sức chứa lớp.
+  - `preview[]` (chỉ các dòng hợp lệ): `{row, action: create|skip_duplicate, existingChildId?, child:{fullName, dob, gender, className, classAction: existing|create, allergies, healthNotes, address, enrolledAt}, guardians:[{slot, fullName, relation, phone, canPickup, username, account: create|existing|existing_inactive}]}`.
+- **Không có `dryRun`** → nhập trong **một transaction**, chỉ khi không có lỗi (có lỗi → 422 `IMPORT_INVALID`, `details` = báo cáo như dry run, không ghi gì). 200 `{ok, imported:{children, guardians, parentAccountsCreated, parentAccountsLinked, classesCreated[]}, skippedDuplicates[{row, fullName, existingChildId}], warnings, rows[{row, result: created|skipped_duplicate, childId, fullName, className, guardians[{fullName, phone, username, account}]}], resultFile:{fileName, mimeType, base64}}`.
+- **Trùng:** bé = cùng họ tên (bỏ khoảng trắng thừa, không phân biệt hoa thường) + ngày sinh → bỏ qua, không cập nhật. Phụ huynh = theo SĐT (chuẩn hoá `+84…`, dấu cách, ô số mất số 0): đã có tài khoản phụ huynh (tên đăng nhập hoặc SĐT) → gắn bé vào; chưa có → tạo tài khoản `username = SĐT`, `mustChangePassword = true`, mật khẩu tạm ngẫu nhiên 10 ký tự. Cùng SĐT ở nhiều dòng → một tài khoản.
+- **Mật khẩu tạm chỉ có trong `resultFile`** (xlsx base64: sheet "Tài khoản phụ huynh" + "Kết quả từng dòng"), không lưu, không trả lại lần nữa, không có trong JSON.
+- **Lớp chưa có:** `createClasses=true` → tự tạo (độ tuổi đoán theo tên: Nhà trẻ / Mầm / Chồi / Lá, năm học hiện tại); `false` → lỗi từng dòng. Mặc định theo env `IMPORT_CREATE_CLASSES` (mặc định `false`).
+- Thời gian: 1000 dòng × 2 phụ huynh mới ≈ 40 giây (băm mật khẩu làm trước transaction), dry run < 1 giây.
 
 ## Script dữ liệu một lần (đều có dry run, ghi log JSON vào `logs/`; nên `pg_dump` trước)
 

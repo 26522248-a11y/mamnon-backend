@@ -16,7 +16,8 @@
     "avatars": "ts-node --transpile-only src/database/placeholder-avatars.ts",
     "repair:withdrawal-credit": "ts-node --transpile-only src/database/repair-withdrawal-credit.ts",
     "bootstrap:admin": "ts-node --transpile-only src/database/bootstrap-admin.ts",
-    "cleanup:acceptance": "ts-node --transpile-only src/database/cleanup-acceptance.ts"
+    "cleanup:acceptance": "ts-node --transpile-only src/database/cleanup-acceptance.ts",
+    "import:template": "ts-node --transpile-only src/imports/write-template.ts"
   },
   "keywords": [],
   "author": "",

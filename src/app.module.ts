@@ -14,6 +14,7 @@ import { HealthController as HealthNutritionController } from './health/health.c
 import { LoginThrottleService } from './auth/login-throttle.service';
 import { NotificationsController } from './notifications/notifications.controller';
 import { NotificationsService } from './notifications/notifications.service';
+import { ImportsController } from './imports/imports.controller';
 import { ReportsController } from './reports/reports.controller';
 import { UsersController } from './users/users.controller';
 import { FeesController } from './fees/fees.controller';
@@ -43,7 +44,7 @@ class SettingsController {
     TypeOrmModule.forFeature(ENTITIES),
     JwtModule.register({}),
   ],
-  controllers: [HealthController, SettingsController, AuthController, ClassesController, ChildrenController, AttendanceController, DashboardController, FeesController, HealthNutritionController, NotificationsController, ReportsController, UsersController],
+  controllers: [HealthController, SettingsController, AuthController, ClassesController, ChildrenController, AttendanceController, DashboardController, FeesController, HealthNutritionController, NotificationsController, ReportsController, UsersController, ImportsController],
   providers: [
     AccessService, UserContextService, NotificationsService, LoginThrottleService,
     { provide: APP_GUARD, useClass: JwtAuthGuard },
