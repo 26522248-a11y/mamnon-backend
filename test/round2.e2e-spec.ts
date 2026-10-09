@@ -10,7 +10,7 @@ import { Test } from '@nestjs/testing';
 import request from 'supertest';
 import { DataSource } from 'typeorm';
 import { AppModule, configureApp } from '../src/app.module';
-import { addDays, todayStr } from '../src/common/dates';
+import { addDays, todayStr, viDayLabel } from '../src/common/dates';
 import { seed } from '../src/database/seed';
 import { refundEligibleFor } from '../src/absences/absences.service';
 import { parentReported } from './helpers/absence';
@@ -68,6 +68,12 @@ describe('round 2 batch 1: absences, cutoff, holidays (e2e)', () => {
     expect(refundEligibleFor('2026-10-11', day, at('06:00:00'))).toBe(false);
   });
 
+  it('P14: notification dates read "Thứ Bảy 10/10" (Vietnamese weekday + dd/MM)', () => {
+    expect(viDayLabel('2026-10-10')).toBe('Thứ Bảy 10/10');
+    expect(viDayLabel('2026-10-11')).toBe('Chủ Nhật 11/10');
+    expect(viDayLabel('2026-10-12')).toBe('Thứ Hai 12/10');
+    expect(viDayLabel('2026-01-05')).toBe('Thứ Hai 05/01');
+  });
   it('teacher-marked absence is never refundable (client notifiedInAdvance ignored)', async () => {
     const kid = s.kids[3].id, d = addDays(todayStr(), -1);
     await as('admin').put(`/classes/${s.classes.c1.id}/attendance`, { date: d, items: [{ childId: kid, status: 'present' }] }).expect(200);
@@ -141,6 +147,7 @@ describe('round 2 batch 1: absences, cutoff, holidays (e2e)', () => {
     expect(await att(kid, mon)).toBeUndefined();
     expect(await att(kid, fri)).toBeDefined();
     expect((await notes('gv1', 'absence_cancelled')).length).toBe(1);
+    expect((await notes('gv1', 'absence_cancelled'))[0].title).toMatch(new RegExp(` – ${viDayLabel(mon)}$`)); // P14
     // the freed day can be reported again
     const again = await as('ph1').post(`/children/${kid}/absences`, { from: mon, reason: 'family' }).expect(201);
     await as('ph1').del(`/absences/${again.body.id}`).expect(200);
@@ -152,6 +159,7 @@ describe('round 2 batch 1: absences, cutoff, holidays (e2e)', () => {
     expect(c2.body.cancelledAt).toBeTruthy();
     expect(c2.body.history.map((h: any) => h.action)).toEqual(['created', 'cancelled', 'cancelled']);
     expect(await att(kid, fri)).toBeUndefined();
+    expect((await notes('gv1', 'absence_cancelled')).map((n: any) => n.title)).toContainEqual(expect.stringMatching(new RegExp(` – ${viDayLabel(fri)}, ${viDayLabel(tue)}$`))); // P14: multi-date joined with ', '
     expect((await as('ph1').del(`/absences/${r.body.id}`).expect(409)).body.code).toBe('CANCEL_AFTER_CUTOFF');
   });
 
@@ -200,6 +208,8 @@ describe('round 2 batch 1: absences, cutoff, holidays (e2e)', () => {
     expect((await notes('admin', 'kitchen_change')).length).toBe(kitchenBefore + 1);
     expect((await notes('ketoan', 'kitchen_change')).length).toBe(kitchenBefore + 1);
     expect((await notes('ph1', 'absence_overridden')).length).toBe(1);
+    // P14: notification date is "Thứ Bảy 10/10", not ISO
+    expect((await notes('ph1', 'absence_overridden'))[0].title).toContain(`có mặt ${viDayLabel(today)} dù đã báo vắng`);
     const after = (await as('ph1').get(`/absences/${b.body.id}`).expect(200)).body;
     expect(after.days[0]).toMatchObject({ overridden: true, refundEligible: false });
     expect(after.history.map((h: any) => h.action)).toEqual(['created', 'overridden']);
@@ -230,6 +240,7 @@ describe('round 2 batch 1: absences, cutoff, holidays (e2e)', () => {
     expect((await as('ph1').get(`/children/${kid}/absences?from=${addDays(thu, 1)}&to=${addDays(thu, 5)}`).expect(200)).body.items.map((x: any) => x.id)).not.toContain(r.body.id);
     expect(await att(kid, wed)).toBeUndefined();
     expect((await notes('ph1', 'absence_cancelled')).length).toBeGreaterThanOrEqual(1);
+    expect((await notes('ph1', 'absence_cancelled')).map((n: any) => n.title)).toContain(`Trường nghỉ Ngày hội trường: báo vắng ${viDayLabel(wed)} không còn cần thiết`); // P14
     expect((await as('admin').post('/holidays', { date: wed, to: thu, name: 'x' }).expect(409)).body).toMatchObject({ code: 'HOLIDAY_EXISTS', details: { dates: [wed] } });
     // new reports skip the holiday
     await as('ph1').del(`/absences/${r.body.id}`).expect(200);
