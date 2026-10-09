@@ -30,10 +30,15 @@ describe('demo dataset load/purge', () => {
     const kid = (await ds.query(`SELECT c.id FROM children c JOIN demo_registry r ON r.table_name = 'children' AND r.row_id = c.id::text LIMIT 1`))[0].id;
     const inv = (await ds.query(`SELECT id FROM invoices WHERE child_id = $1 AND status <> 'paid' LIMIT 1`, [kid]))[0].id;
     await ds.query(`INSERT INTO payments (receipt_no, invoice_id, child_id, amount, method, paid_at) VALUES ('PT-TESTER-1', $1, $2, 1000, 'cash', now())`, [inv, kid]);
+    // demo parent login + sensitive-change audit row on a demo child (created after load, not registered)
+    const [pu] = await ds.query(`INSERT INTO users (username, name, role, password_hash) VALUES ('demo_ph_test', 'PH demo', 'parent', 'x') RETURNING id`);
+    await ds.query(`INSERT INTO guardians (child_id, full_name, relation, user_id, can_pickup) VALUES ($1, 'PH demo', 'Mẹ', $2, true)`, [kid, pu.id]);
+    await ds.query(`INSERT INTO audit_events (action, entity, entity_id, child_id, actor_id) VALUES ('child.photo_consent', 'child', $1, $1, NULL)`, [kid]).catch(() => undefined);
     const p = await demoPurge(ds);
     expect(p.left).toBe(0);
     expect(await counts()).toEqual(before);
     expect(await demoLoaded(ds)).toBe(0);
+    expect((await ds.query(`SELECT 1 FROM users WHERE username = 'demo_ph_test'`)).length).toBe(0);
     expect((await ds.query(`SELECT username FROM users WHERE username IN ('admin','gv1','ketoan','ph1')`)).length).toBe(4);
   });
 });

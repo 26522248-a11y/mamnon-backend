@@ -51,6 +51,12 @@ export async function demoPurge(ds: DataSource): Promise<{ deleted: Record<strin
   // rows testers added later on top of demo children/shifts (not registered) would block via ON DELETE RESTRICT → remove them too
   const demoIds = (t: string) => `(SELECT row_id::uuid FROM ${REG} WHERE table_name = '${t}')`;
   await ds.transaction(async (m) => {
+    // parent logins created later for demo children only (e.g. a demo parent for testers) → removed with them
+    await m.query(`INSERT INTO ${REG} (table_name, row_id) SELECT 'users', u.id::text FROM users u WHERE u.role = 'parent'
+      AND EXISTS (SELECT 1 FROM guardians g WHERE g.user_id = u.id AND g.child_id IN ${demoIds('children')})
+      AND NOT EXISTS (SELECT 1 FROM guardians g WHERE g.user_id = u.id AND g.child_id NOT IN ${demoIds('children')}) ON CONFLICT DO NOTHING`);
+    // sensitive-change history recorded on demo children (audit trail has no FK)
+    for (const t of ['audit_events', 'child_contact_history']) await m.query(`DELETE FROM "${t}" WHERE child_id IN ${demoIds('children')}`).catch(() => undefined);
     for (const t of ['credit_transactions', 'refund_payouts', 'payments', 'invoices']) await m.query(`DELETE FROM "${t}" WHERE child_id IN ${demoIds('children')}`).catch(() => undefined);
     for (const t of ['staff_substitutions', 'staff_shift_assignments']) await m.query(`DELETE FROM "${t}" WHERE shift_id IN ${demoIds('staff_shifts')}`);
   });
