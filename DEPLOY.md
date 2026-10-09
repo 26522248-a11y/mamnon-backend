@@ -38,8 +38,8 @@ Bạn cần 3 tài khoản (đăng nhập bằng GitHub là nhanh nhất): **neo
 | Biến | Giá trị |
 |---|---|
 | `DATABASE_URL` | chuỗi Neon ở Bước 1 |
-| `CORS_ORIGIN` | tên miền web, vd `https://mamnon.vercel.app` (nhiều tên cách nhau dấu phẩy; preview: thêm `https://mamnon-*-<team>.vercel.app`). Chưa biết thì tạm điền `https://mamnon.vercel.app`, sửa sau Bước 3 |
-| `PUBLIC_API_BASE` | cũng là tên miền web, vd `https://mamnon.vercel.app` |
+| `CORS_ORIGIN` | tên miền web, vd `https://mamnon-web.vercel.app` (nhiều tên cách nhau dấu phẩy; preview: thêm `https://mamnon-*-<team>.vercel.app`). Chưa biết thì tạm điền `https://mamnon-web.vercel.app`, sửa sau Bước 3 |
+| `PUBLIC_API_BASE` | cũng là tên miền web, vd `https://mamnon-web.vercel.app` |
 | `SCHOOL_NAME` | `Trường Mầm Non Như Ý` |
 | `SCHOOL_ADDRESS` | `Tổ 6 Ấp 12A, Xã Trảng Bom, TP Đồng Nai` |
 | `SCHOOL_PHONE` | `0367842613` |
@@ -72,7 +72,7 @@ Bạn cần 3 tài khoản (đăng nhập bằng GitHub là nhanh nhất): **neo
 | `API_INTERNAL_URL` | `https://mamnon-api.onrender.com` (URL Render ở Bước 2, **không** có `/` cuối) |
 
    **Không** đặt `NEXT_PUBLIC_API_URL`. Khi chỉ có `API_INTERNAL_URL`, web gọi `/api/v1/...` trên chính tên miền Vercel và Vercel chuyển tiếp sang Render (cấu hình trong `next.config.mjs`, không cần `vercel.json`). Nhờ vậy cookie đăng nhập là cookie cùng trang, **iPhone Safari không chặn**.
-4. Bấm **Deploy**. Xong, Vercel cho tên miền dạng `https://mamnon.vercel.app`. Có thể đổi tên ở **Settings → Domains**, hoặc gắn tên miền riêng.
+4. Bấm **Deploy**. Xong, Vercel cho tên miền dạng `https://mamnon-web.vercel.app`. Có thể đổi tên ở **Settings → Domains**, hoặc gắn tên miền riêng.
 5. Nếu tên miền khác với giá trị đã điền ở Bước 2: vào Render → **mamnon-api → Environment**, sửa `CORS_ORIGIN` và `PUBLIC_API_BASE` cho đúng → **Save Changes**.
 6. Đổi `API_INTERNAL_URL` sau này phải **Redeploy** web (giá trị được ghi vào lúc build).
 

@@ -1,7 +1,7 @@
 /**
  * Deployment knobs read from env (Render / Docker / dev):
  *  - CORS_ORIGIN: comma list of allowed web origins; an entry may contain "*" for one DNS label,
- *    e.g. "https://mamnon.vercel.app,https://mamnon-*-team.vercel.app" (Vercel preview deployments).
+ *    e.g. "https://mamnon-web.vercel.app,https://mamnon-*-team.vercel.app" (Vercel preview deployments).
  *  - COOKIE_SECURE=true|false, COOKIE_SAMESITE=lax|strict|none (none = web and API on different sites; forces Secure).
  *  - DATABASE_URL with ?sslmode=require (Neon) or DATABASE_SSL=true → TLS to Postgres.
  */
