@@ -31,6 +31,24 @@ npm run start:dev             # chạy trực tiếp bằng ts-node
 
 Test e2e (dùng DB riêng `mamnon_test`, tự migrate và seed DB test, không đụng DB dev): `npm test`
 
+### Chạy test trên máy dùng chung: mỗi người một DB test
+
+Mọi file test đọc `TEST_DATABASE_URL` (mặc định `postgres://mamnon:mamnon@localhost:5432/mamnon_test`). Mỗi lần chạy, test **xoá và seed lại** DB đó, nên nếu 2 người cùng chạy `npm test` trên chung `mamnon_test` thì dữ liệu sẽ đè lên nhau và test lỗi ngẫu nhiên (U5, demo-data, ảnh…), dù code không sai. Vì vậy mỗi người (hoặc mỗi agent) dùng một DB riêng:
+
+```bash
+# 1 lần: tạo DB riêng, đặt tên theo người, vd mamnon_test_pusher, mamnon_test_fullstack
+sudo -u postgres psql -c "CREATE DATABASE mamnon_test_pusher OWNER mamnon;"
+
+# mỗi lần chạy test
+TEST_DATABASE_URL=postgres://mamnon:mamnon@localhost:5432/mamnon_test_pusher npm test
+# hoặc 1 file: TEST_DATABASE_URL=... npx jest --runInBand test/staff.e2e-spec.ts
+```
+
+- Không cần migrate trước: test tự chạy migration và seed vào DB đó.
+- Không bao giờ trỏ `TEST_DATABASE_URL` vào DB dev (`mamnon`), staging hay production, vì test xoá sạch dữ liệu.
+- CI / một người chạy một mình thì vẫn dùng `npm test` như cũ.
+- Test thất bại khi đang có người khác chạy cùng DB thì chạy lại trên DB riêng trước khi báo lỗi.
+
 Tạo migration mới sau khi sửa entity: `npm run typeorm -- migration:generate src/database/migrations/TenMigration`
 
 ## Tài khoản mẫu (mật khẩu đều là `123456`)
