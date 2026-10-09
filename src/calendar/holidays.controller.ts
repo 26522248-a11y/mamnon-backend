@@ -197,12 +197,12 @@ export class HolidaysController {
         WHERE u.is_active AND u.role = 'parent' AND c.status = 'active'`);
       // enrolled children with no active parent account linked → nobody gets the push; admin must phone them
       const noParent: { childId: string; name: string; className: string | null; phone1: string | null }[] = await m.query(`
-        SELECT c.id AS "childId", c.full_name AS name, cl.name AS "className",
+        SELECT * FROM (SELECT c.id AS "childId", c.full_name AS name, cl.name AS "className",
                COALESCE(c.contact_phone1, (SELECT g.phone FROM guardians g WHERE g.child_id = c.id AND g.phone IS NOT NULL ORDER BY g.created_at LIMIT 1)) AS phone1
         FROM children c LEFT JOIN classes cl ON cl.id = c.class_id
         WHERE c.id = ANY($1) AND NOT EXISTS (
           SELECT 1 FROM guardians g JOIN users u ON u.id = g.user_id WHERE g.child_id = c.id AND u.is_active AND u.role = 'parent')
-        ORDER BY cl.name NULLS LAST, c.full_name`, [kids.map((k) => k.id)]);
+        ) x ORDER BY (phone1 IS NULL) DESC, "className" NULLS LAST, name`, [kids.map((k) => k.id)]); // no phone at all first: admin must find another way
       const present = kids.filter((k) => k.status === 'present' || k.status === 'late');
       // a child without a class cannot get an attendance row → no refund row either
       return { kids, noParent, parents: parents.map((p) => p.id), present, refunded: kids.filter((k) => !present.includes(k) && (k.status || k.class_id)), missing: kids.filter((k) => !k.status && k.class_id) };

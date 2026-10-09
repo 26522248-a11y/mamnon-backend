@@ -225,6 +225,10 @@ describe('round 2 batch 2/2b: medicine, late pickup, feed, notes, attention, pho
       // a child withdrawn today (last day >= P, no parent account) must not be counted anywhere
       const gone = s.kids[29].id;
       await as('admin').post(`/children/${gone}/withdraw`, { leaveDate: today, reason: 'Chuyển trường' }).expect(200);
+      // a no-account child with no phone at all (class not first alphabetically) must still come first
+      const nophone = s.kids[26].id;
+      await ds.query(`UPDATE children SET contact_phone1 = NULL WHERE id = $1`, [nophone]);
+      await ds.query(`UPDATE guardians SET phone = NULL WHERE child_id = $1`, [nophone]);
       const [{ present }] = await ds.query(`SELECT COUNT(*) FILTER (WHERE a.status IN ('present','late'))::int AS present FROM attendance a JOIN children c ON c.id = a.child_id WHERE a.date = $1 AND c.status = 'active'`, [P]);
       const dry = (await as('admin').post('/holidays/emergency', { date: P, reason: 'Mất điện', dryRun: true }).expect(201)).body;
       const [{ n: active, classed }] = await ds.query(`SELECT COUNT(*)::int n, COUNT(class_id)::int classed FROM children WHERE status = 'active'`);
@@ -244,9 +248,13 @@ describe('round 2 batch 2/2b: medicine, late pickup, feed, notes, attention, pho
       expect(noAcc).toBeGreaterThan(0);
       expect(dry.childrenWithoutParentCount).toBe(noAcc);
       expect(dry.childrenWithoutParent).toHaveLength(noAcc);
-      expect(dry.childrenWithoutParent[0]).toEqual({ childId: expect.any(String), name: expect.any(String), className: expect.any(String), phone1: expect.any(String) });
-      const keys = dry.childrenWithoutParent.map((x: any) => `${x.className}|${x.name}`);
-      expect(keys).toEqual([...keys].sort((a, b) => a.localeCompare(b)));
+      const np = dry.childrenWithoutParent;
+      expect(np[0]).toEqual({ childId: nophone, name: expect.any(String), className: expect.any(String), phone1: null }); // phone1 null first
+      expect(np[1]).toEqual({ childId: expect.any(String), name: expect.any(String), className: expect.any(String), phone1: expect.any(String) });
+      expect(np.filter((x: any) => x.phone1 === null)).toHaveLength(1);
+      const keys = np.slice(1).map((x: any) => [x.className, x.name]);
+      const sorted = [...keys].sort((a, b) => a[0].localeCompare(b[0]) || a[1].localeCompare(b[1]));
+      expect(keys).toEqual(sorted);
       expect(dry.childrenWithoutParent.map((x: any) => x.childId)).not.toContain(s.kids[0].id); // ph1's child has an account
       const [{ n: linkedParents }] = await ds.query(`SELECT COUNT(DISTINCT u.id)::int n FROM users u JOIN guardians g ON g.user_id = u.id JOIN children c ON c.id = g.child_id WHERE u.is_active AND u.role = 'parent' AND c.status = 'active'`);
       expect(dry.parentsToNotify).toBe(linkedParents);
