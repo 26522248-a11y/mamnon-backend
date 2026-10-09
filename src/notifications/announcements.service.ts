@@ -29,6 +29,7 @@ export const attView = (x: AnnouncementAttachment) => ({
 export class AnnouncementsService implements OnApplicationBootstrap, OnModuleDestroy {
   private log = new Logger('Announcements');
   private timer?: NodeJS.Timeout;
+  private keepAlive?: NodeJS.Timeout;
   private running = false;
   constructor(private ds: DataSource, private notify: NotificationsService) {}
 
@@ -39,8 +40,16 @@ export class AnnouncementsService implements OnApplicationBootstrap, OnModuleDes
       this.timer = setInterval(() => this.tick(), ms);
       this.timer.unref();
     }
+    // U1: optional self keep-alive – Render free sleeps after 15 min without inbound HTTP. Hitting our own public URL counts as traffic.
+    const url = process.env.KEEPALIVE_URL, every = Number(process.env.KEEPALIVE_INTERVAL_MS ?? 600_000);
+    if (url && every > 0) this.keepAlive = setInterval(() => this.ping(url), every);
   }
-  onModuleDestroy() { if (this.timer) clearInterval(this.timer); }
+  async ping(url = process.env.KEEPALIVE_URL!) {
+    try { const r = await fetch(url, { signal: AbortSignal.timeout(15_000) }); if (!r.ok) this.log.warn(`keep-alive ${r.status}`); }
+    catch (e: any) { this.log.warn(`keep-alive failed: ${e?.message ?? e}`); }
+    this.tick();
+  }
+  onModuleDestroy() { if (this.timer) clearInterval(this.timer); if (this.keepAlive) clearInterval(this.keepAlive); }
   private tick() {
     if (this.running) return;
     this.running = true;

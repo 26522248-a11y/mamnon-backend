@@ -83,6 +83,9 @@ services:
       # B9: khoá cho cron ngoài (cron-job.org) gọi POST /api/v1/internal/cron/announcements
       - key: CRON_SECRET
         generateValue: true
+      # U1: tự giữ thức (Free ngủ sau 15 phút) – https://<tên-api>.onrender.com/api/v1/health/ping
+      - key: KEEPALIVE_URL
+        sync: false
       - key: ANNOUNCEMENT_TICK_MS
         value: "30000"
       # Lưu ảnh: mặc định ổ đĩa /var/data (UPLOAD_DIR). Đặt STORAGE_DRIVER=s3 + S3_* để dùng Cloudflare R2

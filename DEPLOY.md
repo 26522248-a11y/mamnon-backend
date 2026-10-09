@@ -104,8 +104,12 @@ Khôi phục: `pg_restore --clean --if-exists -d "<DATABASE_URL>" mamnon_YYYY-MM
 ## Tự chạy trên VPS bằng Docker
 Xem `deploy/docker-compose.yml` và `deploy/CHECKLIST.md`: Postgres 17, API, web, Caddy HTTPS, backup hằng ngày.
 
-## Thông báo hẹn giờ – cron ngoài (bắt buộc trên Render gói Free)
-API tự kiểm tra thông báo đến giờ gửi mỗi 30 giây (`ANNOUNCEMENT_TICK_MS`) và gửi bù ngay khi khởi động. Render gói Free **ngủ** sau 15 phút không có truy cập, nên cần một cron ngoài đánh thức đúng giờ:
+## Giữ API luôn thức (Render Free)
+Đặt `KEEPALIVE_URL=https://<tên-api>.onrender.com/api/v1/health/ping` → API tự gọi chính nó mỗi `KEEPALIVE_INTERVAL_MS` (mặc định 600000 = 10 phút) nên Render không cho ngủ, đồng thời chạy luôn bộ gửi thông báo hẹn giờ. `GET /api/v1/health/ping` công khai, không chạm DB.
+Lưu ý: gói Free có 750 giờ/tháng – đủ cho 1 dịch vụ chạy 24/7.
+
+## Thông báo hẹn giờ – cron ngoài (tuỳ chọn, dự phòng)
+API tự kiểm tra thông báo đến giờ gửi mỗi 30 giây (`ANNOUNCEMENT_TICK_MS`) và gửi bù ngay khi khởi động. Render gói Free **ngủ** sau 15 phút không có truy cập. Đã có `KEEPALIVE_URL` (mục trên) thì cron ngoài chỉ là dự phòng (nếu tiến trình bị khởi động lại mà chưa có ai truy cập):
 1. Render → **mamnon-api → Environment**: copy giá trị `CRON_SECRET` (Render tự sinh).
 2. Vào https://cron-job.org → **Create cronjob**:
    - URL: `https://<tên-api>.onrender.com/api/v1/internal/cron/announcements`
@@ -149,5 +153,6 @@ DATABASE_URL='<Neon direct URL>' npm run demo:purge   # xoá ĐÚNG các dòng d
 | `VAPID_*`, `NOTIFY_CHANNELS` | tuỳ chọn | thông báo đẩy |
 | `FINANCE_APPROVAL_LIMIT` | tuỳ chọn | mặc định 10000000 |
 | `CRON_SECRET` | nên có | header `X-Cron-Secret` cho cron ngoài; trống = tắt endpoint (401) |
+| `KEEPALIVE_URL`, `KEEPALIVE_INTERVAL_MS` | nên có (Free) | tự gọi `/api/v1/health/ping` để không ngủ; mặc định 10 phút |
 | `ANNOUNCEMENT_TICK_MS` | tuỳ chọn | chu kỳ kiểm tra hẹn giờ, mặc định 30000; 0 = tắt |
 | `STORAGE_DRIVER`, `S3_ENDPOINT/S3_BUCKET/S3_ACCESS_KEY/S3_SECRET/S3_PUBLIC_BASE/S3_REGION` | tuỳ chọn | `local` (mặc định) hoặc `s3` (R2) |

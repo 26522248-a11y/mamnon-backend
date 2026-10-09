@@ -48,6 +48,8 @@ import { ENTITIES } from './database/entities';
 @Controller('health')
 class HealthController {
   @Public() @Get() health() { return { status: 'ok', time: new Date().toISOString() }; }
+  /** U1 keep-alive (cron-job.org / web splash): no DB, no auth, tiny. */
+  @Public() @Get('ping') ping() { return { ok: true, uptime: Math.round(process.uptime()) }; }
 }
 
 @ApiTags('settings')
