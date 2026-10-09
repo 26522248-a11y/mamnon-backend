@@ -302,7 +302,12 @@ export class NotificationsController {
     if (q.status === 'scheduled') qb.orderBy('a.scheduledAt', 'ASC'); else qb.orderBy('a.sentAt', 'DESC', 'NULLS LAST').addOrderBy('a.createdAt', 'DESC');
     qb.skip((page - 1) * limit).take(limit);
     const [rows, total] = await qb.getManyAndCount();
-    return { items: rows.map((a) => annView(a, u)), page, limit, total };
+    // B9 P3: "41/48 đã xem" – readCount for staff views (author/admin) of sent announcements
+    const mine = rows.filter((a) => a.status !== 'scheduled' && (u.role === 'admin' || a.createdBy === u.id)).map((a) => a.id);
+    const reads = new Map<string, number>(mine.length ? (await this.anns.manager.query(
+      `SELECT announcement_id AS id, COUNT(*) FILTER (WHERE read_at IS NOT NULL)::int AS n FROM notifications WHERE announcement_id = ANY($1) GROUP BY announcement_id`, [mine],
+    )).map((r: { id: string; n: number }) => [r.id, r.n]) : []);
+    return { items: rows.map((a) => { const v = annView(a, u); return 'recipientCount' in v && a.status !== 'scheduled' ? { ...v, readCount: reads.get(a.id) ?? 0 } : v; }), page, limit, total };
   }
 
   /** Parent accounts selectable for audience=specific (teacher: parents of active children in own classes; admin: all). */

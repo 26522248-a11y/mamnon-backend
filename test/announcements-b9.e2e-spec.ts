@@ -137,6 +137,22 @@ describe('B9 scheduled announcements + images (e2e)', () => {
     expect((await as('ph1').get('/announcements').expect(200)).body.items.find((x: any) => x.id === a.id).attachments.map((x: any) => x.id)).toEqual(re);
   });
 
+  it('sent list exposes recipientCount + readCount to author/admin only', async () => {
+    const a = (await as('admin').post('/announcements', { title: 'Đếm đã xem', body: 'b', scope: 'school', audience: 'parents' }).expect(201)).body;
+    const find = async (who: string) => (await as(who).get('/announcements?limit=100').expect(200)).body.items.find((x: any) => x.id === a.id);
+    const before = await find('admin');
+    expect(before.status).toBe('sent');
+    expect(before.recipientCount).toBeGreaterThan(1);
+    expect(before.readCount).toBe(0);
+    const n = (await as('ph1').get('/notifications?limit=50').expect(200)).body.items.find((x: any) => x.announcementId === a.id);
+    await as('ph1').post(`/notifications/${n.id}/read`).expect((r) => expect([200, 201, 204]).toContain(r.status));
+    expect((await find('admin')).readCount).toBe(1);
+    const ph = await find('ph1');
+    expect(ph).toBeDefined();
+    expect(ph.readCount).toBeUndefined();
+    expect(ph.recipientCount).toBeUndefined();
+  });
+
   it('external cron endpoint: secret required, dispatches due items idempotently', async () => {
     const c = (await as('admin').post('/announcements', { title: 'Cron', body: 'b', scope: 'school', scheduledAt: vnIn(3600_000) }).expect(201)).body;
     await makeDue(c.id);
