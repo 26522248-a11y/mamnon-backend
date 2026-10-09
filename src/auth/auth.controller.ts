@@ -6,7 +6,7 @@ import * as bcrypt from 'bcryptjs';
 import { IsString, MaxLength, MinLength } from 'class-validator';
 import { Request, Response } from 'express';
 import { Repository } from 'typeorm';
-import { AuthUser, CurrentUser, Public, UserContextService } from '../common/auth';
+import { AuthUser, CurrentUser, Public, UserContextService, AllowWhenPasswordChangeRequired } from '../common/auth';
 import { AppError } from '../common/errors';
 import { User } from '../database/entities';
 import { LoginThrottleService } from './login-throttle.service';
@@ -84,7 +84,7 @@ export class AuthController {
     return this.issue(user, res);
   }
 
-  @Post('logout') @HttpCode(200) @ApiBearerAuth()
+  @AllowWhenPasswordChangeRequired() @Post('logout') @HttpCode(200) @ApiBearerAuth()
   async logout(@CurrentUser() u: AuthUser, @Res({ passthrough: true }) res: Response) {
     await this.users.increment({ id: u.id }, 'tokenVersion', 1); // revokes all tokens of this user
     res.clearCookie(REFRESH_COOKIE, { path: '/api/v1/auth' });
@@ -92,7 +92,7 @@ export class AuthController {
   }
 
   /** Change own password: revokes all other sessions and returns fresh tokens for this one. */
-  @Post('change-password') @HttpCode(200) @ApiBearerAuth() @ApiOkResponse({ type: TokenResponse })
+  @AllowWhenPasswordChangeRequired() @Post('change-password') @HttpCode(200) @ApiBearerAuth() @ApiOkResponse({ type: TokenResponse })
   async changePassword(@CurrentUser() u: AuthUser, @Body() dto: ChangePasswordDto, @Res({ passthrough: true }) res: Response) {
     const user = await this.users.findOneOrFail({ where: { id: u.id } });
     if (!(await bcrypt.compare(dto.currentPassword, user.passwordHash))) throw new AppError(400, 'WRONG_PASSWORD', 'Mật khẩu hiện tại không đúng');
@@ -104,6 +104,6 @@ export class AuthController {
     return this.issue(user, res);
   }
 
-  @Get('me') @ApiBearerAuth() @ApiOkResponse({ type: UserView })
+  @AllowWhenPasswordChangeRequired() @Get('me') @ApiBearerAuth() @ApiOkResponse({ type: UserView })
   me(@CurrentUser() u: AuthUser) { return u; }
 }

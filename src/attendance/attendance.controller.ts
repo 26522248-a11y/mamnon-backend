@@ -8,7 +8,7 @@ import {
 } from 'class-validator';
 import { Brackets, DataSource, In, IsNull, Repository } from 'typeorm';
 import { AccessService } from '../common/access';
-import { AuthUser, CurrentUser, Roles } from '../common/auth';
+import { AuthUser, CurrentUser, Roles, AllowWhenPasswordChangeRequired } from '../common/auth';
 import { addDays, dayDiff, todayStr } from '../common/dates';
 import { NotificationsService } from '../notifications/notifications.service';
 import { AppError, BadRequest, Forbidden, NotFound } from '../common/errors';
@@ -378,7 +378,7 @@ export class AttendanceController {
     return u.role !== 'parent' && (await this.safety.requestDate(r)) === todayStr() && (await this.safety.isOnDuty(u.id));
   }
 
-  @Get('pickup-requests/:id/photo') @Roles('admin', 'teacher', 'parent', 'accountant')
+  @AllowWhenPasswordChangeRequired() @Get('pickup-requests/:id/photo') @Roles('admin', 'teacher', 'parent', 'accountant')
   async requestPhoto(@CurrentUser() u: AuthUser, @Param('id', ParseUUIDPipe) id: string, @Res() res: Response) {
     const r = await this.requests.findOne({ where: { id } });
     if (!r) throw NotFound('Không tìm thấy yêu cầu đón');
@@ -409,7 +409,7 @@ export class AttendanceController {
   }
 
   /** Parent feed (separate from the general inbox): pending requests needing my answer first, with picker photo. Default: today. */
-  @Get('pickup-requests/feed') @Roles('parent')
+  @AllowWhenPasswordChangeRequired() @Get('pickup-requests/feed') @Roles('parent')
   async feed(@CurrentUser() u: AuthUser, @Query() q: FeedQuery) {
     await this.sweepExpired();
     const date = q.date ?? todayStr();
@@ -448,11 +448,11 @@ export class AttendanceController {
     return u.role === 'parent' ? requestView(done, await this.names([done])) : this.staffView(done);
   }
 
-  @Post('pickup-requests/:id/confirm') @Roles('admin', 'parent', 'teacher', 'accountant') @HttpCode(200)
+  @AllowWhenPasswordChangeRequired() @Post('pickup-requests/:id/confirm') @Roles('admin', 'parent', 'teacher', 'accountant') @HttpCode(200)
   @ApiOperation({ summary: 'Đồng ý: phụ huynh của bé → bước phụ huynh; BGH / tài khoản trực đón hôm nay → bước nhà trường. GV không trực → 403.' })
   confirm(@CurrentUser() u: AuthUser, @Param('id', ParseUUIDPipe) id: string, @Body() dto: DecisionDto) { return this.decide(u, id, 'approved', dto); }
 
-  @Post('pickup-requests/:id/reject') @Roles('admin', 'parent', 'teacher', 'accountant') @HttpCode(200)
+  @AllowWhenPasswordChangeRequired() @Post('pickup-requests/:id/reject') @Roles('admin', 'parent', 'teacher', 'accountant') @HttpCode(200)
   @ApiOperation({ summary: 'Từ chối (nhà trường từ chối phải có note). Một bước từ chối → status rejected, giao bé 403.' })
   reject(@CurrentUser() u: AuthUser, @Param('id', ParseUUIDPipe) id: string, @Body() dto: DecisionDto) { return this.decide(u, id, 'rejected', dto); }
 

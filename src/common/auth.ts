@@ -15,6 +15,9 @@ export interface AuthUser {
 
 export const IS_PUBLIC = 'isPublic';
 export const Public = () => SetMetadata(IS_PUBLIC, true);
+/** Endpoint stays usable while user.mustChangePassword is true (otherwise 403 PASSWORD_CHANGE_REQUIRED). */
+export const ALLOW_PWD_CHANGE_PENDING = 'allowPwdChangePending';
+export const AllowWhenPasswordChangeRequired = () => SetMetadata(ALLOW_PWD_CHANGE_PENDING, true);
 export const ROLES_KEY = 'roles';
 export const Roles = (...roles: Role[]) => SetMetadata(ROLES_KEY, roles);
 export const CurrentUser = createParamDecorator((_: unknown, ctx: ExecutionContext): AuthUser => ctx.switchToHttp().getRequest().user);
@@ -55,6 +58,8 @@ export class JwtAuthGuard implements CanActivate {
     const user = await this.users.findOne({ where: { id: payload.sub } });
     if (!user || !user.isActive || user.tokenVersion !== payload.ver) throw new AppError(401, 'TOKEN_INVALID', 'Phiên đăng nhập không còn hiệu lực');
     req.user = await this.ctx.build(user);
+    if (user.mustChangePassword && !this.reflector.getAllAndOverride<boolean>(ALLOW_PWD_CHANGE_PENDING, targets))
+      throw new AppError(403, 'PASSWORD_CHANGE_REQUIRED', 'Bạn cần đổi mật khẩu trước khi sử dụng chức năng này');
     const roles = this.reflector.getAllAndOverride<Role[]>(ROLES_KEY, targets);
     if (roles && !roles.includes(req.user.role)) throw Forbidden('Vai trò của bạn không được phép thực hiện thao tác này');
     return true;

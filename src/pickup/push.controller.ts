@@ -4,7 +4,7 @@ import { Type } from 'class-transformer';
 import { IsIn, IsObject, IsOptional, IsString, IsUrl, IsUUID, MaxLength, ValidateNested } from 'class-validator';
 import { Response } from 'express';
 import { DataSource } from 'typeorm';
-import { AuthUser, CurrentUser, Public, Roles } from '../common/auth';
+import { AuthUser, CurrentUser, Public, Roles, AllowWhenPasswordChangeRequired } from '../common/auth';
 import { AppError, Forbidden, NotFound } from '../common/errors';
 import { sendImage } from '../common/upload';
 import { Guardian, PickupRequest, PushSubscription, User } from '../database/entities';
@@ -35,7 +35,7 @@ export class PushController {
   key() { return { publicKey: process.env.VAPID_PUBLIC_KEY || null, enabled: vapidConfigured(), channels: this.dispatcher.status() }; }
 
   /** Register / refresh this browser's subscription (endpoint unique; re-subscribing moves it to the current user). */
-  @Post('subscriptions') @Roles('admin', 'teacher', 'parent', 'accountant')
+  @AllowWhenPasswordChangeRequired() @Post('subscriptions') @Roles('admin', 'teacher', 'parent', 'accountant')
   async subscribe(@CurrentUser() u: AuthUser, @Body() dto: SubscribeDto, @Res({ passthrough: true }) res: Response) {
     if (!dto.keys?.p256dh || !dto.keys?.auth) throw new AppError(400, 'VALIDATION_ERROR', 'Dữ liệu không hợp lệ', ['keys.p256dh, keys.auth bắt buộc']);
     const ua = (res.req.headers['user-agent'] ?? '').toString().slice(0, 300) || null;
@@ -46,13 +46,13 @@ export class PushController {
     return { id: s.id, endpoint: s.endpoint, createdAt: s.createdAt };
   }
 
-  @Get('subscriptions') @Roles('admin', 'teacher', 'parent', 'accountant')
+  @AllowWhenPasswordChangeRequired() @Get('subscriptions') @Roles('admin', 'teacher', 'parent', 'accountant')
   async list(@CurrentUser() u: AuthUser) {
     const rows = await this.ds.getRepository(PushSubscription).find({ where: { userId: u.id }, order: { createdAt: 'DESC' } });
     return rows.map((s) => ({ id: s.id, endpoint: s.endpoint, userAgent: s.userAgent, createdAt: s.createdAt, lastSuccessAt: s.lastSuccessAt, lastError: s.lastError, failCount: s.failCount }));
   }
 
-  @Delete('subscriptions') @Roles('admin', 'teacher', 'parent', 'accountant') @HttpCode(204)
+  @AllowWhenPasswordChangeRequired() @Delete('subscriptions') @Roles('admin', 'teacher', 'parent', 'accountant') @HttpCode(204)
   async unsubscribe(@CurrentUser() u: AuthUser, @Body() dto: UnsubscribeDto) {
     await this.ds.getRepository(PushSubscription).delete({ userId: u.id, endpoint: dto.endpoint });
   }

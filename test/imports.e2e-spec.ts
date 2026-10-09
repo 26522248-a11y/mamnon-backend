@@ -185,7 +185,17 @@ describe('Excel import: children + guardians (e2e)', () => {
       classesCreated: ['Nhà trẻ 2'], duplicatesSkipped: 1 });
     const login = await request(http).post('/api/v1/auth/login').send({ username: '0977111222', password: ha[3] }).expect(200);
     expect(login.body.user).toMatchObject({ role: 'parent', mustChangePassword: true });
-    const kids = (await request(http).get('/api/v1/children?limit=50').set({ Authorization: `Bearer ${login.body.accessToken}` }).expect(200)).body.items.map((x: any) => x.fullName).sort();
+    // mustChangePassword: everything except the allowlist is 403 PASSWORD_CHANGE_REQUIRED until the password is changed
+    const blocked = await request(http).get('/api/v1/children?limit=50').set({ Authorization: `Bearer ${login.body.accessToken}` }).expect(403);
+    expect(blocked.body.code).toBe('PASSWORD_CHANGE_REQUIRED');
+    expect((await request(http).get('/api/v1/auth/me').set({ Authorization: `Bearer ${login.body.accessToken}` }).expect(200)).body.childIds).toHaveLength(2);
+    await request(http).get('/api/v1/pickup-requests/feed').set({ Authorization: `Bearer ${login.body.accessToken}` }).expect(200);
+    await request(http).get('/api/v1/push/subscriptions').set({ Authorization: `Bearer ${login.body.accessToken}` }).expect(200);
+    await request(http).get('/api/v1/settings/school').set({ Authorization: `Bearer ${login.body.accessToken}` }).expect(200);
+    await request(http).get('/api/v1/notifications').set({ Authorization: `Bearer ${login.body.accessToken}` }).expect(403);
+    const ch = await request(http).post('/api/v1/auth/change-password').set({ Authorization: `Bearer ${login.body.accessToken}` })
+      .send({ currentPassword: ha[3], newPassword: 'moi12345' }).expect(200);
+    const kids = (await request(http).get('/api/v1/children?limit=50').set({ Authorization: `Bearer ${ch.body.accessToken}` }).expect(200)).body.items.map((x: any) => x.fullName).sort();
     expect(kids).toEqual(['Phạm Minh Châu', 'Phạm Minh Khang']);
     // existing parent ph1 now also sees the new child; password untouched
     const ph1 = (await login_('ph1')).body;
