@@ -1,4 +1,4 @@
-import { Body, Controller, Delete, Get, HttpCode, Param, ParseUUIDPipe, Post, Put, Query } from '@nestjs/common';
+import { Body, Controller, Delete, Get, HttpCode, Param, ParseUUIDPipe, Patch, Post, Put, Query } from '@nestjs/common';
 import { ApiBearerAuth, ApiProperty, ApiPropertyOptional, ApiTags } from '@nestjs/swagger';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Type } from 'class-transformer';
@@ -66,6 +66,8 @@ const growthView = (g: GrowthRecord) => ({
   id: g.id, childId: g.childId, date: g.date, heightCm: g.heightCm, weightKg: g.weightKg, note: g.note,
   bmi: g.heightCm && g.weightKg ? Math.round((g.weightKg / (g.heightCm / 100) ** 2) * 10) / 10 : null,
 });
+/** [dto/entity field, column] that a daily-note item may set */
+const NOTE_FIELDS: [keyof DailyNote, string][] = [['eating', 'eating'], ['sleepMinutes', 'sleep_minutes'], ['mood', 'mood'], ['toilet', 'toilet'], ['note', 'note']];
 const noteView = (n: DailyNote) => ({
   id: n.id, childId: n.childId, classId: n.classId, date: n.date, eating: n.eating, sleepMinutes: n.sleepMinutes, mood: n.mood,
   toilet: n.toilet, note: n.note, updatedAt: n.updatedAt,
@@ -174,9 +176,18 @@ export class HealthController {
     };
   }
 
-  /** Bulk upsert; same edit window as attendance (teacher: today .. 3 days back). */
+  /**
+   * Bulk upsert (PUT or PATCH, same behaviour); same edit window as attendance (teacher: today .. 3 days back).
+   * PARTIAL per item: only fields present in the item are written; absent = unchanged, explicit null = clear.
+   * So two teachers can record different fields of the same child without overwriting each other.
+   */
   @Put('classes/:id/daily-notes') @Roles('admin', 'teacher')
-  async putNotes(@CurrentUser() u: AuthUser, @Param('id', ParseUUIDPipe) id: string, @Body() dto: PutDailyNotesDto) {
+  putNotesRoute(@CurrentUser() u: AuthUser, @Param('id', ParseUUIDPipe) id: string, @Body() dto: PutDailyNotesDto) { return this.putNotes(u, id, dto); }
+
+  @Patch('classes/:id/daily-notes') @Roles('admin', 'teacher')
+  patchNotes(@CurrentUser() u: AuthUser, @Param('id', ParseUUIDPipe) id: string, @Body() dto: PutDailyNotesDto) { return this.putNotes(u, id, dto); }
+
+  private async putNotes(u: AuthUser, id: string, dto: PutDailyNotesDto) {
     await this.access.getClassOr404(id);
     this.access.assertOperateClass(u, id);
     assertDateEditable(u, dto.date);
@@ -189,10 +200,11 @@ export class HealthController {
     }
     await this.ds.transaction(async (m) => {
       for (const i of dto.items) {
-        await m.createQueryBuilder().insert().into(DailyNote)
-          .values({ childId: i.childId, classId: id, date: dto.date, eating: i.eating ?? null, sleepMinutes: i.sleepMinutes ?? null,
-            mood: i.mood ?? null, toilet: i.toilet ?? null, note: i.note ?? null, recordedBy: u.id })
-          .orUpdate(['eating', 'sleep_minutes', 'mood', 'toilet', 'note', 'recorded_by', 'class_id', 'updated_at'], ['child_id', 'date']).execute();
+        const present = NOTE_FIELDS.filter(([f]) => (i as any)[f] !== undefined);
+        const values: any = { childId: i.childId, classId: id, date: dto.date, recordedBy: u.id };
+        for (const [f] of present) values[f] = (i as any)[f]; // null = clear
+        await m.createQueryBuilder().insert().into(DailyNote).values(values)
+          .orUpdate([...present.map(([, col]) => col), 'recorded_by', 'class_id', 'updated_at'], ['child_id', 'date']).execute();
       }
     });
     return this.classNotes(u, id, { date: dto.date });

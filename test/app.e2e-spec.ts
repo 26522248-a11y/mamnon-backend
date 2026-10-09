@@ -23,6 +23,7 @@ describe('Mầm non API (e2e)', () => {
     get: (url: string) => request(http).get('/api/v1' + url).set('Authorization', `Bearer ${tokens[who]}`),
     post: (url: string, body?: any) => request(http).post('/api/v1' + url).set('Authorization', `Bearer ${tokens[who]}`).send(body),
     put: (url: string, body?: any) => request(http).put('/api/v1' + url).set('Authorization', `Bearer ${tokens[who]}`).send(body),
+    patch: (url: string, body?: any) => request(http).patch('/api/v1' + url).set('Authorization', `Bearer ${tokens[who]}`).send(body),
   });
 
   beforeAll(async () => {
@@ -362,6 +363,25 @@ describe('Mầm non API (e2e)', () => {
       await as('ph1').get(`/children/${s.kids[1].id}/daily-notes`).expect(403);
       await as('ketoan').get(`/children/${s.kids[0].id}/daily-notes`).expect(403);
       await as('ketoan').get(`/classes/${s.classes.c1.id}/daily-notes`).expect(403);
+    });
+
+    it('daily notes are partial: absent field = unchanged, explicit null = clear (single + multi child, PUT and PATCH)', async () => {
+      const c = s.classes.c1.id, d = todayStr();
+      const [a, b] = s.kids.filter((k: any) => k.classId === c).slice(1, 3);
+      const get = async (id: string) => (await as('gv1').get(`/classes/${c}/daily-notes?date=${d}`).expect(200)).body.items.find((i: any) => i.childId === id);
+      // two people record different fields of the same child (QA api_notes_partial.py)
+      await as('gv1').put(`/classes/${c}/daily-notes`, { date: d, items: [{ childId: a.id, eating: 'all' }] }).expect(200);
+      await as('admin').put(`/classes/${c}/daily-notes`, { date: d, items: [{ childId: a.id, sleepMinutes: 90 }] }).expect(200);
+      expect(await get(a.id)).toMatchObject({ eating: 'all', sleepMinutes: 90, mood: null });
+      // multi-child, mixed fields, PATCH
+      await as('gv1').patch(`/classes/${c}/daily-notes`, { date: d, items: [{ childId: a.id, mood: 'Vui' }, { childId: b.id, note: 'Ho nhẹ', toilet: 'Bình thường' }] }).expect(200);
+      expect(await get(a.id)).toMatchObject({ eating: 'all', sleepMinutes: 90, mood: 'Vui' });
+      expect(await get(b.id)).toMatchObject({ eating: null, note: 'Ho nhẹ', toilet: 'Bình thường', recorded: true });
+      // explicit null clears only that field
+      await as('gv1').put(`/classes/${c}/daily-notes`, { date: d, items: [{ childId: a.id, sleepMinutes: null }, { childId: b.id, note: null, eating: 'half' }] }).expect(200);
+      expect(await get(a.id)).toMatchObject({ eating: 'all', sleepMinutes: null, mood: 'Vui' });
+      expect(await get(b.id)).toMatchObject({ eating: 'half', note: null, toilet: 'Bình thường' });
+      await as('gv1').put(`/classes/${c}/daily-notes`, { date: d, items: [{ childId: a.id, eating: 'lots' }] }).expect(400);
     });
   });
 });
