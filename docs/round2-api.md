@@ -1,4 +1,8 @@
-# Đợt 2 – API contract (parent messages, holidays, medicine, late pickup, photo consent)
+# Đợt 2 – API contract
+
+Delivery: **batch 1** = §0, §1, §2, §5, §11 (+ audit_events). **batch 2** = §3, §4, §6, §7, §8. **batch 2b** = §9, holiday reminder.
+
+Scope: parent messages, holidays, medicine, late pickup, photo consent.
 
 Base `/api/v1`. Errors `{code, message, details?}`. Dates `YYYY-MM-DD` (VN calendar), times `HH:MM` (VN wall clock),
 timestamps ISO-8601 UTC. Names follow `mamnon-web/src/lib/messages-api.ts`; differences are marked **≠ FE guess**.
@@ -49,17 +53,23 @@ type Absence = { id; childId; childName; classId; className; from; to; reason: A
 ## 2. Holiday calendar (`Lịch nghỉ`)
 
 ```ts
-type Holiday = { id; date; name; kind: 'national' | 'school'; createdBy; createdByName; createdAt };
+type Holiday = { id; date; name; kind: 'national' | 'school'; status: 'pending' | 'confirmed';
+  createdBy; createdByName; createdAt; confirmedBy: string | null; confirmedByName: string | null; confirmedAt: string | null };
 ```
+**Only `confirmed` holidays have any effect.** `pending` = national lunar holiday from the template, waiting for admin confirmation: no `SCHOOL_HOLIDAY` block, absence days / attendance / meals behave as a normal school day.
+
 | Method | Path | Who | Notes |
 |---|---|---|---|
-| GET | `/holidays?year=` or `?from&to` | any logged-in user | sorted by date |
-| POST | `/holidays` `{date, to?, name, kind?}` | admin | range `date..to` creates one row per day; existing dates → 409 `HOLIDAY_EXISTS` (`details`) |
+| GET | `/holidays?year=` or `?from&to` (`&status=pending|confirmed`) | any logged-in user | sorted by date, includes `status` |
+| POST | `/holidays` `{date, to?, name, kind?}` | admin | range `date..to` (≤ 60 days) → one **confirmed** row per day; existing dates → 409 `HOLIDAY_EXISTS` (`details.dates`). Recorded attendance (not from a parent report) on a date → 409 `HOLIDAY_HAS_ATTENDANCE`. Active parent absence days on those dates are cancelled automatically (parents notified). |
 | PATCH | `/holidays/:id` `{name?, kind?}` | admin | |
 | DELETE | `/holidays/:id` | admin | 204 |
-| POST | `/holidays/template` `{year, apply?}` | admin | Vietnamese national holidays for the year (Tết dương lịch, Tết Nguyên đán 5 ngày, Giỗ Tổ 10/3 âm lịch, 30/4, 1/5, Quốc khánh 2/9 + 1/9). `apply` false (default) = preview `{year, items[{date,name,exists}]}`; `apply:true` inserts missing ones (`kind:'national'`). Unsupported year → 400 `TEMPLATE_YEAR_UNSUPPORTED` (2025–2030 bundled; lunar dates are precomputed – review before applying). |
+| POST | `/holidays/:id/confirm` | admin | pending → confirmed (same side effects as POST); already confirmed → 200 unchanged |
+| POST | `/holidays/confirm` `{year}` | admin | confirms all pending holidays of that year → `{year, confirmed: Holiday[]}` |
+| POST | `/holidays/template` `{year, dryRun?}` | admin | Vietnamese national holidays. **Solar** (Tết dương lịch 1/1, 30/4, 1/5, Quốc khánh 1/9 + 2/9) are inserted as `confirmed`; **lunar** (Tết Nguyên đán 5 ngày: 29/30 tháng Chạp → mùng 4, Giỗ Tổ 10/3 âm lịch) are inserted as `pending`. Existing dates are skipped. → `{year, created: Holiday[], skipped: [{date,name}]}`; `dryRun:true` → `{year, items[{date,name,status,exists}]}` without writing. Bundled years 2025–2030 (lunar dates computed with a lunar calendar); other years → 400 `TEMPLATE_YEAR_UNSUPPORTED`. |
 
-Effects on a holiday: attendance sheet returns `holiday: {id, name}` with every item `status:null`, and `PUT` attendance for that date → 400 `SCHOOL_HOLIDAY`; no absence report days, no medicine / late-pickup requests (400 `SCHOOL_HOLIDAY`); no meal refund (no attendance rows). Monthly meal fee itself is unchanged (flat monthly price).
+Effects of a **confirmed** holiday: attendance sheet returns `holiday: {id, name}` with every item `status:null`, `PUT` attendance for that date → 400 `SCHOOL_HOLIDAY`; dates are skipped in absence reports (`skippedDates` reason `HOLIDAY`); medicine / late-pickup requests → 400 `SCHOOL_HOLIDAY` (batch 2); no meal refund (no attendance rows). Monthly meal fee itself is unchanged (flat monthly price). Dashboard does not report "classes not marked" on a holiday.
+Planned (batch 2b): early-December reminder to admins to confirm next year's pending holidays.
 
 ## 3. Medicine instructions (`Dặn thuốc`)
 
@@ -97,7 +107,7 @@ type LatePickup = { id; childId; childName; classId; date; time; pickerName: str
 - Sheet item (GET/PUT `/classes/:id/attendance`) gains: `excused: boolean`, `absenceReason: AbsenceReason|null`, `absenceId: string|null`, `absenceNote`, `refundEligible: boolean`. Response gains `holiday: {id,name}|null` and `skipped: [{childId, reason}]` (PUT only).
 - PUT item gains `absenceReason?` (`sick|family|other`, for `absent`) and `overrideAbsence?: boolean`.
 - **"Tất cả có mặt" never overrides an excused absence**: an item `present|late` for a child with an excused day is skipped (`skipped[{childId, reason:'EXCUSED_ABSENCE'}]`) unless `overrideAbsence: true` (explicit per-child action) → see §1 override rule.
-- Holiday → 400 `SCHOOL_HOLIDAY`.
+- Confirmed holiday → 400 `SCHOOL_HOLIDAY` (pending holidays: no effect).
 
 ## 6. Class message feed (pinned on top of Điểm danh)
 
@@ -113,11 +123,13 @@ Item fields: `eating` (lunch), **`breakfast`** (same scale `all|most|half|little
 `attention.medicinesNotGiven: MedicineDue[]` and `attention.medicinesNotGivenCount`, where
 `MedicineDue = {childId, fullName, classId, className, medicineId, medicineName, doseId, time, minutesLate}` – today's active doses not given, `now > time + medicineLateMinutes`, child not absent.
 
-## 9. Photo consent (`Đồng ý chụp/đăng ảnh`)
+## 9. Photo consent (`Đồng ý chụp/đăng ảnh`) – batch 2b
 
-- `children.photoConsent: boolean`, **default false** (existing children too). Child views include `photoConsent`, `photoConsentUpdatedAt`.
-- `GET /children/:id/photo-consent` (parent of child, class teacher, admin) → `{childId, photoConsent, updatedAt, updatedBy, updatedByName, history[{before, after, by, byName, byRole, at, note}]}`.
-- `PUT /children/:id/photo-consent` `{photoConsent: boolean, note?}` (parent of child, admin) → same shape. Every change goes to `audit_events` (`child.photo_consent`) + jsonl.
+- `children.photoConsent: boolean`, **default false** (existing children too).
+- `photoConsent` is included in child lists (`GET /children`, child detail) and in the class roster / attendance sheet items teachers see, so the UI can show a badge.
+- `GET /children/:id/photo-consent` (parent of child, class teacher, admin) →
+  `{childId, consent: boolean, updatedBy: {id, name} | null, updatedAt: string | null, history: [{before, after, by: {id, name, role}, at, note, source}]}`.
+- `PUT /children/:id/photo-consent` `{consent: boolean, note?}` (parent of child, admin) → same shape. Every change goes to `audit_events` (`child.photo_consent`) + jsonl.
 - Excel import: new optional column `Đồng ý chụp ảnh` (Có / Không, default Không) → stored as initial consent, history entry `source: import`.
 
 ## 10. Notifications (types)
