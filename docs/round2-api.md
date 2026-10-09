@@ -44,7 +44,8 @@ type Absence = { id; childId; childName; classId; className; from; to; reason: A
 | GET | `/absences/config` | public | `{cutoff, latestPickup}` (FE fallback) |
 
 ### Rules
-- **Refund**: a day is `refundEligible` iff it was reported before that day, or on that day strictly before `absenceCutoff`. Weekends/holidays never appear.
+- **Refund**: a day is `refundEligible` iff it was reported before that day, or on that day strictly before `absenceCutoff` (VN time; reported at 07:59:59 = refund, at exactly 08:00:00 = no refund). Weekends/holidays never appear. `AbsenceDay.refundEligible` is exactly what the meal invoice uses (false once overridden).
+- `GET /children/:id/absences?from&to`: e.g. the parent screen loads the past 30 days with `from = today − 30` (also the default).
 - **Attendance**: each day is written to attendance immediately as `status:'absent'`, `excused: true`, `absenceReason`, `absenceId`, `notifiedInAdvance = refundEligible` (this is what meal refunds read, unchanged logic).
 - **Cancel (parent)**: allowed for future days, and for today only strictly before the cutoff. After the cutoff a parent cannot cancel today (nor past days). Admin may cancel any day that is today or later. Cancelled days remove the generated attendance row.
 - **Teacher marks present on an excused day** (explicit override, see §5): attendance becomes present, the day gets `overridden: true`, `notifiedInAdvance=false` → **no refund** for that day; kitchen roles + parents notified (`absence_overridden`).
@@ -54,7 +55,7 @@ type Absence = { id; childId; childName; classId; className; from; to; reason: A
 
 ```ts
 type Holiday = { id; date; name; kind: 'national' | 'school'; status: 'pending' | 'confirmed';
-  createdBy; createdByName; createdAt; confirmedBy: string | null; confirmedByName: string | null; confirmedAt: string | null };
+  createdBy; createdByName; createdAt; confirmedBy: { id: string; name: string } | null; confirmedByName: string | null; confirmedAt: string | null };
 ```
 **Only `confirmed` holidays have any effect.** `pending` = national lunar holiday from the template, waiting for admin confirmation: no `SCHOOL_HOLIDAY` block, absence days / attendance / meals behave as a normal school day.
 
@@ -68,7 +69,8 @@ type Holiday = { id; date; name; kind: 'national' | 'school'; status: 'pending' 
 | POST | `/holidays/confirm` `{year}` | admin | confirms all pending holidays of that year → `{year, confirmed: Holiday[]}` |
 | POST | `/holidays/template` `{year, dryRun?}` | admin | Vietnamese national holidays. **Solar** (Tết dương lịch 1/1, 30/4, 1/5, Quốc khánh 1/9 + 2/9) are inserted as `confirmed`; **lunar** (Tết Nguyên đán 5 ngày: 29/30 tháng Chạp → mùng 4, Giỗ Tổ 10/3 âm lịch) are inserted as `pending`. Existing dates are skipped. → `{year, created: Holiday[], skipped: [{date,name}]}`; `dryRun:true` → `{year, items[{date,name,status,exists}]}` without writing. Bundled years 2025–2030 (lunar dates computed with a lunar calendar); other years → 400 `TEMPLATE_YEAR_UNSUPPORTED`. |
 
-Effects of a **confirmed** holiday: attendance sheet returns `holiday: {id, name}` with every item `status:null`, `PUT` attendance for that date → 400 `SCHOOL_HOLIDAY`; dates are skipped in absence reports (`skippedDates` reason `HOLIDAY`); medicine / late-pickup requests → 400 `SCHOOL_HOLIDAY` (batch 2); no meal refund (no attendance rows). Monthly meal fee itself is unchanged (flat monthly price). Dashboard does not report "classes not marked" on a holiday.
+`POST /holidays/:id/confirm` → `Holiday` with `confirmedBy: {id, name}`, `confirmedAt` (also `confirmedByName`).
+Effects of a **confirmed** holiday (attendance `holiday` is set only for confirmed ones): attendance sheet returns `holiday: {id, name}` with every item `status:null`, `PUT` attendance for that date → 400 `SCHOOL_HOLIDAY`; dates are skipped in absence reports (`skippedDates` reason `HOLIDAY`); medicine / late-pickup requests → 400 `SCHOOL_HOLIDAY` (batch 2); no meal refund (no attendance rows). Monthly meal fee itself is unchanged (flat monthly price). Dashboard does not report "classes not marked" on a holiday.
 Planned (batch 2b): early-December reminder to admins to confirm next year's pending holidays.
 
 ## 3. Medicine instructions (`Dặn thuốc`)
@@ -106,6 +108,7 @@ type LatePickup = { id; childId; childName; classId; date; time; pickerName: str
 
 - Sheet item (GET/PUT `/classes/:id/attendance`) gains: `excused: boolean`, `absenceReason: AbsenceReason|null`, `absenceId: string|null`, `absenceNote`, `refundEligible: boolean`. Response gains `holiday: {id,name}|null` and `skipped: [{childId, reason}]` (PUT only).
 - PUT item gains `absenceReason?` (`sick|family|other`, for `absent`) and `overrideAbsence?: boolean`.
+- **Refund eligibility is computed by the server.** `notifiedInAdvance` is still accepted (compatibility) but ignored: an absence is refundable only when a parent report made before the cutoff exists for that day. A teacher marking "absent" (even "có phép") = no refund. Rows saved before round 2 keep their stored flag while they stay absent. Response `notifiedInAdvance`/`refundEligible` show the computed value.
 - **"Tất cả có mặt" never overrides an excused absence**: an item `present|late` for a child with an excused day is skipped (`skipped[{childId, reason:'EXCUSED_ABSENCE'}]`) unless `overrideAbsence: true` (explicit per-child action) → see §1 override rule.
 - Confirmed holiday → 400 `SCHOOL_HOLIDAY` (pending holidays: no effect).
 
@@ -127,7 +130,8 @@ Item fields: `eating` (lunch), **`breakfast`** (same scale `all|most|half|little
 
 - `children.photoConsent: boolean`, **default false** (existing children too).
 - `photoConsent` is included in child lists (`GET /children`, child detail) and in the class roster / attendance sheet items teachers see, so the UI can show a badge.
-- `GET /children/:id/photo-consent` (parent of child, class teacher, admin) →
+- Parents see `photoConsent` only for their own children; another child → 403.
+- `GET /children/:id/photo-consent` (parent of own child, class teacher, admin) →
   `{childId, consent: boolean, updatedBy: {id, name} | null, updatedAt: string | null, history: [{before, after, by: {id, name, role}, at, note, source}]}`.
 - `PUT /children/:id/photo-consent` `{consent: boolean, note?}` (parent of child, admin) → same shape. Every change goes to `audit_events` (`child.photo_consent`) + jsonl.
 - Excel import: new optional column `Đồng ý chụp ảnh` (Có / Không, default Không) → stored as initial consent, history entry `source: import`.
