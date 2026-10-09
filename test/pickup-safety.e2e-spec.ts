@@ -322,7 +322,10 @@ describe('An toàn đón trẻ – đợt 1 (e2e, tester cases PK-*)', () => {
 
   // ───────────── HEIC photos (PM addition) ─────────────
   describe('ảnh HEIC/HEIF', () => {
-    const fx = (n: string) => require('fs').readFileSync(`/workspace/qa/heic/${n}`);
+    // QA fixtures live in the mamnon-qa repo; HEIC_FIXTURE_DIR overrides, else sibling checkout, else the old /workspace/qa path
+    const heicDir = [process.env.HEIC_FIXTURE_DIR, require('path').join(__dirname, '..', '..', 'mamnon-qa', 'heic'), '/workspace/qa/heic']
+      .find((d) => d && require('fs').existsSync(d)) ?? '/workspace/qa/heic';
+    const fx = (n: string) => require('fs').readFileSync(require('path').join(heicDir, n));
     it('real HEIC is accepted and stored as JPEG; fake .heic (exe / text) -> 400, for every photo upload', async () => {
       const ok = await as('ph1').multipart(`/children/${s.kids[0].id}/authorized-pickers`).field('fullName', 'Ảnh HEIC').field('relation', 'Cô').field('idNumber', '079000000777').field('phone1', '0911000777')
         .attach('photo', fx('that.heic'), { filename: 'that.heic', contentType: 'image/heic' }).expect(201);
