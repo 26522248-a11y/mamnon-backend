@@ -258,7 +258,7 @@ Cột: `Họ tên bé *`, `Ngày sinh *` (dd/mm/yyyy hoặc ô ngày), `Giới t
 - **Không có `dryRun`** → nhập trong **một transaction**, chỉ khi không có lỗi (có lỗi → 422 `IMPORT_INVALID`, `details` = báo cáo như dry run, không ghi gì). 200 `{ok, summary:{…các khoá như dry run, childrenCreated, guardiansCreated, parentAccountsCreated, parentAccountsLinked, classesCreated[], duplicatesSkipped}, imported:{children, guardians, parentAccountsCreated, parentAccountsLinked, classesCreated[]}, skippedDuplicates[{row, fullName, existingChildId}], warnings, rows[{row, result: created|skipped_duplicate, childId, fullName, className, guardians[{fullName, phone, username, account}]}], resultFile:{fileName, mimeType, base64}}`.
 - **SĐT đã có tài khoản nhưng khác tên (P0, chống lộ dữ liệu):** so tên sau khi chuẩn hoá Unicode NFC, không phân biệt hoa thường / khoảng trắng thừa, **có phân biệt dấu** ("Hà" ≠ "Ha"). Khác tên → lỗi dòng `{field: g1Phone|g2Phone, code: "PHONE_NAME_MISMATCH", existingAccount: {userId, name, childrenCount}}`, nhập thật → 422, không gắn. Cùng một SĐT mới nhưng khác tên giữa các dòng trong file → lỗi ở dòng sau `{code: "PHONE_NAME_MISMATCH", existingAccount: null, conflictRow}`. Trùng tên → gắn như cũ, kèm cảnh báo liệt kê các bé tài khoản đang có. preview: `guardians[].accountName` (+ `linkConfirmed: true` khi gắn nhờ xác nhận).
   - **Xác nhận gắn dù khác tên:** trường multipart `confirmLinks` = chuỗi JSON `[{"row": 5, "guardian": 2}]` (row = số dòng Excel, guardian = 1|2). Chỉ các cặp được liệt kê mới được gắn; dùng được cả với `dryRun=true` (dòng thành hợp lệ + cảnh báo). Sai định dạng → 400 `VALIDATION_ERROR`.
-- **Gỡ người giám hộ:** `DELETE /children/:id/guardians/:guardianId` (admin), body JSON `{"reason": "..."}` bắt buộc (trống → 400). Xoá bản ghi người giám hộ của bé → tài khoản phụ huynh liên kết mất quyền xem bé ngay (kể cả token đang dùng). Tài khoản vẫn giữ; 200 `{removed:{guardianId, childId, childName, fullName, relation, phone, canPickup}, account:{userId, username, name, remainingChildren[], accountHasNoChildren}|null, reason}`. Ghi audit (JSON lines) vào `$AUDIT_LOG_DIR/audit.jsonl` (mặc định `./logs/audit.jsonl`) + log stdout.
+- **Gỡ người giám hộ:** `DELETE /children/:id/guardians/:guardianId` (admin), body JSON `{"reason": "..."}` bắt buộc (trống → 400). Xoá bản ghi người giám hộ của bé → tài khoản phụ huynh liên kết mất quyền xem bé ngay (kể cả token đang dùng). Tài khoản vẫn giữ; 200 `{removed:{guardianId, childId, childName, fullName, relation, phone, canPickup}, account:{userId, username, name, remainingChildren[], accountHasNoChildren}|null, reason}`. Ghi audit vào bảng `audit_events` (cùng transaction, action `guardian.remove`, xem "Lịch sử thay đổi nhạy cảm") và bản phụ JSON lines `$AUDIT_LOG_DIR/audit.jsonl` (mặc định `./logs/audit.jsonl`) + log stdout.
 - **Trùng:** bé = cùng họ tên (bỏ khoảng trắng thừa, không phân biệt hoa thường) + ngày sinh → bỏ qua, không cập nhật. Phụ huynh = theo SĐT (chuẩn hoá `+84…`, dấu cách, ô số mất số 0): đã có tài khoản phụ huynh (tên đăng nhập hoặc SĐT) → gắn bé vào; chưa có → tạo tài khoản `username = SĐT`, `mustChangePassword = true`, mật khẩu tạm ngẫu nhiên 10 ký tự. Cùng SĐT ở nhiều dòng → một tài khoản.
 - **Mật khẩu tạm chỉ có trong `resultFile`** (xlsx base64), không lưu, không trả lại lần nữa, không có trong JSON. Các sheet:
   - `Mật khẩu tạm (in phát)`: chỉ tài khoản **mới tạo**, mỗi dòng một phụ huynh (một SĐT): `STT, Tên đăng nhập (SĐT), Họ tên phụ huynh, Mật khẩu tạm, Con (lớp)` (tất cả con trong lần nhập). Dòng 1 là tiêu đề, bên dưới chỉ có dữ liệu, dòng nào cũng có mật khẩu; cảnh báo nằm ở đầu/chân trang in. Không có tài khoản mới → chỉ có tiêu đề.
@@ -266,6 +266,24 @@ Cột: `Họ tên bé *`, `Ngày sinh *` (dd/mm/yyyy hoặc ô ngày), `Giới t
   - `Kết quả từng dòng`: kết quả từng dòng của file nhập. `Lưu ý`: cảnh báo bảo mật + giải thích các sheet.
 - **Lớp chưa có:** `createClasses=true` → tự tạo (độ tuổi đoán theo tên: Nhà trẻ / Mầm / Chồi / Lá, năm học hiện tại); `false` → lỗi từng dòng. Mặc định theo env `IMPORT_CREATE_CLASSES` (mặc định `false`).
 - Thời gian: 1000 dòng × 2 phụ huynh mới ≈ 40 giây (băm mật khẩu làm trước transaction), dry run < 1 giây.
+
+## Lịch sử thay đổi nhạy cảm (B18)
+
+Lưu trong DB (bảng `audit_events`, ghi **cùng transaction** với thay đổi; lỗi ghi → thay đổi không xảy ra), file `logs/audit.jsonl` chỉ là bản phụ. Không có API sửa / xoá.
+
+| Loại (`type`) | Ghi khi | `action` |
+|---|---|---|
+| `guardian_unlink` | `DELETE /children/:id/guardians/:guardianId` | `guardian.remove` (trước = người giám hộ, lý do) |
+| `phone_change` | `PATCH /children/:id/contact-phones` (PH / admin), `PATCH /users/:id` khi đổi `phone` | `child.contact_phones`, `user.phone` |
+| `photo_consent` | `PUT /children/:id/photo-consent`, nhập Excel có cột đồng ý ảnh | `child.photo_consent` |
+
+Mỗi dòng: loại, đối tượng (entity + id + nhãn chụp lại lúc ghi, ví dụ `Nguyễn Gia An · Mầm 1`), trước, sau, người sửa (id + tên chụp lại), IP, thời điểm. Migration `AuditSensitive` thêm cột `actor_name`, `target_label` và điền cho dữ liệu cũ (không xoá gì).
+
+- `GET /audit/sensitive?type&from&to&q&page&limit` (**chỉ admin**; GV / kế toán / PH → 403): `type` = 1 hoặc nhiều loại cách dấu phẩy (bỏ trống = tất cả); `from`/`to` = `YYYY-MM-DD` giờ VN, tính cả ngày; `q` tìm theo tên đối tượng / người sửa (không phân biệt dấu); `limit` ≤ 100 (mặc định 20). Mới nhất trước.
+  → `{total, page, limit, counts:{all, guardian_unlink, phone_change, photo_consent}, items:[{id, createdAt, type, typeLabel, action, target:{entity, id, label, childId, childName}, before, after, beforeText, afterText, reason, actor:{id, name, username, role, self}, ip}]}`. `counts` theo cùng khoảng ngày + `q` nhưng mọi loại (dùng cho chip lọc).
+- `GET /audit/sensitive/export` (cùng tham số, trừ phân trang) → file **CSV** UTF-8 có BOM (mở thẳng bằng Excel), tối đa 10.000 dòng; cột `Thời gian, Loại, Đối tượng, Trước, Sau, Lý do, Người sửa, Tên đăng nhập, Vai trò, IP`; ô bắt đầu bằng `= + - @` được thêm `'` để chống chèn công thức.
+- **SĐT luôn che giữa** trong cả JSON và CSV: `0912345456` → `0912 *** 456` (mọi trường có tên chứa `phone`). DB vẫn giữ số đầy đủ.
+- Nhật ký tổng quát mọi thao tác (CCCD, người đón, trực đón…): `GET /audit-events` (admin).
 
 ## Script dữ liệu một lần (đều có dry run, ghi log JSON vào `logs/`; nên `pg_dump` trước)
 

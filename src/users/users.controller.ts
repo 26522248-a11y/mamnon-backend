@@ -1,10 +1,12 @@
-import { Body, Controller, Delete, Get, HttpCode, Param, ParseUUIDPipe, Patch, Post, Query } from '@nestjs/common';
+import { Body, Controller, Delete, Get, HttpCode, Param, ParseUUIDPipe, Patch, Post, Query, Req } from '@nestjs/common';
 import { ApiBearerAuth, ApiProperty, ApiPropertyOptional, ApiTags } from '@nestjs/swagger';
 import { InjectRepository } from '@nestjs/typeorm';
 import * as bcrypt from 'bcryptjs';
 import { Type } from 'class-transformer';
 import { IsBoolean, IsIn, IsInt, IsOptional, IsString, Matches, Max, MaxLength, Min, MinLength } from 'class-validator';
+import { Request } from 'express';
 import { DataSource, Repository } from 'typeorm';
+import { recordAudit } from '../common/audit';
 import { LoginThrottleService } from '../auth/login-throttle.service';
 import { AuthUser, CurrentUser, Roles, UserContextService } from '../common/auth';
 import { AppError, BadRequest, NotFound } from '../common/errors';
@@ -84,7 +86,7 @@ export class UsersController {
   }
 
   @Patch(':id')
-  async update(@CurrentUser() me: AuthUser, @Param('id', ParseUUIDPipe) id: string, @Body() dto: UpdateUserDto) {
+  async update(@CurrentUser() me: AuthUser, @Param('id', ParseUUIDPipe) id: string, @Body() dto: UpdateUserDto, @Req() req: Request) {
     const u = await this.getOr404(id);
     const roleChange = dto.role !== undefined && dto.role !== u.role;
     const deactivate = dto.isActive === false && u.isActive;
@@ -95,9 +97,18 @@ export class UsersController {
       if (c.classIds.length || c.childIds.length)
         throw new AppError(409, 'USER_HAS_LINKS', 'Tài khoản đang gắn với lớp/trẻ; gỡ liên kết trước khi đổi vai trò');
     }
+    const beforePhone = u.phone ?? null;
     Object.assign(u, dto);
     if (roleChange || deactivate) u.tokenVersion += 1; // kick existing sessions
-    return this.view(await this.users.save(u));
+    const afterPhone = u.phone ?? null;
+    if (beforePhone === afterPhone) return this.view(await this.users.save(u));
+    // B18: phone change is a sensitive change → audit_events row in the same transaction
+    return this.ds.transaction(async (m) => {
+      const saved = await m.getRepository(User).save(u);
+      await recordAudit(m, me, { action: 'user.phone', entityType: 'user', entityId: u.id, before: { phone: beforePhone }, after: { phone: afterPhone },
+        targetLabel: `${u.name} (${u.username})`, ip: req?.ip ?? null });
+      return this.view(saved);
+    });
   }
 
   @Post(':id/reset-password') @HttpCode(200)
@@ -121,10 +132,10 @@ export class UsersController {
   }
 
   @Post(':id/deactivate') @HttpCode(200)
-  async deactivate(@CurrentUser() me: AuthUser, @Param('id', ParseUUIDPipe) id: string) { return this.update(me, id, { isActive: false }); }
+  async deactivate(@CurrentUser() me: AuthUser, @Param('id', ParseUUIDPipe) id: string) { return this.update(me, id, { isActive: false }, undefined as unknown as Request); }
 
   @Post(':id/activate') @HttpCode(200)
-  async activate(@CurrentUser() me: AuthUser, @Param('id', ParseUUIDPipe) id: string) { return this.update(me, id, { isActive: true }); }
+  async activate(@CurrentUser() me: AuthUser, @Param('id', ParseUUIDPipe) id: string) { return this.update(me, id, { isActive: true }, undefined as unknown as Request); }
 
   /** Hard delete only for accounts without any history; otherwise deactivate (keeps audit trail). */
   @Delete(':id') @HttpCode(204)

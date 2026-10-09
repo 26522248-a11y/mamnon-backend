@@ -599,10 +599,14 @@ export class AuditEvent {
   @Column({ name: 'actor_id', type: 'uuid', nullable: true }) actorId!: string | null;
   @Column({ name: 'actor_username', type: 'varchar', length: 60, nullable: true }) actorUsername!: string | null;
   @Column({ name: 'actor_role', type: 'varchar', length: 20, nullable: true }) actorRole!: string | null;
+  /** snapshot of the actor's display name at the time of the action (B18) */
+  @Column({ name: 'actor_name', type: 'varchar', length: 120, nullable: true }) actorName!: string | null;
   @Column({ length: 60 }) action!: string;
   @Column({ name: 'entity_type', type: 'varchar', length: 40 }) entityType!: string;
   @Column({ name: 'entity_id', type: 'varchar', length: 64, nullable: true }) entityId!: string | null;
   @Column({ name: 'child_id', type: 'uuid', nullable: true }) childId!: string | null;
+  /** snapshot of a human-readable target (e.g. "Nguyễn Gia An · Mầm 1"); defaults to the child's name + class (B18) */
+  @Column({ name: 'target_label', type: 'varchar', length: 200, nullable: true }) targetLabel!: string | null;
   @Column({ type: 'jsonb', nullable: true }) before!: Record<string, unknown> | null;
   @Column({ type: 'jsonb', nullable: true }) after!: Record<string, unknown> | null;
   @Column({ type: 'text', nullable: true }) reason!: string | null;

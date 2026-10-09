@@ -1,8 +1,8 @@
-import { Body, Controller, Delete, Get, HttpCode, Param, ParseUUIDPipe, Patch, Post, Query, Res, UploadedFile, UseInterceptors } from '@nestjs/common';
+import { Body, Controller, Delete, Get, HttpCode, Param, ParseUUIDPipe, Patch, Post, Query, Req, Res, UploadedFile, UseInterceptors } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { ApiBearerAuth, ApiConsumes, ApiProperty, ApiPropertyOptional, ApiTags } from '@nestjs/swagger';
 import { IsIn, IsOptional, IsString, IsUUID, Matches, MaxLength, MinLength } from 'class-validator';
-import { Response } from 'express';
+import { Request, Response } from 'express';
 import { DataSource, In, IsNull } from 'typeorm';
 import { AccessService } from '../common/access';
 import { AuthUser, CurrentUser, Roles } from '../common/auth';
@@ -246,7 +246,7 @@ export class ContactPhonesController {
   }
 
   @Patch() @Roles('admin', 'parent')
-  async update(@CurrentUser() u: AuthUser, @Param('id', ParseUUIDPipe) id: string, @Body() dto: ContactPhonesDto) {
+  async update(@CurrentUser() u: AuthUser, @Param('id', ParseUUIDPipe) id: string, @Body() dto: ContactPhonesDto, @Req() req: Request) {
     const c = await this.access.getChildOr404(id);
     if (!(u.role === 'admin' || (u.role === 'parent' && u.childIds.includes(id)))) throw Forbidden('Chỉ phụ huynh của bé được sửa số liên hệ');
     const phone1 = phoneOr400(dto.phone1, 'phone1');
@@ -257,7 +257,7 @@ export class ContactPhonesController {
     await this.ds.transaction(async (m) => {
       await m.getRepository(Child).update(id, { contactPhone1: phone1, contactPhone2: phone2, contactPhonesUpdatedBy: u.id, contactPhonesUpdatedAt: new Date() });
       await m.getRepository(ChildContactHistory).insert({ childId: id, before, after: { phone1, phone2 }, changedBy: u.id });
-      await recordAudit(m, u, { action: 'child.contact_phones', entityType: 'child', entityId: id, childId: id, before, after: { phone1, phone2 } });
+      await recordAudit(m, u, { action: 'child.contact_phones', entityType: 'child', entityId: id, childId: id, before, after: { phone1, phone2 }, ip: req.ip ?? null });
     });
     if (u.role === 'parent') {
       const admins = await this.ds.getRepository(User).find({ where: { role: 'admin', isActive: true }, select: { id: true } });
