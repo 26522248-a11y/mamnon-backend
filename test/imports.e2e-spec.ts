@@ -161,12 +161,27 @@ describe('Excel import: children + guardians (e2e)', () => {
     // result xlsx carries the temp passwords; they work once and force a change
     const wb = await readResult(r.body.resultFile.base64);
     expect(r.body.resultFile).toMatchObject({ mimeType: expect.stringContaining('spreadsheetml'), fileName: expect.stringMatching(/\.xlsx$/) });
-    const acc = wb.getWorksheet('Tài khoản phụ huynh')!;
-    const rowsAcc: any[] = []; acc.eachRow((row, i) => { if (i > 1 && row.getCell(1).value) rowsAcc.push(row.values); });
-    const ha = rowsAcc.find((v) => v[1] === '0977111222');
-    expect(ha[3]).toMatch(/^[A-Za-z2-9]{10}$/);
-    expect(ha[5]).toContain('Phạm Minh Châu');
-    expect(rowsAcc.find((v) => v[1] === '0912000001')[4]).toBe('Đã có');
+    expect(wb.worksheets.map((w) => w.name)).toEqual(['Mật khẩu tạm (in phát)', 'Tài khoản đã có', 'Kết quả từng dòng', 'Lưu ý']);
+    const sheetRows = (name: string) => { const out: any[][] = []; wb.getWorksheet(name)!.eachRow({ includeEmpty: true }, (row) => out.push((row.values as any[]).slice(1))); return out; };
+    // print sheet: header + exactly one row per NEW account, every row has a password, no blank / note rows
+    const pw = sheetRows('Mật khẩu tạm (in phát)');
+    expect(pw[0]).toEqual(['STT', 'Tên đăng nhập (SĐT)', 'Họ tên phụ huynh', 'Mật khẩu tạm', 'Con (lớp)']);
+    expect(pw).toHaveLength(1 + r.body.imported.parentAccountsCreated);
+    expect(pw.slice(1).map((v) => v[1]).sort()).toEqual(['0977111222', '0977111333']);
+    for (const v of pw.slice(1)) { expect(v[0]).toEqual(expect.any(Number)); expect(v[3]).toMatch(/^[A-Za-z2-9]{10}$/); expect(v[4]).toBeTruthy(); }
+    const ha = pw.find((v) => v[1] === '0977111222')!;
+    expect(ha[4]).toBe('Phạm Minh Khang (Mầm 1), Phạm Minh Châu (Nhà trẻ 2)');
+    // linked existing account: separate sheet, labelled, no password anywhere
+    expect(sheetRows('Tài khoản đã có')).toEqual([
+      ['Tên đăng nhập (SĐT)', 'Họ tên', 'Mật khẩu', 'Con mới gắn (lớp)'],
+      ['0912000001', expect.any(String), 'Tài khoản đã có – dùng mật khẩu cũ', 'Bé Em Của An (Mầm 1)'],
+    ]);
+    expect(pw.some((v) => v[1] === '0912000001')).toBe(false);
+    expect(sheetRows('Lưu ý')[0][0]).toContain('Mật khẩu tạm chỉ có trong file này');
+    // real import returns the same summary keys as dryRun + what was written
+    expect(Object.keys(r.body.summary)).toEqual(expect.arrayContaining(Object.keys(dry.body.summary)));
+    expect(r.body.summary).toMatchObject({ ...dry.body.summary, childrenCreated: 3, guardiansCreated: 4, parentAccountsCreated: 2, parentAccountsLinked: 1,
+      classesCreated: ['Nhà trẻ 2'], duplicatesSkipped: 1 });
     const login = await request(http).post('/api/v1/auth/login').send({ username: '0977111222', password: ha[3] }).expect(200);
     expect(login.body.user).toMatchObject({ role: 'parent', mustChangePassword: true });
     const kids = (await request(http).get('/api/v1/children?limit=50').set({ Authorization: `Bearer ${login.body.accessToken}` }).expect(200)).body.items.map((x: any) => x.fullName).sort();
@@ -181,6 +196,9 @@ describe('Excel import: children + guardians (e2e)', () => {
     const users = await count('users');
     const again = await up(buf, '?createClasses=true').expect(200);
     expect(again.body.imported).toMatchObject({ children: 0, guardians: 0, parentAccountsCreated: 0, classesCreated: [] });
+    expect(again.body.summary).toMatchObject({ childrenToCreate: 0, duplicatesToSkip: 4, childrenCreated: 0, parentAccountsCreated: 0, duplicatesSkipped: 4 });
+    const wb2 = await readResult(again.body.resultFile.base64);
+    expect(wb2.getWorksheet('Mật khẩu tạm (in phát)')!.actualRowCount).toBe(1); // header only: nothing to print
     expect(again.body.skippedDuplicates).toHaveLength(4);
     expect(await count('users')).toBe(users);
   });
@@ -231,6 +249,31 @@ describe('Excel import: children + guardians (e2e)', () => {
     const big = Buffer.concat([Buffer.from('PK\x03\x04'), Buffer.alloc(5 * 1024 * 1024 + 10)]);
     const r = await up(big, '?dryRun=true').expect(413);
     expect(r.body.code).toBe('PAYLOAD_TOO_LARGE');
+  });
+  it('result file: 3 new + 2 linked accounts (one locked) -> print sheet has exactly 3 rows, all with passwords', async () => {
+    await ds.query(`UPDATE users SET is_active = false WHERE username = '0977111333'`);
+    try {
+      const buf = await xlsx([
+        base({ fullName: 'QA KQ Một', dob: '01/02/2022', g1Name: 'QA KQ Bố Một', g1Phone: '0988000001' }),
+        base({ fullName: 'QA KQ Hai', dob: '02/02/2022', g1Name: 'QA KQ Mẹ Hai', g1Phone: '0988000002', g2Name: 'QA KQ Bà Hai', g2Relation: 'Bà', g2Phone: '0988000003' }),
+        base({ fullName: 'QA KQ Ba', dob: '03/02/2022', g1Name: 'QA KQ Bố Một', g1Phone: '0988000001', g2Name: 'Phạm Thu Hà', g2Relation: 'Mẹ', g2Phone: '0977111222' }), // new (2nd child) + existing
+        base({ fullName: 'QA KQ Bốn', dob: '04/02/2022', g1Name: 'Phạm Văn Long', g1Phone: '0977111333' }),                                                          // existing, locked
+      ]);
+      const r = await up(buf).expect(200);
+      expect(r.body.summary).toMatchObject({ childrenToCreate: 4, childrenCreated: 4, parentAccountsToCreate: 3, parentAccountsCreated: 3, parentAccountsToLink: 2, parentAccountsLinked: 2, guardiansCreated: 6 });
+      const wb = await readResult(r.body.resultFile.base64);
+      const rows = (n: string) => { const out: any[][] = []; wb.getWorksheet(n)!.eachRow({ includeEmpty: true }, (row, i) => { if (i > 1) out.push((row.values as any[]).slice(1)); }); return out; };
+      const pw = rows('Mật khẩu tạm (in phát)');
+      expect(pw.map((v) => [v[0], v[1]])).toEqual([[1, '0988000001'], [2, '0988000002'], [3, '0988000003']]);
+      expect(pw.every((v) => /^[A-Za-z2-9]{10}$/.test(v[3]))).toBe(true);
+      expect(pw[0][4]).toBe('QA KQ Một (Mầm 1), QA KQ Ba (Mầm 1)'); // one row per parent, all children listed
+      const ex = rows('Tài khoản đã có');
+      expect(ex.map((v) => [v[0], v[2]])).toEqual([
+        ['0977111222', 'Tài khoản đã có – dùng mật khẩu cũ'],
+        ['0977111333', expect.stringMatching(/^Tài khoản đã có – dùng mật khẩu cũ \(đang bị khoá/)],
+      ]);
+      expect(ex.flat().some((x) => typeof x === 'string' && /^[A-Za-z2-9]{10}$/.test(x) && !x.startsWith('0'))).toBe(false);
+    } finally { await ds.query(`UPDATE users SET is_active = true WHERE username = '0977111333'`); }
   });
   const login_ = (u: string) => login(u);
 });

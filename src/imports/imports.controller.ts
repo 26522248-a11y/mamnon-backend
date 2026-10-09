@@ -82,24 +82,24 @@ export class ImportsController {
         classId.set(nameKey(name), c.id); classesCreated.push(name);
       }
       // parent accounts (one per phone)
-      const accounts = new Map<string, { userId: string; created: boolean; name: string; password?: string; children: string[] }>();
+      const accounts = new Map<string, { userId: string; created: boolean; active: boolean; name: string; password?: string; children: string[] }>();
       for (const p of a.plans) for (const g of p.guardians) {
         if (p.action !== 'create') continue;
         let acc = accounts.get(g.phone);
         if (!acc) {
           const ex = a.users.get(g.phone);
-          if (ex) acc = { userId: ex.id, created: false, name: ex.name, children: [] };
+          if (ex) acc = { userId: ex.id, created: false, active: ex.active, name: ex.name, children: [] };
           else {
             let h = hashed.get(g.phone);
             if (!h) { const pw = tempPassword(); h = { password: pw, hash: await bcrypt.hash(pw, TEMP_HASH_COST) }; }
             const password = h.password;
             const nu = await m.save(User, m.create(User, { username: g.phone, name: g.fullName, role: 'parent', phone: g.phone, isActive: true, mustChangePassword: true,
               passwordHash: h.hash }));
-            acc = { userId: nu.id, created: true, name: g.fullName, password, children: [] };
+            acc = { userId: nu.id, created: true, active: true, name: g.fullName, password, children: [] };
           }
           accounts.set(g.phone, acc);
         }
-        acc.children.push(p.child.fullName);
+        acc.children.push(`${p.child.fullName} (${p.child.className})`);
       }
       // children + guardians
       const results: { row: number; result: 'created' | 'skipped_duplicate'; childId: string; fullName: string; className: string; guardians: { fullName: string; phone: string; username: string; account: string }[] }[] = [];
@@ -116,11 +116,16 @@ export class ImportsController {
           guardians: p.guardians.map((g) => ({ fullName: g.fullName, phone: g.phone, username: g.phone, account: accounts.get(g.phone)!.created ? 'created' : 'existing' })) });
       }
       const created = [...accounts.entries()].filter(([, x]) => x.created);
-      const resultFile = await this.resultXlsx(results, accounts);
+      const resultFile = await this.resultXlsx(results, accounts, today);
+      const imported = { children: results.filter((r) => r.result === 'created').length, guardians: guardiansCreated, parentAccountsCreated: created.length,
+        parentAccountsLinked: accounts.size - created.length, classesCreated };
+      const { summary } = this.report(a);
       return {
         ...options, sheet: parsed.sheet, totalRows: parsed.totalRows, ok: true,
-        imported: { children: results.filter((r) => r.result === 'created').length, guardians: guardiansCreated, parentAccountsCreated: created.length,
-          parentAccountsLinked: accounts.size - created.length, classesCreated },
+        // same keys as the dryRun summary (what was planned) + what was actually written
+        summary: { ...summary, childrenCreated: imported.children, guardiansCreated: imported.guardians, parentAccountsCreated: imported.parentAccountsCreated,
+          parentAccountsLinked: imported.parentAccountsLinked, classesCreated, duplicatesSkipped: results.filter((r) => r.result === 'skipped_duplicate').length },
+        imported,
         skippedDuplicates: results.filter((r) => r.result === 'skipped_duplicate').map((r) => ({ row: r.row, fullName: r.fullName, existingChildId: r.childId })),
         warnings: a.warnings, rows: results,
         /** Only copy of the temporary passwords – not stored anywhere, not returned again. */
@@ -228,22 +233,43 @@ export class ImportsController {
     return { errors, warnings, plans, classes, classesToCreate, users };
   }
 
+  /**
+   * Printable result file. Sheet 1 = ONLY newly created parent accounts (one row per account, every row has a temp password),
+   * header in row 1 and nothing but data below it (the warning is in the page header/footer + the "Lưu ý" sheet), so it can be
+   * printed / cut into slips as is. Existing accounts the children were linked to are on their own sheet without passwords.
+   */
   private async resultXlsx(results: { row: number; result: string; childId: string; fullName: string; className: string; guardians: { fullName: string; phone: string; account: string }[] }[],
-    accounts: Map<string, { created: boolean; name: string; password?: string; children: string[] }>) {
+    accounts: Map<string, { created: boolean; active: boolean; name: string; password?: string; children: string[] }>, today: string) {
+    const WARN = 'Mật khẩu tạm chỉ có trong file này, không lấy lại được. Phụ huynh phải đổi mật khẩu khi đăng nhập lần đầu. Giữ file kín, xoá sau khi đã phát cho phụ huynh.';
     const wb = new ExcelJS.Workbook();
-    const acc = wb.addWorksheet('Tài khoản phụ huynh');
-    acc.columns = [{ header: 'Tên đăng nhập (SĐT)', key: 'u', width: 20 }, { header: 'Họ tên', key: 'n', width: 24 }, { header: 'Mật khẩu tạm', key: 'p', width: 16 },
-      { header: 'Tài khoản', key: 's', width: 16 }, { header: 'Con', key: 'c', width: 40 }];
-    for (const [phone, a] of accounts) acc.addRow({ u: phone, n: a.name, p: a.password ?? '(đã có – giữ mật khẩu cũ)', s: a.created ? 'Mới tạo' : 'Đã có', c: [...new Set(a.children)].join(', ') });
-    acc.getRow(1).font = { bold: true };
-    acc.addRow([]);
-    acc.addRow(['Mật khẩu tạm chỉ có trong file này. Phụ huynh phải đổi mật khẩu khi đăng nhập lần đầu. Giữ file kín, xoá sau khi đã phát cho phụ huynh.']).font = { italic: true, color: { argb: 'FFC00000' } };
+    const bold = (ws: ExcelJS.Worksheet) => { ws.getRow(1).font = { bold: true }; ws.views = [{ state: 'frozen', ySplit: 1 }]; };
+    const kids = (a: { children: string[] }) => [...new Set(a.children)].join(', ');
+    const pw = wb.addWorksheet('Mật khẩu tạm (in phát)', {
+      pageSetup: { orientation: 'landscape', fitToPage: true, fitToWidth: 1, fitToHeight: 0, printTitlesRow: '1:1' },
+      headerFooter: { oddHeader: `&L&B${WARN.split('.')[0]}.&R${today}`, oddFooter: '&LĐổi mật khẩu khi đăng nhập lần đầu&RTrang &P/&N' },
+    });
+    pw.columns = [{ header: 'STT', key: 'i', width: 6 }, { header: 'Tên đăng nhập (SĐT)', key: 'u', width: 20 }, { header: 'Họ tên phụ huynh', key: 'n', width: 26 },
+      { header: 'Mật khẩu tạm', key: 'p', width: 16 }, { header: 'Con (lớp)', key: 'c', width: 50 }];
+    let i = 0;
+    for (const [phone, a] of accounts) if (a.created && a.password) pw.addRow({ i: ++i, u: phone, n: a.name, p: a.password, c: kids(a) });
+    pw.getColumn('u').numFmt = '@'; pw.getColumn('p').font = { name: 'Consolas', size: 12, bold: true }; pw.getCell('D1').font = { bold: true };
+    pw.getColumn('c').alignment = { wrapText: true, vertical: 'top' };
+    bold(pw);
+    const ex = wb.addWorksheet('Tài khoản đã có');
+    ex.columns = [{ header: 'Tên đăng nhập (SĐT)', key: 'u', width: 20 }, { header: 'Họ tên', key: 'n', width: 26 }, { header: 'Mật khẩu', key: 's', width: 44 }, { header: 'Con mới gắn (lớp)', key: 'c', width: 50 }];
+    for (const [phone, a] of accounts) if (!a.created) ex.addRow({ u: phone, n: a.name, s: a.active ? 'Tài khoản đã có – dùng mật khẩu cũ' : 'Tài khoản đã có – dùng mật khẩu cũ (đang bị khoá, cần mở khoá)', c: kids(a) });
+    bold(ex);
     const rs = wb.addWorksheet('Kết quả từng dòng');
     rs.columns = [{ header: 'Dòng', key: 'r', width: 7 }, { header: 'Họ tên bé', key: 'n', width: 26 }, { header: 'Lớp', key: 'l', width: 12 },
       { header: 'Kết quả', key: 'k', width: 26 }, { header: 'Phụ huynh', key: 'g', width: 50 }, { header: 'Mã bé', key: 'i', width: 38 }];
     for (const r of results) rs.addRow({ r: r.row, n: r.fullName, l: r.className, k: r.result === 'created' ? 'Đã thêm' : 'Bỏ qua – đã có trong hệ thống',
-      g: r.guardians.map((g) => `${g.fullName} (${g.phone}${g.account === 'created' ? ', tài khoản mới' : ''})`).join('; '), i: r.childId });
-    rs.getRow(1).font = { bold: true };
+      g: r.guardians.map((g) => `${g.fullName} (${g.phone}${g.account === 'created' ? ', tài khoản mới' : ', tài khoản đã có'})`).join('; '), i: r.childId });
+    bold(rs);
+    const note = wb.addWorksheet('Lưu ý');
+    note.columns = [{ width: 110 }];
+    [WARN, `Sheet "Mật khẩu tạm (in phát)": ${i} tài khoản mới, mỗi dòng một phụ huynh (một SĐT), in và cắt phát cho từng phụ huynh.`,
+      `Sheet "Tài khoản đã có": ${accounts.size - i} tài khoản đã có từ trước, bé được gắn thêm vào; phụ huynh dùng mật khẩu cũ (không có mật khẩu mới).`,
+      'Sheet "Kết quả từng dòng": kết quả từng dòng của file nhập.'].forEach((t, k) => { const r = note.addRow([t]); r.getCell(1).alignment = { wrapText: true }; if (!k) r.font = { bold: true, color: { argb: 'FFC00000' } }; });
     return Buffer.from(await wb.xlsx.writeBuffer());
   }
 }
