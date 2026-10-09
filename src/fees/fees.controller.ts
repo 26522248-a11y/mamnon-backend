@@ -1,5 +1,8 @@
-import { schoolInfo } from '../common/school';
-import { Body, Controller, Delete, Get, HttpCode, Param, ParseUUIDPipe, Patch, Post, Query } from '@nestjs/common';
+import { bankConfig, schoolInfo } from '../common/school';
+import { recordAudit } from '../common/audit';
+import { vietQrPayload } from './vietqr';
+import { Body, Controller, Delete, Get, HttpCode, Param, ParseUUIDPipe, Patch, Post, Query, Req, Res } from '@nestjs/common';
+import type { Request, Response } from 'express';
 import { ApiBearerAuth, ApiProperty, ApiPropertyOptional, ApiTags, PartialType } from '@nestjs/swagger';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Type } from 'class-transformer';
@@ -16,7 +19,7 @@ import { vndInWords } from '../common/money';
 import { NotificationsService } from '../notifications/notifications.service';
 import {
   Attendance, Child, CreditTransaction, FeeItem, FeeScope, FeeType, Invoice, InvoiceAudit, InvoiceLine, LineKind, MealRefund, Payment,
-  PickupRequest, RefundPayout,
+  PickupRequest, RefundPayout, TransferClaim, User,
 } from '../database/entities';
 
 /**
@@ -115,6 +118,24 @@ export class PaymentDto {
   @ApiPropertyOptional({ example: 'Nguyễn Văn Hùng' }) @IsOptional() @IsString() @MaxLength(120) payerName?: string;
   @ApiPropertyOptional() @IsOptional() @IsString() @MaxLength(500) note?: string;
 }
+export class TransferClaimDto {
+  @ApiPropertyOptional({ example: 3050000, description: 'Mặc định = số còn nợ' }) @IsOptional() @IsInt() @Min(1) @Max(MAX_VND) amount?: number;
+  @ApiPropertyOptional({ description: 'ISO 8601, mặc định bây giờ, không ở tương lai' }) @IsOptional() @IsISO8601() transferredAt?: string;
+  @ApiPropertyOptional() @IsOptional() @IsString() @MaxLength(500) note?: string;
+}
+export class ConfirmClaimDto {
+  @ApiPropertyOptional({ example: 3050000, description: 'Số tiền thực nhận; mặc định = số phụ huynh báo' }) @IsOptional() @IsInt() @Min(1) @Max(MAX_VND) amount?: number;
+  @ApiPropertyOptional({ description: 'ISO 8601, mặc định bây giờ' }) @IsOptional() @IsISO8601() receivedAt?: string;
+  @ApiPropertyOptional() @IsOptional() @IsString() @MaxLength(500) note?: string;
+}
+export class RejectClaimDto {
+  @ApiProperty({ example: 'Chưa thấy tiền về tài khoản' }) @IsString() @MaxLength(500) reason!: string;
+}
+export class TransferClaimQuery {
+  @ApiPropertyOptional({ enum: ['pending_confirmation', 'confirmed', 'rejected'] }) @IsOptional() @IsIn(['pending_confirmation', 'confirmed', 'rejected']) status?: TransferClaim['status'];
+  @ApiPropertyOptional() @IsOptional() @IsUUID() classId?: string;
+  @ApiPropertyOptional({ example: '2026-11' }) @IsOptional() @Matches(PERIOD) period?: string;
+}
 export class DebtQuery {
   @ApiPropertyOptional() @IsOptional() @IsUUID() classId?: string;
   @ApiPropertyOptional({ description: 'Chỉ tính hoá đơn đến kỳ này (YYYY-MM)' }) @IsOptional() @Matches(PERIOD) upToPeriod?: string;
@@ -140,12 +161,21 @@ const paymentView = (p: Payment) => ({
 });
 /** Overdue from 00:01 Vietnam time on the day after the due date (PM rule). */
 const isOverdue = (i: Invoice) => i.status !== 'void' && i.status !== 'paid' && i.dueDate < overdueCutoff();
-const invoiceView = (i: Invoice, detail = false) => ({
+export const claimView = (c: TransferClaim) => ({
+  id: c.id, invoiceId: c.invoiceId, childId: c.childId, amount: c.amount, transferredAt: c.transferredAt, note: c.note, status: c.status,
+  onBehalf: c.onBehalf, claimedAt: c.claimedAt, claimedBy: c.claimedBy ? { id: c.claimedBy, name: c.claimant?.name ?? null } : null,
+  decidedAt: c.decidedAt, decidedBy: c.decidedBy ? { id: c.decidedBy, name: c.decider?.name ?? null } : null, rejectReason: c.rejectReason,
+  paymentId: c.paymentId, receiptNo: c.payment?.receiptNo ?? null,
+});
+const invoiceView = (i: Invoice, detail = false, claim?: TransferClaim | null) => ({
   id: i.id, invoiceNo: i.invoiceNo, childId: i.childId, childName: i.child?.fullName, classId: i.classId, className: i.classRoom?.name ?? null,
   period: i.period, issueDate: i.issueDate, dueDate: i.dueDate, totalAmount: i.totalAmount, paidAmount: i.paidAmount,
   balance: i.status === 'void' ? 0 : i.totalAmount - i.paidAmount, status: i.status, note: i.note, overdue: isOverdue(i),
   /** true: 0đ, miễn/giảm 100% -> status paid, no receipt exists or can be created */
   waived: i.status !== 'void' && i.totalAmount === 0 && (i.note ?? '').split(' | ').includes(WAIVER_NOTE),
+  /** 'pending_confirmation' while a parent's "Tôi đã chuyển" waits for the accountant; status/balance are NOT changed by it */
+  paymentStatus: claim?.status === 'pending_confirmation' ? 'pending_confirmation' as const : null,
+  transferClaim: claim ? claimView(claim) : null,
   ...(detail ? {
     lines: (i.lines ?? []).sort((a, b) => (a.kind === 'charge' ? 0 : 1) - (b.kind === 'charge' ? 0 : 1)).map(lineView),
     payments: (i.payments ?? []).map(paymentView),
@@ -454,7 +484,8 @@ export class FeesController {
     else if (q.status) qb.andWhere('i.status = :st', { st: q.status });
     qb.orderBy('i.period', 'DESC').addOrderBy('c.fullName', 'ASC').skip((page - 1) * limit).take(limit);
     const [rows, total] = await qb.getManyAndCount();
-    return { items: rows.map((i) => invoiceView(i)), page, limit, total };
+    const claims = await this.latestClaims(rows.map((i) => i.id));
+    return { items: rows.map((i) => invoiceView(i, false, claims.get(i.id))), page, limit, total };
   }
 
   @Get('invoices/:id') @Roles('admin', 'accountant', 'parent')
@@ -465,7 +496,17 @@ export class FeesController {
     });
     if (!i) throw NotFound('Không tìm thấy hoá đơn');
     this.assertFinanceChild(u, i.childId);
-    return invoiceView(i, true);
+    return invoiceView(i, true, (await this.latestClaims([i.id])).get(i.id));
+  }
+
+  /** Latest transfer claim per invoice. */
+  private async latestClaims(invoiceIds: string[]) {
+    const out = new Map<string, TransferClaim>();
+    if (!invoiceIds.length) return out;
+    const rows = await this.ds.getRepository(TransferClaim).createQueryBuilder('t').leftJoinAndSelect('t.claimant', 'cu').leftJoinAndSelect('t.decider', 'du')
+      .leftJoinAndSelect('t.payment', 'p').where('t.invoice_id = ANY(:ids)', { ids: invoiceIds }).orderBy('t.claimed_at', 'DESC').getMany();
+    for (const r of rows) if (!out.has(r.invoiceId)) out.set(r.invoiceId, r);
+    return out;
   }
 
   private audit(m: EntityManager, u: AuthUser, invoiceId: string, action: InvoiceAudit['action'], lineId: string | null, oldValue: any, newValue: any) {
@@ -580,6 +621,16 @@ export class FeesController {
       note: `Tiền đã nộp cho hoá đơn ${i.invoiceNo} (đã huỷ) chuyển thành số dư`, createdBy: u.id }));
     await this.audit(m, u, id, 'voided', null, { status: i.status, totalAmount: i.totalAmount, paidAmount: i.paidAmount },
       { status: 'void', reason, movedToCredit: i.paidAmount, creditRestored: usedCredit });
+    // an open "Tôi đã chuyển" claim cannot be confirmed any more → auto-reject, tell the parent
+    for (const c of await m.find(TransferClaim, { where: { invoiceId: id, status: 'pending_confirmation' } })) {
+      const after = { ...c, status: 'rejected' as const, rejectReason: 'Hoá đơn đã huỷ', decidedBy: u.id, decidedAt: new Date() };
+      await m.update(TransferClaim, c.id, { status: after.status, rejectReason: after.rejectReason, decidedBy: u.id, decidedAt: after.decidedAt });
+      await recordAudit(m, u, { action: 'transfer_claim.reject', entityType: 'transfer_claim', entityId: c.id, childId: c.childId,
+        before: claimView(c), after: claimView(after as TransferClaim), reason: 'Hoá đơn đã huỷ', data: { invoiceId: id, invoiceNo: i.invoiceNo, auto: true } });
+      await this.notify.toParentsOfChild(c.childId, { type: 'transfer_claim_rejected', important: true, title: `Hoá đơn ${i.invoiceNo} đã huỷ`,
+        body: `Yêu cầu xác nhận chuyển khoản ${c.amount.toLocaleString('vi-VN')}đ không được xử lý vì hoá đơn đã huỷ. Nhà trường sẽ liên hệ lại.`,
+        data: { claimId: c.id, invoiceId: id, reason: 'Hoá đơn đã huỷ' } }, m);
+    }
     // release refunded meal days / clawbacks so the next invoice (or withdrawal settlement) handles them again
     const lineIds = i.lines.map((l) => l.id);
     if (lineIds.length) {
@@ -800,7 +851,11 @@ export class FeesController {
   /** Pay an invoice. Any amount above the outstanding balance becomes credit for the child (applied next month). */
   @Post('invoices/:id/payments') @Roles('admin', 'accountant')
   async pay(@CurrentUser() u: AuthUser, @Param('id', ParseUUIDPipe) id: string, @Body() dto: PaymentDto) {
-    const paymentId = await this.ds.transaction(async (m) => {
+    const paymentId = await this.ds.transaction((m) => this.payCore(m, u, id, dto));
+    return this.receipt(u, paymentId);
+  }
+
+  private async payCore(m: EntityManager, u: AuthUser, id: string, dto: PaymentDto) {
       const i = await m.findOne(Invoice, { where: { id }, lock: { mode: 'pessimistic_write' } });
       if (!i) throw NotFound('Không tìm thấy hoá đơn');
       if (i.status === 'void') throw BadRequest('Hoá đơn đã huỷ', 'INVOICE_VOID');
@@ -820,8 +875,136 @@ export class FeesController {
           note: `Trả thừa ở phiếu ${p.receiptNo}`, createdBy: u.id }));
       }
       return p.id;
+  }
+
+  // ───── QR payment (VietQR) + "Tôi đã chuyển" transfer claims (round 3) ─────
+  /** Payable invoice for QR / claims: 404, 403 (other child), 409 INVOICE_VOID / ZERO_INVOICE / ALREADY_PAID. */
+  private assertPayable(u: AuthUser, i: Invoice | null): asserts i is Invoice {
+    if (!i) throw NotFound('Không tìm thấy hoá đơn');
+    this.assertFinanceChild(u, i.childId);
+    if (i.status === 'void') throw new AppError(409, 'INVOICE_VOID', 'Hoá đơn đã huỷ');
+    if (i.totalAmount === 0) throw new AppError(409, 'ZERO_INVOICE', 'Hoá đơn 0đ không cần thanh toán');
+    if (i.totalAmount - i.paidAmount <= 0) throw new AppError(409, 'ALREADY_PAID', 'Hoá đơn đã thanh toán đủ');
+  }
+  private claimRepoQb() {
+    return this.ds.getRepository(TransferClaim).createQueryBuilder('t').leftJoinAndSelect('t.claimant', 'cu').leftJoinAndSelect('t.decider', 'du')
+      .leftJoinAndSelect('t.payment', 'p');
+  }
+
+  @Get('invoices/:id/qr') @Roles('admin', 'accountant', 'parent')
+  async qr(@CurrentUser() u: AuthUser, @Param('id', ParseUUIDPipe) id: string) {
+    const i = await this.invoices.findOne({ where: { id } });
+    this.assertPayable(u, i);
+    const cfg = bankConfig();
+    if (!cfg.bank) throw new AppError(409, 'BANK_ACCOUNT_NOT_CONFIGURED', 'Nhà trường chưa cấu hình tài khoản nhận chuyển khoản', { schoolPhone: schoolInfo().phone });
+    const amount = i.totalAmount - i.paidAmount;
+    const pending = (await this.latestClaims([id])).get(id);
+    return {
+      invoiceId: i.id, invoiceNo: i.invoiceNo, amount, transferContent: i.invoiceNo, bank: cfg.bank,
+      payload: vietQrPayload({ bin: cfg.bank.bin, accountNo: cfg.bank.accountNo, amount, content: i.invoiceNo }),
+      sample: cfg.sample, pendingClaim: pending?.status === 'pending_confirmation' ? claimView(pending) : null,
+    };
+  }
+
+  /** "Tôi đã chuyển": records a claim only; the invoice is NOT paid until an accountant confirms. Idempotent (200 = existing). */
+  @Post('invoices/:id/transfer-claims') @Roles('admin', 'accountant', 'parent')
+  async claim(@CurrentUser() u: AuthUser, @Param('id', ParseUUIDPipe) id: string, @Body() dto: TransferClaimDto, @Req() req: Request,
+    @Res({ passthrough: true }) res: Response) {
+    const at = dto.transferredAt ? new Date(dto.transferredAt) : new Date();
+    if (at.getTime() > Date.now() + 5 * 60_000) throw BadRequest('Thời điểm chuyển khoản không được ở tương lai', 'TRANSFERRED_AT_IN_FUTURE');
+    const r = await this.ds.transaction(async (m) => {
+      const i = await m.findOne(Invoice, { where: { id }, lock: { mode: 'pessimistic_write' } });
+      this.assertPayable(u, i);
+      const existing = await m.findOne(TransferClaim, { where: { invoiceId: id, status: 'pending_confirmation' } });
+      if (existing) return { claimId: existing.id, created: false, invoice: i };
+      const c = await m.save(TransferClaim, m.create(TransferClaim, {
+        invoiceId: id, childId: i.childId, amount: dto.amount ?? i.totalAmount - i.paidAmount, transferredAt: at, note: dto.note?.trim() || null,
+        status: 'pending_confirmation', onBehalf: u.role !== 'parent', claimedBy: u.id,
+      }));
+      await recordAudit(m, u, { action: 'transfer_claim.create', entityType: 'transfer_claim', entityId: c.id, childId: i.childId, before: null,
+        after: claimView(c), ip: req.ip, data: { invoiceId: id, invoiceNo: i.invoiceNo, amountDue: i.totalAmount - i.paidAmount } });
+      const staff: { id: string }[] = await m.query(`SELECT id FROM users WHERE is_active AND role IN ('admin','accountant')`);
+      const child = await m.findOne(Child, { where: { id: i.childId } });
+      await this.notify.toUsers(staff.map((x) => x.id), { type: 'transfer_claim', title: `Phụ huynh báo đã chuyển khoản – ${i.invoiceNo}`,
+        body: `${child?.fullName ?? ''}: ${c.amount.toLocaleString('vi-VN')}đ (phải thu ${(i.totalAmount - i.paidAmount).toLocaleString('vi-VN')}đ). Vui lòng đối soát.`,
+        data: { claimId: c.id, invoiceId: id, childId: i.childId } }, m);
+      return { claimId: c.id, created: true, invoice: i };
+    }).catch(async (e) => {
+      if (e?.driverError?.code === '23505') { // concurrent double tap
+        const ex = await this.ds.getRepository(TransferClaim).findOne({ where: { invoiceId: id, status: 'pending_confirmation' } });
+        if (ex) return { claimId: ex.id, created: false, invoice: null };
+      }
+      throw e;
     });
-    return this.receipt(u, paymentId);
+    res.status(r.created ? 201 : 200);
+    return { created: r.created, claim: claimView((await this.claimRepoQb().where('t.id = :id', { id: r.claimId }).getOne())!) };
+  }
+
+  @Get('transfer-claims') @Roles('admin', 'accountant')
+  async listClaims(@Query() q: TransferClaimQuery) {
+    const qb = this.claimRepoQb().innerJoinAndSelect('t.invoice', 'i').innerJoinAndSelect('t.child', 'c').leftJoinAndSelect('i.classRoom', 'cl');
+    if (q.status) qb.andWhere('t.status = :st', { st: q.status });
+    if (q.classId) qb.andWhere('i.class_id = :cl', { cl: q.classId });
+    if (q.period) qb.andWhere('i.period = :pe', { pe: q.period });
+    qb.orderBy(`CASE WHEN t.status = 'pending_confirmation' THEN 0 ELSE 1 END`, 'ASC').addOrderBy('t.claimed_at', 'ASC');
+    const rows = await qb.getMany();
+    return { items: rows.map((t) => {
+      const amountDue = t.invoice.status === 'void' ? 0 : t.invoice.totalAmount - t.invoice.paidAmount;
+      return { ...claimView(t), childName: t.child.fullName, className: t.invoice.classRoom?.name ?? null, invoiceNo: t.invoice.invoiceNo,
+        invoiceStatus: t.invoice.status, amountDue, difference: t.amount - amountDue };
+    }) };
+  }
+
+  private async lockPendingClaim(m: EntityManager, id: string) {
+    const c = await m.findOne(TransferClaim, { where: { id }, lock: { mode: 'pessimistic_write' } });
+    if (!c) throw NotFound('Không tìm thấy yêu cầu xác nhận chuyển khoản');
+    if (c.status !== 'pending_confirmation') throw new AppError(409, 'CLAIM_ALREADY_DECIDED', c.status === 'confirmed' ? 'Yêu cầu đã được xác nhận' : 'Yêu cầu đã bị từ chối', { status: c.status });
+    return c;
+  }
+
+  /** Accountant confirms: records a normal transfer payment (receipt); shortfall stays as debt, excess goes to credit. */
+  @Post('transfer-claims/:id/confirm') @Roles('admin', 'accountant') @HttpCode(200)
+  async confirmClaim(@CurrentUser() u: AuthUser, @Param('id', ParseUUIDPipe) id: string, @Body() dto: ConfirmClaimDto, @Req() req: Request) {
+    const { paymentId, claimId } = await this.ds.transaction(async (m) => {
+      const c = await this.lockPendingClaim(m, id);
+      const i = await m.findOne(Invoice, { where: { id: c.invoiceId } });
+      if (i?.status === 'void') throw new AppError(409, 'INVOICE_VOID', 'Hoá đơn đã huỷ');
+      const claimant = c.claimedBy ? await m.findOne(User, { where: { id: c.claimedBy } }) : null;
+      const amount = dto.amount ?? c.amount;
+      const pid = await this.payCore(m, u, c.invoiceId, { amount, method: 'transfer', paidAt: dto.receivedAt ?? c.transferredAt.toISOString(),
+        payerName: claimant?.name?.slice(0, 120) ?? undefined, note: [`Chuyển khoản – xác nhận yêu cầu ${c.id}`, dto.note?.trim()].filter(Boolean).join(' | ') });
+      const decidedAt = new Date();
+      await m.update(TransferClaim, c.id, { status: 'confirmed', decidedBy: u.id, decidedAt, paymentId: pid });
+      const p = await m.findOne(Payment, { where: { id: pid } });
+      await recordAudit(m, u, { action: 'transfer_claim.confirm', entityType: 'transfer_claim', entityId: c.id, childId: c.childId, before: claimView(c),
+        after: { ...claimView({ ...c, status: 'confirmed', decidedBy: u.id, decidedAt, paymentId: pid } as TransferClaim), receiptNo: p!.receiptNo, receivedAmount: amount },
+        ip: req.ip, data: { invoiceId: c.invoiceId, invoiceNo: i?.invoiceNo, claimedAmount: c.amount, receivedAmount: amount, creditAdded: p!.creditAmount } });
+      await this.notify.toParentsOfChild(c.childId, { type: 'payment', title: `Đã nhận tiền – ${i?.invoiceNo}`,
+        body: `Nhà trường đã nhận ${amount.toLocaleString('vi-VN')}đ. Biên lai ${p!.receiptNo}.`
+          + (amount < c.amount ? ` (Số thực nhận ít hơn số bạn báo ${c.amount.toLocaleString('vi-VN')}đ; kế toán sẽ liên hệ.)` : ''),
+        data: { claimId: c.id, invoiceId: c.invoiceId, paymentId: pid, receiptNo: p!.receiptNo } }, m);
+      return { paymentId: pid, claimId: c.id };
+    });
+    return { claim: claimView((await this.claimRepoQb().where('t.id = :id', { id: claimId }).getOne())!), receipt: await this.receipt(u, paymentId) };
+  }
+
+  @Post('transfer-claims/:id/reject') @Roles('admin', 'accountant') @HttpCode(200)
+  async rejectClaim(@CurrentUser() u: AuthUser, @Param('id', ParseUUIDPipe) id: string, @Body() dto: RejectClaimDto, @Req() req: Request) {
+    const reason = dto.reason?.trim();
+    if (!reason) throw new AppError(400, 'VALIDATION_ERROR', 'Cần nhập lý do từ chối', { details: ['reason should not be empty'] });
+    const claimId = await this.ds.transaction(async (m) => {
+      const c = await this.lockPendingClaim(m, id);
+      const i = await m.findOne(Invoice, { where: { id: c.invoiceId } });
+      const decidedAt = new Date();
+      await m.update(TransferClaim, c.id, { status: 'rejected', rejectReason: reason, decidedBy: u.id, decidedAt });
+      await recordAudit(m, u, { action: 'transfer_claim.reject', entityType: 'transfer_claim', entityId: c.id, childId: c.childId, before: claimView(c),
+        after: claimView({ ...c, status: 'rejected', rejectReason: reason, decidedBy: u.id, decidedAt } as TransferClaim), reason, ip: req.ip,
+        data: { invoiceId: c.invoiceId, invoiceNo: i?.invoiceNo } });
+      await this.notify.toParentsOfChild(c.childId, { type: 'transfer_claim_rejected', important: true, title: `Chưa xác nhận được chuyển khoản – ${i?.invoiceNo}`,
+        body: `Lý do: ${reason}`, data: { claimId: c.id, invoiceId: c.invoiceId, reason } }, m);
+      return c.id;
+    });
+    return { claim: claimView((await this.claimRepoQb().where('t.id = :id', { id: claimId }).getOne())!) };
   }
 
   /** Prepayment without an invoice: goes fully to the child's credit balance and is applied to the next invoice. */

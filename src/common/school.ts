@@ -24,4 +24,18 @@ export const schoolSettings = () => ({
   ...schoolInfo(),
   absenceCutoff: absenceCutoff(), latestPickupTime: latestPickupTime(), latestPickup: latestPickupTime(),
   schoolOpenTime: schoolOpenTime(), medicineLateMinutes: medicineLateMinutes(),
+  bankTransfer: (({ enabled, sample }) => ({ enabled, sample }))(bankConfig()),
 });
+
+export const isProduction = () => process.env.NODE_ENV === 'production';
+const SAMPLE_BANK = { bin: '970436', accountNo: '0000000000', accountName: 'DU LIEU MAU - KHONG CHUYEN TIEN' };
+/**
+ * School bank account for VietQR (BANK_BIN, BANK_ACCOUNT_NO, BANK_ACCOUNT_NAME).
+ * Not configured: non-production → sample account (sample: true); production → disabled (never a sample).
+ */
+export const bankConfig = () => {
+  const bin = process.env.BANK_BIN?.trim(), accountNo = process.env.BANK_ACCOUNT_NO?.trim(), accountName = process.env.BANK_ACCOUNT_NAME?.trim();
+  if (bin && accountNo && accountName) return { enabled: true, sample: false, bank: { bin, accountNo, accountName } };
+  if (isProduction()) return { enabled: false, sample: false, bank: null };
+  return { enabled: true, sample: true, bank: SAMPLE_BANK };
+};

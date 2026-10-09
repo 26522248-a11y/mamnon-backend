@@ -494,7 +494,8 @@ export class Announcement {
 
 export type NotificationType = 'announcement' | 'pickup_request' | 'pickup_decision' | 'invoice' | 'payment' | 'picked_up' | 'picker_registration' | 'picker_decision' | 'contact_change'
   | 'absence_report' | 'absence_cancelled' | 'absence_overridden' | 'kitchen_change' | 'medicine_request' | 'medicine_given' | 'late_pickup'
-  | 'late_pickup_cancelled' | 'medicine_cancelled' | 'school_closure' | 'holiday_reminder' | 'photo_consent';
+  | 'late_pickup_cancelled' | 'medicine_cancelled' | 'school_closure' | 'holiday_reminder' | 'photo_consent'
+  | 'transfer_claim' | 'transfer_claim_rejected';
 @Entity('notifications')
 @Index('ix_notifications_user_read', ['userId', 'readAt'])
 @Index('ix_notifications_announcement', ['announcementId'])
@@ -726,7 +727,34 @@ export class LatePickup {
   @Column({ name: 'cancelled_by', type: 'uuid', nullable: true }) cancelledBy!: string | null;
 }
 
+export type TransferClaimStatus = 'pending_confirmation' | 'confirmed' | 'rejected';
+/** Parent "Tôi đã chuyển" (bank transfer reported, NOT money received). Accountant confirms (→ payment) or rejects. */
+@Entity('transfer_claims')
+@Index('uq_transfer_claim_pending', ['invoiceId'], { unique: true, where: `status = 'pending_confirmation'` })
+export class TransferClaim {
+  @PrimaryGeneratedColumn('uuid') id!: string;
+  @Index() @Column({ name: 'invoice_id', type: 'uuid' }) invoiceId!: string;
+  @ManyToOne(() => Invoice, { onDelete: 'CASCADE' }) @JoinColumn({ name: 'invoice_id' }) invoice!: Invoice;
+  @Index() @Column({ name: 'child_id', type: 'uuid' }) childId!: string;
+  @ManyToOne(() => Child, { onDelete: 'CASCADE' }) @JoinColumn({ name: 'child_id' }) child!: Child;
+  @Column({ type: 'integer' }) amount!: number;
+  @Column({ name: 'transferred_at', type: 'timestamptz' }) transferredAt!: Date;
+  @Column({ type: 'varchar', length: 500, nullable: true }) note!: string | null;
+  @Index() @Column({ type: 'varchar', length: 20, default: 'pending_confirmation' }) status!: TransferClaimStatus;
+  @Column({ name: 'on_behalf', type: 'boolean', default: false }) onBehalf!: boolean;
+  @Column({ name: 'claimed_by', type: 'uuid', nullable: true }) claimedBy!: string | null;
+  @ManyToOne(() => User, { onDelete: 'SET NULL', nullable: true }) @JoinColumn({ name: 'claimed_by' }) claimant!: User | null;
+  @CreateDateColumn({ name: 'claimed_at', type: 'timestamptz' }) claimedAt!: Date;
+  @Column({ name: 'decided_by', type: 'uuid', nullable: true }) decidedBy!: string | null;
+  @ManyToOne(() => User, { onDelete: 'SET NULL', nullable: true }) @JoinColumn({ name: 'decided_by' }) decider!: User | null;
+  @Column({ name: 'decided_at', type: 'timestamptz', nullable: true }) decidedAt!: Date | null;
+  @Column({ name: 'reject_reason', type: 'varchar', length: 500, nullable: true }) rejectReason!: string | null;
+  @Column({ name: 'payment_id', type: 'uuid', nullable: true }) paymentId!: string | null;
+  @ManyToOne(() => Payment, { onDelete: 'SET NULL', nullable: true }) @JoinColumn({ name: 'payment_id' }) payment!: Payment | null;
+}
+
 export const ENTITIES = [
+  TransferClaim,
   Absence, AbsenceDay, AbsenceEvent, Holiday, Medicine, MedicineDose, LatePickup,
   AuthorizedPicker, AuthorizedPickerHistory, ChildContactHistory, AuditEvent, SensitiveAccessLog, PickupDuty, PickupCallAttempt, PushSubscription, NotificationDelivery,
   RefundPayout,

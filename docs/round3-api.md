@@ -2,7 +2,7 @@
 
 Base `/api/v1`, JWT, errors `{code, message, details?}`, lists `{items}` (same conventions as round2-api.md).
 Sources: `mamnon-design/mockups7.html` (screens 1–4 + reconciliation table), `qa/testcases-dot3.md` (QR-01…09, ALB-01…06).
-Status: **contract only – not implemented yet.**
+Status: **§1 QR payments implemented** (migration `Round3Qr`, tests `test/round3-qr.e2e-spec.ts`); §2 photo album: contract only.
 
 ---
 
@@ -16,6 +16,7 @@ Status: **contract only – not implemented yet.**
 | `BANK_ACCOUNT_NAME` | `TRUONG MAM NON NHU Y` | upper-case, no diacritics (as the bank shows it) |
 
 Configured = all three set and non-empty. If **not** configured:
+- sample account used outside production: BIN `970436`, account `0000000000`, name `DU LIEU MAU - KHONG CHUYEN TIEN`.
 - `NODE_ENV !== 'production'` → endpoints return a **sample** QR (fixed sample account) with `sample: true`; UI shows the label "Dữ liệu mẫu · chưa có tài khoản thật" (QR-04).
 - `NODE_ENV === 'production'` → `409 BANK_ACCOUNT_NOT_CONFIGURED`, `details: {schoolPhone}` (= `/settings/school` `phone`) so the card can say "Vui lòng liên hệ nhà trường: 028 …". **Never** a sample QR in production.
 
@@ -44,11 +45,13 @@ Table `transfer_claims`: `id, invoice_id, child_id, amount, transferred_at, note
 Body `{amount?: int (default = still owed), transferredAt?: ISO (default now, not in future), note?: ≤500}`.
 - Creates a claim with `status: 'pending_confirmation'`. **The invoice is never marked paid** by this call (QR-05): `invoice.status` stays `unpaid|partial`, it stays in `/debts`, `paidAmount` unchanged. Invoice views (`GET /invoices`, `/invoices/:id`) add `paymentStatus: 'pending_confirmation' | null` and `transferClaim` (latest claim) for the yellow card ("Đang chờ nhà trường xác nhận – bạn đã chuyển 3.050.000đ lúc 20:14").
 - Idempotent (QR-06): if a pending claim already exists → `200` with that claim (no second row, no second notification); new claim → `201`.
-- Errors: same as 1.2 (`403/404/409 INVOICE_VOID/ALREADY_PAID/ZERO_INVOICE`).
+- Response `{created: boolean, claim}` (claim = view below). `400 TRANSFERRED_AT_IN_FUTURE` (5 min tolerance).
+- Errors: same as 1.2 (`403/404/409 INVOICE_VOID/ALREADY_PAID/ZERO_INVOICE`); 403 is checked before 409.
+- Claim view: `{id, invoiceId, childId, amount, transferredAt, note, status, onBehalf, claimedAt, claimedBy:{id,name}, decidedAt, decidedBy:{id,name}|null, rejectReason, paymentId, receiptNo}`.
 - Notifies admins + accountants (`type: 'transfer_claim'`). Audit `transfer_claim.create` (after = claim).
 
 **GET /transfer-claims?status=pending_confirmation|confirmed|rejected&classId=&period=** — admin, accountant (reconciliation table, "5 giao dịch chờ").
-Item: `{id, status, childId, childName, className, invoiceId, invoiceNo, amountDue, amount, difference (= amount - amountDue), transferredAt, claimedAt, claimedBy:{id,name}, onBehalf, decidedAt, decidedBy, rejectReason, paymentId, receiptNo}`; pending first, oldest first. UI shows "⚠ lệch 100.000" when `difference ≠ 0`.
+Item: claim view + `{childName, className, invoiceNo, invoiceStatus, amountDue (current, 0 if void), difference (= amount - amountDue)}`; pending first, oldest first. UI shows "⚠ lệch 100.000" when `difference ≠ 0`.
 
 **POST /transfer-claims/:id/confirm** — admin, accountant only (teacher/parent → 403, QR-08).
 Body `{amount?: int (actually received, default = claim amount), receivedAt?: ISO, note?}`.
@@ -60,7 +63,7 @@ Body `{amount?: int (actually received, default = claim amount), receivedAt?: IS
 - Audit `transfer_claim.confirm`, before = pending claim, after = confirmed claim + paymentId/receiptNo/amount.
 
 **POST /transfer-claims/:id/reject** — admin, accountant only. Body `{reason: string, required, non-blank, ≤500}` (400 `VALIDATION_ERROR` otherwise).
-- Claim → `rejected`, `rejectReason`; invoice untouched. Parent notified with the reason (`type: 'transfer_claim_rejected'`, important). Parent can file a new claim afterwards.
+- Response `{claim}`. Claim → `rejected`, `rejectReason`; invoice untouched. Parent notified with the reason (`type: 'transfer_claim_rejected'`, important). Parent can file a new claim afterwards.
 - `409 CLAIM_ALREADY_DECIDED`. Audit `transfer_claim.reject` with `reason`, before/after.
 
 Side rules: voiding an invoice with a pending claim auto-rejects the claim (`rejectReason: 'Hoá đơn đã huỷ'`, parent notified, audited). A manual cash payment does not touch an open claim.
