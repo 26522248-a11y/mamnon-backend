@@ -50,12 +50,12 @@ describe('Staff module (e2e)', () => {
     await as('admin').post('/staff/shifts', { name: 'Sai', startTime: '7h', endTime: '16:00' }).expect(400);
     await as('gv1').post('/staff/shifts', { name: 'X', startTime: '07:00', endTime: '16:00' }).expect(403);
     await as('ketoan').post('/staff/shifts', { name: 'X', startTime: '07:00', endTime: '16:00' }).expect(403);
-    shift = (await as('admin').post('/staff/shifts', { name: 'Ca sáng', startTime: '07:00', endTime: '16:00', lateGraceMinutes: 5 }).expect(201)).body;
-    expect(shift).toMatchObject({ name: 'Ca sáng', startTime: '07:00', endTime: '16:00', lateGraceMinutes: 5, isActive: true });
+    shift = (await as('admin').post('/staff/shifts', { name: 'Ca ngày', startTime: '07:00', endTime: '16:00', lateGraceMinutes: 5 }).expect(201)).body;
+    expect(shift).toMatchObject({ name: 'Ca ngày', startTime: '07:00', endTime: '16:00', lateGraceMinutes: 5, isActive: true });
     const tmp = (await as('admin').post('/staff/shifts', { name: 'Ca tối', startTime: '17:00', endTime: '19:00' }).expect(201)).body;
     expect((await as('admin').patch(`/staff/shifts/${tmp.id}`, { endTime: '19:30' }).expect(200)).body.endTime).toBe('19:30');
     expect((await as('admin').del(`/staff/shifts/${tmp.id}`).expect(200)).body).toMatchObject({ deleted: true });
-    expect((await as('gv1').get('/staff/shifts').expect(200)).body.items.map((x: any) => x.name)).toEqual(['Ca sáng']);
+    expect((await as('gv1').get('/staff/shifts').expect(200)).body.items.map((x: any) => x.name)).toEqual(['Ca ngày']);
     await as('ph1').get('/staff/shifts').expect(403);
   });
 
@@ -65,7 +65,7 @@ describe('Staff module (e2e)', () => {
     await as('admin').post('/staff/assignments', { userId: s.users.ph1.id, shiftId: shift.id, dates: [MON] }).expect(400);
     const r = (await as('admin').post('/staff/assignments', { userId: s.users.gv1.id, shiftId: shift.id, classId: s.classes.c1.id, from: MON, to: addDays(MON, 6) }).expect(201)).body;
     expect(r.created).toBe(5); // Mon–Fri only
-    expect(r.items[0]).toMatchObject({ date: MON, className: s.classes.c1.name, shift: { name: 'Ca sáng' } });
+    expect(r.items[0]).toMatchObject({ date: MON, className: s.classes.c1.name, shift: { name: 'Ca ngày' } });
     expect((await as('admin').post('/staff/assignments', { userId: s.users.gv1.id, shiftId: shift.id, classId: s.classes.c1.id, dates: [MON, TUE] }).expect(201)).body)
       .toMatchObject({ created: 0, skippedExisting: [MON, TUE] });
     await as('admin').post('/staff/assignments', { userId: s.users.gv2.id, shiftId: shift.id, classId: s.classes.c2.id, from: MON, to: FRI }).expect(201);
@@ -126,7 +126,7 @@ describe('Staff module (e2e)', () => {
     await as('admin').post('/staff/substitutions', { ...body, substituteUserId: s.users.ph1.id }).expect(400);
     await as('gv1').post('/staff/substitutions', body).expect(403);
     const sub = (await as('admin').post('/staff/substitutions', { ...body, force: true }).expect(201)).body;
-    expect(sub).toMatchObject({ date: WED, shift: { name: 'Ca sáng' }, class: { id: s.classes.c2.id, name: s.classes.c2.name },
+    expect(sub).toMatchObject({ date: WED, shift: { name: 'Ca ngày' }, class: { id: s.classes.c2.id, name: s.classes.c2.name },
       absentTeacher: { id: s.users.gv2.id }, substituteTeacher: { id: s.users.gv3.id }, reason: 'Cô nghỉ phép' });
     expect((await as('admin').post('/staff/substitutions', { ...body, substituteUserId: gv4.id }).expect(409)).body.code).toBe('SLOT_TAKEN');
     // Thursday: gv4 covers c2 (free)
@@ -162,7 +162,7 @@ describe('Staff module (e2e)', () => {
     await as('ph1').post('/staff/me/check-in', {}).expect(403);
     expect((await as('gv1').post('/staff/me/check-out', {}).expect(409)).body.code).toBe('NOT_CHECKED_IN');
     const r = (await as('gv1').post('/staff/me/check-in', { note: 'vào ca' }).expect(200)).body;
-    expect(r).toMatchObject({ date: T, checkInAt: expect.any(String), checkOutAt: null, canCheckIn: false, canCheckOut: true, shifts: [{ name: 'Ca sáng' }],
+    expect(r).toMatchObject({ date: T, checkInAt: expect.any(String), checkOutAt: null, canCheckIn: false, canCheckOut: true, shifts: [{ name: 'Ca ngày' }],
       classes: [{ id: s.classes.c1.id }] });
     expect(['full', 'late']).toContain(r.status);
     expect(r.week).toHaveLength(5);

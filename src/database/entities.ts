@@ -804,7 +804,7 @@ export class Enrollment {
 
 // ---------- Round 3: staff (chấm công, ca làm, nghỉ phép, trông thay) ----------
 
-/** Shift template (ca làm), e.g. "Ca sáng" 07:00–16:00. Times are VN local "HH:MM". */
+/** Shift template (ca làm), e.g. "Ca ngày" 07:00–16:00. Times are VN local "HH:MM". */
 @Entity('staff_shifts')
 export class StaffShift {
   @PrimaryGeneratedColumn('uuid') id!: string;

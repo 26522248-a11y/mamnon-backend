@@ -18,7 +18,7 @@ import { datesBetween, HM_RE, isoWeekday, minutesOf, vnAt, vnDate, vnHm } from '
 
 // ───────────────────────── DTOs ─────────────────────────
 export class ShiftDto {
-  @ApiProperty({ example: 'Ca sáng' }) @IsString() @MinLength(1) @MaxLength(60) name!: string;
+  @ApiProperty({ example: 'Ca ngày' }) @IsString() @MinLength(1) @MaxLength(60) name!: string;
   @ApiProperty({ example: '07:00' }) @Matches(HM_RE, { message: 'startTime: HH:MM' }) startTime!: string;
   @ApiProperty({ example: '16:00' }) @Matches(HM_RE, { message: 'endTime: HH:MM' }) endTime!: string;
   @ApiPropertyOptional({ default: 5 }) @IsOptional() @IsInt() @Min(0) @Max(120) lateGraceMinutes?: number;

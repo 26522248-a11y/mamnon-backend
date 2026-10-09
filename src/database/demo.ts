@@ -167,7 +167,7 @@ export async function demoLoad(ds: DataSource) {
     summary.invoices = inv;
 
     // ── staff: shift, assignments this week, check-ins, one leave, one substitution
-    const shift = await m.save(StaffShift, { name: 'Ca sáng', startTime: '07:00', endTime: '16:30', lateGraceMinutes: 10 } as any);
+    const shift = await m.save(StaffShift, { name: 'Ca ngày', startTime: '07:00', endTime: '16:30', lateGraceMinutes: 10 } as any);
     const tomorrow = addDays(today, 1);
     for (const d of [...days, tomorrow]) for (const [ci, uid] of teachers.entries())
       await m.save(StaffShiftAssignment, { date: d, userId: uid, shiftId: shift.id, classId: classes[ci].id, createdBy: admin.id } as any);
