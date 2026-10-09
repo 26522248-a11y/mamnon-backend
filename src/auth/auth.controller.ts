@@ -1,5 +1,5 @@
 import { Body, Controller, Get, HttpCode, Post, Req, Res } from '@nestjs/common';
-import { JwtService } from '@nestjs/jwt';
+import { JwtService, JwtSignOptions } from '@nestjs/jwt';
 import { ApiBearerAuth, ApiCookieAuth, ApiOkResponse, ApiProperty, ApiResponse, ApiTags } from '@nestjs/swagger';
 import { InjectRepository } from '@nestjs/typeorm';
 import * as bcrypt from 'bcryptjs';
@@ -11,6 +11,8 @@ import { AppError } from '../common/errors';
 import { User } from '../database/entities';
 import { refreshCookieOptions } from '../common/deploy-config';
 import { LoginThrottleService } from './login-throttle.service';
+/** S2: @nestjs/jwt 11 types expiresIn as ms StringValue; env TTLs like '15m' / '7d' are valid at runtime. */
+type Ttl = Exclude<JwtSignOptions['expiresIn'], number | undefined>;
 
 export class LoginDto {
   @ApiProperty({ example: 'admin' }) @IsString() @MinLength(1) @MaxLength(64) username!: string;
@@ -42,8 +44,8 @@ export class AuthController {
   ) {}
 
   private async issue(user: User, res: Response): Promise<TokenResponse> {
-    const accessTtl = process.env.JWT_ACCESS_TTL || '15m';
-    const refreshTtl = process.env.JWT_REFRESH_TTL || '7d';
+    const accessTtl = (process.env.JWT_ACCESS_TTL || '15m') as Ttl;
+    const refreshTtl = (process.env.JWT_REFRESH_TTL || '7d') as Ttl;
     const accessToken = await this.jwt.signAsync({ sub: user.id, role: user.role, ver: user.tokenVersion, typ: 'access' },
       { secret: process.env.JWT_ACCESS_SECRET, expiresIn: accessTtl });
     const refresh = await this.jwt.signAsync({ sub: user.id, ver: user.tokenVersion, typ: 'refresh' },
