@@ -58,7 +58,7 @@ describe('B31 image normalisation (unit)', () => {
 describe('B31 CachedStorage LRU (unit)', () => {
   const inner = () => {
     const m = new Map<string, Buffer>(); const calls = { get: 0 };
-    const s: FileStorage = { driver: 's3', put: async (k, d) => { m.set(k, d); }, get: async (k) => { calls.get++; return m.get(k) ?? null; },
+    const s: FileStorage = { driver: 's3', put: async (k, d) => { m.set(k, d); }, get: async (k) => { calls.get++; return m.get(k) ?? null; }, exists: async (k) => m.has(k),
       remove: async (k) => { m.delete(k); }, list: async (p) => [...m.keys()].filter((k) => k.startsWith(p)), publicUrl: () => null };
     return { s, m, calls };
   };

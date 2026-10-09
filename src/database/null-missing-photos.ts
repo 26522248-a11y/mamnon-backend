@@ -6,11 +6,13 @@
  *   npm run repair:missing-photos -- --apply   # clear
  * Take a pg_dump first. Run it with the SAME storage env as the API, otherwise every file looks missing – as a guard,
  * --apply refuses when EVERY reference is missing unless --force is also given.
+ * B33: existence is checked with HeadObject / stat on the exact key each feature serves (class photos keep their
+ * `photos/<classId>/…` prefix); no file is downloaded.
  */
 import * as fs from 'fs';
 import * as path from 'path';
 import dataSource from './data-source';
-import { countFileRefs, findMissingFiles, nullMissingFiles } from '../common/missing-files';
+import { assertNotAllMissing, countFileRefs, findMissingFiles, guardCounts, nullMissingFiles } from '../common/missing-files';
 import { storage } from '../common/storage';
 
 (async () => {
@@ -20,11 +22,11 @@ import { storage } from '../common/storage';
   const missing = await findMissingFiles(dataSource.manager, st);
   const byTable: Record<string, number> = {};
   for (const r of missing) byTable[`${r.table}.${r.column}`] = (byTable[`${r.table}.${r.column}`] ?? 0) + 1;
-  const total = await countFileRefs(dataSource.manager);
-  if (apply && total > 0 && missing.length === total && !process.argv.includes('--force'))
-    throw new Error(`All ${total} file references are missing in storage driver "${st.driver}" – wrong STORAGE_DRIVER/UPLOAD_DIR/S3_*? Re-run with --apply --force if this is really intended.`);
+  const g = await guardCounts(dataSource.manager, missing); // total + missing both per primary reference (thumbnails excluded)
+  const total = g.total;
+  if (apply) assertNotAllMissing(g.total, g.missing, st.driver, process.argv.includes('--force'));
   const cleared = apply ? await dataSource.transaction((m) => nullMissingFiles(m, missing)) : 0;
-  const log = { at: new Date().toISOString(), mode: apply ? 'apply' : 'dry-run', driver: st.driver, total, missing: missing.length, byTable, cleared, items: missing };
+  const log = { at: new Date().toISOString(), mode: apply ? 'apply' : 'dry-run', driver: st.driver, total, missingPrimary: g.missing, checked: await countFileRefs(dataSource.manager, 'all'), missing: missing.length, byTable, cleared, items: missing };
   const dir = process.env.AUDIT_LOG_DIR || path.join(process.cwd(), 'logs');
   fs.mkdirSync(dir, { recursive: true });
   const f = path.join(dir, `null-missing-photos-${log.at.replace(/[:.]/g, '-')}.json`);

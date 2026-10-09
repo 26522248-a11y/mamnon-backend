@@ -146,7 +146,9 @@ npm run repair:missing-photos              # chỉ liệt kê (dry run), ghi log
 npm run repair:missing-photos -- --apply   # đặt NULL ảnh/hoá đơn bị mất (bé, người đón hộ, giao bé, yêu cầu đón, dặn thuốc, hoá đơn)
 ```
 Ảnh lớp và ảnh thông báo bị mất chỉ được liệt kê (cột bắt buộc), cần xoá/đăng lại thủ công.
-Nếu **tất cả** tham chiếu đều mất, `--apply` sẽ từ chối (phòng trỏ nhầm kho lưu trữ); khi đã chắc chắn (vd toàn bộ file cũ nằm trên ổ đĩa tạm đã bị xoá) thì thêm `--force`.
+Nếu **tất cả** tham chiếu chính đều mất (đếm theo file gốc: mỗi ảnh lớp/ảnh thông báo tính 1 lần, không tính ảnh thu nhỏ; log: `total`, `missingPrimary`), `--apply` sẽ từ chối (phòng trỏ nhầm kho lưu trữ); khi đã chắc chắn (vd toàn bộ file cũ nằm trên ổ đĩa tạm đã bị xoá) thì thêm `--force`.
+
+Script kiểm tra từng file bằng **đúng key mà API phục vụ** (ảnh lớp `photos/<classId>/<id>-full.jpg|-thumb.jpg`, ảnh thông báo `announcements/<uuid>.jpg|_thumb.jpg` giữ nguyên đường dẫn; ảnh bé/người đón/giao bé/dặn thuốc/hoá đơn lấy tên file) và chỉ dùng `HeadObject` (S3/R2/B2) hoặc `stat` (local) – **không tải file về**. Lưu ý Backblaze B2: `HeadObject` vẫn tính là 1 lượt **Class B** (chung hạn mức 2.500 lượt/ngày với `GetObject`) nhưng không tốn băng thông tải về; mỗi lần chạy tốn đúng 1 lượt cho mỗi file được kiểm tra, kể cả ảnh thu nhỏ (xem `checked` trong log) – nếu nhiều hơn ~2.000 tham chiếu, chạy sau 07:00 (giờ VN) khi hạn mức vừa reset.
 
 ## Dữ liệu demo cho ảnh hướng dẫn (staging)
 Chạy từ máy có mã nguồn, trỏ thẳng vào Neon (Render Free không có Shell). Mạng chặn cổng 5432 thì dùng driver WebSocket của Neon (`@neondatabase/serverless`, cổng 443) – xem ghi chú trong `src/database/demo.ts`:

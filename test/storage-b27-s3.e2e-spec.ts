@@ -12,8 +12,8 @@ import request from 'supertest';
 import { DataSource } from 'typeorm';
 import { AppModule, configureApp } from '../src/app.module';
 import { todayStr } from '../src/common/dates';
-import { findMissingFiles, nullMissingFiles } from '../src/common/missing-files';
-import { S3Storage, setStorage, storage } from '../src/common/storage';
+import { assertNotAllMissing, countFileRefs, findMissingFiles, guardCounts, nullMissingFiles, primaryMissing, storageKeyFor } from '../src/common/missing-files';
+import { LocalStorage, S3Storage, setStorage, storage } from '../src/common/storage';
 import { seed } from '../src/database/seed';
 
 /** B27: every upload goes through storage(); with STORAGE_DRIVER=s3 (mocked client) nothing touches the container disk. */
@@ -31,6 +31,7 @@ describe('B27 uploads on S3/R2 (mocked client)', () => {
       const o = objects.get(Key); if (!o) throw Object.assign(new Error('The specified key does not exist.'), { name: 'NoSuchKey', $metadata: { httpStatusCode: 404 } });
       return { ContentType: o.type, Body: { transformToByteArray: async () => new Uint8Array(o.body) } };
     }
+    if (name === 'HeadObjectCommand') { const o = objects.get(Key); if (!o) throw Object.assign(new Error('NotFound'), { name: 'NotFound', $metadata: { httpStatusCode: 404 } }); return { ContentType: o.type, ContentLength: o.body.length }; }
     if (name === 'DeleteObjectCommand') { objects.delete(Key); return {}; }
     if (name === 'ListObjectsV2Command') return { Contents: [...objects.keys()].filter((k) => k.startsWith(cmd.input.Prefix)).map((k) => ({ Key: k })), IsTruncated: false };
     throw new Error('unexpected ' + name);
@@ -126,5 +127,98 @@ describe('B27 uploads on S3/R2 (mocked client)', () => {
     await as('admin').get(`/authorized-pickers/${p.id}/photo`).expect(200);
     const s3 = new S3Storage('b', { send: async () => { throw Object.assign(new Error('AccessDenied'), { name: 'AccessDenied', $metadata: { httpStatusCode: 403 } }); } });
     await expect(s3.get('x.jpg')).rejects.toThrow('AccessDenied');
+  });
+
+  it('B33: repair script checks the exact served key (nested class-photo keys count as present) with HeadObject only', async () => {
+    const kid = (await ds.query(`SELECT c.class_id FROM children c JOIN guardians g ON g.child_id = c.id JOIN users u ON u.id = g.user_id WHERE u.username = 'ph1' LIMIT 1`))[0];
+    const img = await sharp({ create: { width: 64, height: 48, channels: 3, background: '#3a7' } }).jpeg().toBuffer();
+    const [prim0, all0] = [await countFileRefs(ds.manager), await countFileRefs(ds.manager, 'all')];
+    await as('gv1').upload(`/classes/${kid.class_id}/photo-posts`).field('caption', 'B33').field('tags', '[[]]').field('clientIds', JSON.stringify([`b33-${Date.now()}`]))
+      .attach('files', img, { filename: 'lop.jpg', contentType: 'image/jpeg' }).expect(201);
+    const ph = (await ds.query(`SELECT id::text AS id, full_key, thumb_key FROM photos WHERE class_id = $1 ORDER BY created_at DESC LIMIT 1`, [kid.class_id]))[0];
+    expect(ph.full_key).toBe(`photos/${kid.class_id}/${ph.id}-full.jpg`);
+    expect(objects.has(ph.full_key) && objects.has(ph.thumb_key)).toBe(true);
+    // review: full + thumb = ONE primary reference for the guard, but both are checked (2 HEADs)
+    expect(await countFileRefs(ds.manager)).toBe(prim0 + 1);
+    expect(await countFileRefs(ds.manager, 'all')).toBe(all0 + 2);
+
+    calls.length = 0;
+    const missing = await findMissingFiles(ds.manager, storage());
+    const ok0 = missing;
+    expect(missing.filter((x) => x.table === 'photos')).toEqual([]); // was: stripped to "<id>-full.jpg" → always "missing"
+    expect(calls).toContain(`HeadObjectCommand:${ph.full_key}`);
+    expect(calls).toContain(`HeadObjectCommand:${ph.thumb_key}`);
+    expect(calls.filter((c) => c.startsWith('GetObjectCommand'))).toEqual([]); // no bytes downloaded
+    expect(calls.length).toBe(await countFileRefs(ds.manager, 'all')); // exactly one HEAD per checked file (thumbnails included)
+
+    const saved = objects.get(ph.full_key)!; objects.delete(ph.full_key);
+    const m2 = await findMissingFiles(ds.manager, storage());
+    expect(m2.filter((x) => x.table === 'photos')).toEqual([{ table: 'photos', column: 'full_key', label: 'Ảnh lớp', id: ph.id, stored: ph.full_key, key: ph.full_key, nullable: false, primary: true }]);
+    expect(await ds.transaction((m) => nullMissingFiles(m, m2))).toBe(0); // NOT NULL keys are only reported
+    objects.set(ph.full_key, saved);
+    // guard: total and missing counted the SAME way – full + thumb both gone = +1 on each side, not +2
+    const emptyHead = new S3Storage('none', { send: async () => { throw Object.assign(new Error('NotFound'), { name: 'NotFound', $metadata: { httpStatusCode: 404 } }); } });
+    const gAll = await guardCounts(ds.manager, await findMissingFiles(ds.manager, emptyHead));
+    const both = { ...objects.get(ph.full_key)! }, bothT = { ...objects.get(ph.thumb_key)! };
+    objects.delete(ph.full_key); objects.delete(ph.thumb_key);
+    const rows = await findMissingFiles(ds.manager, storage());
+    expect(rows.filter((x) => x.table === 'photos').map((x) => x.column).sort()).toEqual(['full_key', 'thumb_key']); // report keeps both
+    const g1 = await guardCounts(ds.manager, rows);
+    expect(g1.missing).toBe(primaryMissing(ok0) + 1);
+    expect(g1.total).toBe(prim0 + 1);
+    expect(gAll).toEqual({ total: prim0 + 1, missing: prim0 + 1 }); // wrong bucket: both sides equal → guard trips
+    objects.set(ph.full_key, both); objects.set(ph.thumb_key, bothT);
+    // only the thumbnail gone → reported (kept in output) but not a primary miss
+    const savedT = objects.get(ph.thumb_key)!; objects.delete(ph.thumb_key);
+    const m3 = (await findMissingFiles(ds.manager, storage())).filter((x) => x.table === 'photos');
+    expect(m3).toEqual([expect.objectContaining({ column: 'thumb_key', label: 'Ảnh lớp (thu nhỏ)', key: ph.thumb_key, primary: false })]);
+    expect(primaryMissing(m3)).toBe(0);
+    objects.set(ph.thumb_key, savedT);
+
+    // key mapping mirrors the controllers: photo_url/receipt_key → basename (sendImage/sendStored), full keys verbatim (sendKey)
+    expect(storageKeyFor('url', '/uploads/abc.jpg')).toBe('abc.jpg');
+    expect(storageKeyFor('key', `photos/${kid.class_id}/x-full.jpg`)).toBe(`photos/${kid.class_id}/x-full.jpg`);
+    expect(storageKeyFor('key', 'announcements/u.jpg')).toBe('announcements/u.jpg');
+  });
+
+  it('B33: all-missing guard – real bucket passes, wrong (empty) bucket refuses --apply unless --force', async () => {
+    const total = await countFileRefs(ds.manager);
+    expect(total).toBeGreaterThan(0);
+    const ok = await findMissingFiles(ds.manager, storage());
+    expect(ok.length).toBeLessThan(total);
+    expect(primaryMissing(ok)).toBeLessThan(total);
+    expect(() => assertNotAllMissing(total, primaryMissing(ok), 's3', false)).not.toThrow();
+
+    const emptyBucket = new S3Storage('other', { send: async () => { throw Object.assign(new Error('NotFound'), { name: 'NotFound', $metadata: { httpStatusCode: 404 } }); } });
+    const all = await findMissingFiles(ds.manager, emptyBucket);
+    expect(all.length).toBe(await countFileRefs(ds.manager, 'all')); // thumbnails still listed in the report
+    expect(all.length).toBeGreaterThan(total);                         // …but class photos/announcements count once in the guard
+    expect(primaryMissing(all)).toBe(total);
+    expect(() => assertNotAllMissing(total, primaryMissing(all), 's3', false)).toThrow(/All \d+ file references are missing.*--force/);
+    expect(() => assertNotAllMissing(total, primaryMissing(all), 's3', true)).not.toThrow();
+    expect(() => assertNotAllMissing(0, 0, 's3', false)).not.toThrow(); // empty DB: nothing to protect
+  });
+
+  it('B33: exists() – S3 uses HeadObject (never GetObject), 404 → false, other errors rethrow; local uses stat on nested keys', async () => {
+    const sent: string[] = [];
+    const s3 = new S3Storage('b', { send: async (cmd: any) => {
+      sent.push(cmd.constructor.name);
+      if (cmd.input.Key === 'here.jpg') return { ContentLength: 10 };
+      if (cmd.input.Key === 'gone.jpg') throw Object.assign(new Error('NotFound'), { name: 'NotFound', $metadata: { httpStatusCode: 404 } });
+      throw Object.assign(new Error('Forbidden'), { name: 'Forbidden', $metadata: { httpStatusCode: 403 } });
+    } });
+    expect(await s3.exists('here.jpg')).toBe(true);
+    expect(await s3.exists('gone.jpg')).toBe(false);
+    await expect(s3.exists('denied.jpg')).rejects.toThrow('Forbidden');
+    expect(sent).toEqual(['HeadObjectCommand', 'HeadObjectCommand', 'HeadObjectCommand']);
+    await expect(s3.exists('../etc/passwd')).rejects.toThrow(/invalid storage key/);
+
+    const dir = fs.mkdtempSync(require('path').join(require('os').tmpdir(), 'mamnon-b33-'));
+    const local = new LocalStorage(dir);
+    await local.put('photos/c1/p-full.jpg', Buffer.from('x'));
+    expect(await local.exists('photos/c1/p-full.jpg')).toBe(true);
+    expect(await local.exists('p-full.jpg')).toBe(false);
+    expect(await local.exists('photos/c9/none.jpg')).toBe(false);
+    expect(await local.exists('photos/c1')).toBe(false); // a directory is not a file
   });
 });
