@@ -31,11 +31,24 @@ export class PickupDutiesController {
     const user = await this.ds.getRepository(User).findOne({ where: { id: dto.userId } });
     if (!user) throw NotFound('Không tìm thấy người dùng');
     if (user.role === 'parent' || !user.isActive) throw BadRequest('Chỉ chỉ định tài khoản nhân viên đang hoạt động', 'INVALID_DUTY_USER');
-    const dates = [...new Set(dto.dates.map((d) => d.slice(0, 10)))];
-    await this.ds.createQueryBuilder().insert().into(PickupDuty).values(dates.map((date) => ({ date, userId: user.id, assignedBy: u.id, note: dto.note ?? null })))
-      .orIgnore().execute();
-    const rows = await this.ds.getRepository(PickupDuty).find({ where: { userId: user.id, date: In(dates) }, relations: { user: true }, order: { date: 'ASC' } });
-    await recordAudit(this.ds, u, { action: 'pickup_duty.assign', entityType: 'user', entityId: user.id, after: { dates, note: dto.note ?? null }, data: { username: user.username } });
+    const dates = [...new Set(dto.dates.map((d) => d.slice(0, 10)))].sort();
+    const who = { userId: user.id, username: user.username, name: user.name };
+    const rows = await this.ds.transaction(async (m) => {
+      // before = this user's duties on the requested dates (and everyone on duty those dates), after = state after the insert
+      const roster = async () => (await m.getRepository(PickupDuty).find({ where: { date: In(dates) }, relations: { user: true }, order: { date: 'ASC' } }))
+        .map((d) => ({ date: d.date, userId: d.userId, username: d.user?.username ?? null }));
+      const beforeRoster = await roster();
+      const had = beforeRoster.filter((d) => d.userId === user.id).map((d) => d.date);
+      await m.createQueryBuilder().insert().into(PickupDuty).values(dates.map((date) => ({ date, userId: user.id, assignedBy: u.id, note: dto.note ?? null })))
+        .orIgnore().execute();
+      const afterRoster = await roster();
+      const added = dates.filter((d) => !had.includes(d));
+      await recordAudit(m, u, { action: 'pickup_duty.assign', entityType: 'user', entityId: user.id,
+        before: { ...who, dates: had, roster: beforeRoster },
+        after: { ...who, dates: afterRoster.filter((d) => d.userId === user.id).map((d) => d.date), added, note: dto.note ?? null, roster: afterRoster },
+        data: { username: user.username, requested: dates, added, alreadyAssigned: had } });
+      return m.getRepository(PickupDuty).find({ where: { userId: user.id, date: In(dates) }, relations: { user: true }, order: { date: 'ASC' } });
+    });
     return rows.map(view);
   }
 
@@ -58,9 +71,13 @@ export class PickupDutiesController {
 
   @Delete(':id') @Roles('admin') @HttpCode(204)
   async remove(@CurrentUser() u: AuthUser, @Param('id', ParseUUIDPipe) id: string) {
-    const d = await this.ds.getRepository(PickupDuty).findOne({ where: { id } });
+    const d = await this.ds.getRepository(PickupDuty).findOne({ where: { id }, relations: { user: true } });
     if (!d) throw NotFound('Không tìm thấy lịch trực');
-    await this.ds.getRepository(PickupDuty).delete(id);
-    await recordAudit(this.ds, u, { action: 'pickup_duty.remove', entityType: 'pickup_duty', entityId: id, before: { userId: d.userId, date: d.date }, after: null });
+    await this.ds.transaction(async (m) => {
+      await m.getRepository(PickupDuty).delete(id);
+      await recordAudit(m, u, { action: 'pickup_duty.remove', entityType: 'pickup_duty', entityId: id,
+        before: { id, userId: d.userId, username: d.user?.username ?? null, name: d.user?.name ?? null, date: d.date, note: d.note, assignedBy: d.assignedBy },
+        after: null, data: { username: d.user?.username ?? null, date: d.date } });
+    });
   }
 }

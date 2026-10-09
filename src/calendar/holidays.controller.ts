@@ -196,14 +196,23 @@ export class HolidaysController {
       const parents: { id: string }[] = await m.query(`
         SELECT DISTINCT u.id FROM users u JOIN guardians g ON g.user_id = u.id JOIN children c ON c.id = g.child_id
         WHERE u.is_active AND u.role = 'parent' AND c.status = 'active'`);
+      // enrolled children with no active parent account linked → nobody gets the push; admin must phone them
+      const noParent: { childId: string; name: string; className: string | null; phone1: string | null }[] = await m.query(`
+        SELECT c.id AS "childId", c.full_name AS name, cl.name AS "className",
+               COALESCE(c.contact_phone1, (SELECT g.phone FROM guardians g WHERE g.child_id = c.id AND g.phone IS NOT NULL ORDER BY g.created_at LIMIT 1)) AS phone1
+        FROM children c LEFT JOIN classes cl ON cl.id = c.class_id
+        WHERE c.id = ANY($1) AND NOT EXISTS (
+          SELECT 1 FROM guardians g JOIN users u ON u.id = g.user_id WHERE g.child_id = c.id AND u.is_active AND u.role = 'parent')
+        ORDER BY cl.name NULLS LAST, c.full_name`, [kids.map((k) => k.id)]);
       const present = kids.filter((k) => k.status === 'present' || k.status === 'late');
-      return { kids, parents: parents.map((p) => p.id), present, refunded: kids.filter((k) => !present.includes(k)), missing: kids.filter((k) => !k.status) };
+      return { kids, noParent, parents: parents.map((p) => p.id), present, refunded: kids.filter((k) => !present.includes(k)), missing: kids.filter((k) => !k.status) };
     };
     const existing = await this.ds.getRepository(Holiday).findOne({ where: { date } });
     if (existing) throw new AppError(409, 'HOLIDAY_EXISTS', 'Ngày này đã là ngày nghỉ', { dates: [date], id: existing.id, status: existing.status });
     if (dto.dryRun) {
       const c = await count(this.ds);
-      return { dryRun: true, date, name, reason, parentsToNotify: c.parents.length, childrenRefunded: c.refunded.length, childrenPresent: c.present.length, childrenTotal: c.kids.length };
+      return { dryRun: true, date, name, reason, parentsToNotify: c.parents.length, childrenRefunded: c.refunded.length, childrenPresent: c.present.length, childrenTotal: c.kids.length,
+        childrenWithoutParentCount: c.noParent.length, childrenWithoutParent: c.noParent };
     }
     const { h, c } = await this.ds.transaction(async (m) => {
       const h = await m.save(Holiday, m.create(Holiday, { date, name, kind: 'emergency', status: 'confirmed', reason, createdBy: u.id, confirmedBy: u.id, confirmedAt: new Date() }));
@@ -224,7 +233,8 @@ export class HolidaysController {
     });
     await this.notify.send(c.parents, { type: 'school_closure', important: true, title: `${name} ngày ${date.split('-').reverse().join('/')}`, body: reason,
       data: { holidayId: h.id, date, reason }, refId: h.id, push: { requireInteraction: true, tag: `closure-${date}` } });
-    return { holiday: (await this.views([h]))[0], parentsNotified: c.parents.length, childrenRefunded: c.refunded.length, childrenPresent: c.present.length, absentRowsCreated: c.missing.length };
+    return { holiday: (await this.views([h]))[0], parentsNotified: c.parents.length, childrenRefunded: c.refunded.length, childrenPresent: c.present.length, absentRowsCreated: c.missing.length,
+      childrenWithoutParentCount: c.noParent.length, childrenWithoutParent: c.noParent };
   }
 
   /** Early-December reminder to admins to finalize next year's holidays (normally automatic, Dec 1–7). */

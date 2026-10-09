@@ -228,6 +228,18 @@ describe('round 2 batch 2/2b: medicine, late pickup, feed, notes, attention, pho
       expect(dry.childrenRefunded).toBe(30 - present);
       expect(dry.parentsToNotify).toBeGreaterThanOrEqual(2);
       expect((await ds.query(`SELECT COUNT(*)::int n FROM holidays WHERE date = $1`, [P]))[0].n).toBe(0); // nothing written
+      // children whose family has no parent account → must be phoned
+      const [{ n: noAcc }] = await ds.query(`SELECT COUNT(*)::int n FROM children c WHERE c.status = 'active' AND NOT EXISTS (
+        SELECT 1 FROM guardians g JOIN users u ON u.id = g.user_id WHERE g.child_id = c.id AND u.is_active AND u.role = 'parent')`);
+      expect(noAcc).toBeGreaterThan(0);
+      expect(dry.childrenWithoutParentCount).toBe(noAcc);
+      expect(dry.childrenWithoutParent).toHaveLength(noAcc);
+      expect(dry.childrenWithoutParent[0]).toEqual({ childId: expect.any(String), name: expect.any(String), className: expect.any(String), phone1: expect.any(String) });
+      const keys = dry.childrenWithoutParent.map((x: any) => `${x.className}|${x.name}`);
+      expect(keys).toEqual([...keys].sort((a, b) => a.localeCompare(b)));
+      expect(dry.childrenWithoutParent.map((x: any) => x.childId)).not.toContain(s.kids[0].id); // ph1's child has an account
+      const [{ n: linkedParents }] = await ds.query(`SELECT COUNT(DISTINCT u.id)::int n FROM users u JOIN guardians g ON g.user_id = u.id JOIN children c ON c.id = g.child_id WHERE u.is_active AND u.role = 'parent' AND c.status = 'active'`);
+      expect(dry.parentsToNotify).toBe(linkedParents);
       const before = await ds.query(`SELECT child_id, status, notified_in_advance, note FROM attendance WHERE date = $1 ORDER BY child_id`, [P]);
       const r = (await as('admin').post('/holidays/emergency', { date: P, reason: 'Mất điện toàn khu vực' }).expect(201)).body;
       expect(r.holiday).toMatchObject({ date: P, kind: 'emergency', status: 'confirmed', reason: 'Mất điện toàn khu vực', name: 'Nghỉ đột xuất' });
@@ -279,6 +291,21 @@ describe('round 2 batch 2/2b: medicine, late pickup, feed, notes, attention, pho
     expect((await notes('ph1', 'holiday_reminder')).length).toBe(0);
     await as('ph1').post('/holidays/reminder', { force: true }).expect(403);
     expect((await as('admin').post('/holidays/reminder', { force: true }).expect(200)).body.sent).toBe(true);
+  });
+
+  it('duty roster audit: assign/remove record full before/after', async () => {
+    const d1 = addDays(today, 20), d2 = addDays(today, 21);
+    await as('admin').post('/pickup-duties', { userId: s.users.gv2.id, dates: [d1] }).expect(201);
+    const r = await as('admin').post('/pickup-duties', { userId: s.users.gv2.id, dates: [d1, d2], note: 'Thay cô Lan' }).expect(201);
+    const ev = (await as('admin').get(`/audit-events?action=pickup_duty.assign&entityId=${s.users.gv2.id}`).expect(200)).body.items[0];
+    expect(ev.before).toMatchObject({ userId: s.users.gv2.id, username: 'gv2', dates: [d1] });
+    expect(ev.after).toMatchObject({ userId: s.users.gv2.id, username: 'gv2', dates: [d1, d2], added: [d2], note: 'Thay cô Lan' });
+    expect(ev.after.roster).toEqual(expect.arrayContaining([{ date: d2, userId: s.users.gv2.id, username: 'gv2' }]));
+    const id = r.body.find((x: any) => x.date === d2).id;
+    await as('admin').del(`/pickup-duties/${id}`).expect(204);
+    const rm = (await as('admin').get(`/audit-events?action=pickup_duty.remove&entityId=${id}`).expect(200)).body.items[0];
+    expect(rm.before).toMatchObject({ id, userId: s.users.gv2.id, username: 'gv2', date: d2, note: 'Thay cô Lan' });
+    expect(rm.after).toBeNull();
   });
 
   it('mustChangePassword blocks the new endpoints', async () => {

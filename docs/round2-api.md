@@ -80,8 +80,10 @@ Effects of a **confirmed** holiday (attendance `holiday` is set only for confirm
 ### Emergency closure (`Nghỉ đột xuất`, batch 2b)
 `POST /holidays/emergency {date, reason, name?, dryRun?}` (admin). `reason` required (non-blank, ≤ 500) else 400 `VALIDATION_ERROR`; weekend → 400 `NOT_SCHOOL_DAY`; a holiday already on that date → 409 `HOLIDAY_EXISTS`.
 Unlike `POST /holidays` it works **even when attendance exists** (default `POST /holidays` still → 409 `HOLIDAY_HAS_ATTENDANCE`).
-- `dryRun: true` → `{dryRun: true, date, name, reason, parentsToNotify, childrenRefunded, childrenPresent, childrenTotal}` (counts only, nothing written) for the confirm dialog.
-- Otherwise (201): creates a **confirmed** holiday `kind:'emergency'` with `reason` (default name "Nghỉ đột xuất") → `{holiday: Holiday, parentsNotified, childrenRefunded, childrenPresent, absentRowsCreated}`.
+- `dryRun: true` → `{dryRun: true, date, name, reason, parentsToNotify, childrenRefunded, childrenPresent, childrenTotal, childrenWithoutParentCount, childrenWithoutParent}` (nothing written) for the confirm dialog.
+  - `parentsToNotify` = distinct **active parent accounts linked** (guardians.user_id) to active children – families without an account get no push.
+  - `childrenWithoutParent: [{childId, name, className, phone1}]` = enrolled children with no active parent account linked (admin must phone them), sorted by `className` then `name`; `phone1` = contact phone 1, else the first guardian phone (null if none). Also returned by the real call.
+- Otherwise (201): creates a **confirmed** holiday `kind:'emergency'` with `reason` (default name "Nghỉ đột xuất") → `{holiday: Holiday, parentsNotified, childrenRefunded, childrenPresent, absentRowsCreated, childrenWithoutParentCount, childrenWithoutParent}`.
 - Existing attendance rows are **kept unchanged**; enrolled children without a row get an `absent` row (note "Trường nghỉ đột xuất: …").
 - **Meal refund**: every child NOT present that day (absent, or no row) gets that day's meal refunded on the next invoice; children marked present/late ate → no refund. (Refund rule = parent report before cutoff **or** absent on a confirmed emergency day.)
 - `audit_events` gets `holiday.emergency` with the `reason` and counts.
@@ -161,3 +163,8 @@ Item fields: `eating` (lunch), **`breakfast`** (same scale `all|most|half|little
 
 ## 11. Password change enforcement
 If the logged-in user has `mustChangePassword=true`, every authenticated endpoint returns **403 `PASSWORD_CHANGE_REQUIRED`** except: `GET /auth/me`, `POST /auth/logout`, `POST /auth/change-password`, (public: `/auth/login`, `/auth/refresh`, `/settings/school`, `/push/vapid-public-key`, `/push/actions`), `GET /pickup-requests/feed`, `POST /pickup-requests/:id/confirm|reject`, `GET /pickup-requests/:id/photo`, `POST|GET|DELETE /push/subscriptions`.
+
+## Audit: duty roster (Phân công trực đón)
+- `pickup_duty.assign` (entityId = userId): `before {userId, username, name, dates (user's existing dates among requested), roster [{date,userId,username}] }`, `after {userId, username, name, dates, added, note, roster}`, `data {username, requested, added, alreadyAssigned}`.
+- `pickup_duty.remove` (entityId = duty id): `before {id, userId, username, name, date, note, assignedBy}`, `after: null`.
+- Entries with `source: backfill_jsonl` predate this (old jsonl had no before/after; only `data.dates/username`).
