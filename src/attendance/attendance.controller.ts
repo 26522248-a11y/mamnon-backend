@@ -376,7 +376,7 @@ export class AttendanceController {
     if (!ok) throw NotFound('Không tìm thấy');
     const p = await this.pickups.findOne({ where: { attendanceId: id } });
     if (!p?.photoUrl) throw NotFound('Chưa có ảnh');
-    sendImage(res, p.photoUrl);
+    await sendImage(res, p.photoUrl);
   }
 
   /** Handover screen: everyone who may pick this child up, with what is still missing. CCCD masked (full via /pickup-identity). */
@@ -463,7 +463,7 @@ export class AttendanceController {
     const r = await this.requests.findOne({ where: { id } });
     if (!r) throw NotFound('Không tìm thấy yêu cầu đón');
     if (!(await this.canSeeRequest(u, r))) throw Forbidden('Không có quyền xem ảnh này');
-    sendImage(res, r.photoUrl);
+    await sendImage(res, r.photoUrl);
   }
 
   /** admin: all; teacher: own classes; duty account: today's; parent: own children. */

@@ -1,7 +1,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import * as zlib from 'zlib';
-import { uploadDir } from './upload';
+import { storage } from './storage';
 
 /** Small real PNG placeholder avatar (silhouette on a pastel background), generated without native deps. */
 const PALETTE: [number, number, number][] = [
@@ -48,12 +48,10 @@ const designerAvatars = () => {
  * Writes a per-child placeholder file (own file per child, so replacing one photo never deletes another's).
  * Cycles the designer avatars by `index`; falls back to a generated PNG if the assets are missing. Returns the storage key.
  */
-export function writePlaceholderAvatar(childId: string, index: number): string {
+export async function writePlaceholderAvatar(childId: string, index: number): Promise<string> {
   const key = `avatar-${childId}.png`;
-  fs.mkdirSync(uploadDir(), { recursive: true });
   const assets = designerAvatars();
-  const dest = path.join(uploadDir(), key);
-  if (assets.length) fs.copyFileSync(assets[Math.abs(index) % assets.length], dest);
-  else fs.writeFileSync(dest, placeholderAvatarPng(index));
+  const data = assets.length ? fs.readFileSync(assets[Math.abs(index) % assets.length]) : placeholderAvatarPng(index);
+  await storage().put(key, data, 'image/png'); // B27: local dir or S3/R2
   return key;
 }

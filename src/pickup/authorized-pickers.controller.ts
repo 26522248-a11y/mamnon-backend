@@ -151,7 +151,7 @@ export class AuthorizedPickersController {
     if (identity && u.role !== 'admin') Object.assign(patch, { status: 'pending', decidedBy: null, decidedAt: null, decisionNote: null });
     if (!Object.keys(patch).length) throw BadRequest('Không có gì thay đổi', 'NOTHING_TO_UPDATE');
     await this.repo().update(id, patch);
-    if (oldPhoto) removeImage(oldPhoto);
+    if (oldPhoto) await removeImage(oldPhoto);
     const after = await this.getOr404(id);
     await this.history(id, 'update', { before, after: snap(after), needsApprovalAgain: identity && u.role !== 'admin' }, u.id);
     return view(after, await this.names([after]));
@@ -214,7 +214,7 @@ export class AuthorizedPickersController {
     if (!p) throw NotFound('Không tìm thấy người đón hộ');
     await this.assertRead(u, p.childId);
     if (!p.photoUrl) throw NotFound('Chưa có ảnh người đón');
-    sendImage(res, p.photoUrl);
+    await sendImage(res, p.photoUrl);
   }
 }
 

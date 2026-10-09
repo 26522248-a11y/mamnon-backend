@@ -5,15 +5,14 @@ import { Transform, Type } from 'class-transformer';
 import { IsBoolean, IsDateString, IsIn, IsInt, IsOptional, IsString, IsUUID, Matches, Max, MaxLength, Min, MinLength } from 'class-validator';
 import * as crypto from 'crypto';
 import { Request, Response } from 'express';
-import * as fs from 'fs';
 import { memoryStorage } from 'multer';
-import * as path from 'path';
 import { DataSource, EntityManager } from 'typeorm';
 import { recordAudit } from '../common/audit';
 import { AuthUser, CurrentUser, Roles } from '../common/auth';
 import { todayStr } from '../common/dates';
 import { AppError, BadRequest, Forbidden, NotFound } from '../common/errors';
-import { detectImage, keyOf, saveImage, uploadDir } from '../common/upload';
+import { contentTypeOf, detectImage, keyOf, removeImage, saveImage, sendStored } from '../common/upload';
+import { storage } from '../common/storage';
 import { FinanceCategory, FinanceEntry, User } from '../database/entities';
 import { NotificationsService } from '../notifications/notifications.service';
 
@@ -69,8 +68,7 @@ async function saveReceipt(file?: Express.Multer.File): Promise<{ key: string; n
   const name = (file.originalname || 'hoa-don').slice(0, 200);
   if (file.buffer.subarray(0, 5).toString('latin1') === '%PDF-') {
     const key = `${crypto.randomUUID()}.pdf`;
-    fs.mkdirSync(uploadDir(), { recursive: true });
-    fs.writeFileSync(path.join(uploadDir(), key), file.buffer, { flag: 'wx' });
+    await storage().put(key, file.buffer, contentTypeOf(key)); // B27
     return { key, name };
   }
   if (!detectImage(file.buffer)) throw BadRequest('Hoá đơn phải là ảnh JPG/PNG/HEIC hoặc PDF', 'INVALID_FILE');
@@ -242,7 +240,7 @@ export class FinanceController {
       await m.getRepository(FinanceEntry).update(id, { receiptKey: r.key, receiptName: r.name });
       await recordAudit(m, u, { action: 'finance.receipt.attach', entityType: 'finance_entry', entityId: id, before: { receipt: old ? 'có' : null }, after: { receipt: r.name }, targetLabel: e.title });
     });
-    if (old) fs.rm(path.join(uploadDir(), keyOf(old)), { force: true }, () => undefined);
+    if (old) await removeImage(old);
     return this.view(await this.load(this.ds.manager, id));
   }
 
@@ -250,13 +248,8 @@ export class FinanceController {
   async receipt(@Param('id', ParseUUIDPipe) id: string, @Res() res: Response) {
     const e = await this.load(this.ds.manager, id);
     if (!e.receiptKey) throw NotFound('Khoản này chưa có hoá đơn');
-    const key = keyOf(e.receiptKey), file = path.join(uploadDir(), key);
-    if (!fs.existsSync(file)) throw NotFound('Không tìm thấy file hoá đơn');
-    res.setHeader('Content-Type', key.endsWith('.pdf') ? 'application/pdf' : key.endsWith('.png') ? 'image/png' : 'image/jpeg');
-    res.setHeader('Content-Disposition', `inline; filename*=UTF-8''${encodeURIComponent(e.receiptName || key)}`);
-    res.setHeader('Cache-Control', 'private, no-store');
-    res.setHeader('X-Content-Type-Options', 'nosniff');
-    res.sendFile(file);
+    const name = e.receiptName || keyOf(e.receiptKey);
+    await sendStored(res, e.receiptKey, 'Không tìm thấy file hoá đơn', { 'Content-Disposition': `inline; filename*=UTF-8''${encodeURIComponent(name)}` });
   }
 
   @Post('entries/:id/approve') @Roles('admin') @HttpCode(200)

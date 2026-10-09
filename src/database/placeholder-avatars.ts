@@ -14,7 +14,7 @@ import { writePlaceholderAvatar } from '../common/avatar';
     SELECT * FROM (SELECT id, full_name, photo_url, (ROW_NUMBER() OVER (ORDER BY created_at, id) - 1)::int AS idx FROM children) c
     WHERE photo_url IS NULL ${name ? 'AND full_name = $1' : ''} ORDER BY idx`, name ? [name] : []);
   for (const c of rows) {
-    const key = writePlaceholderAvatar(c.id, c.idx);
+    const key = await writePlaceholderAvatar(c.id, c.idx);
     await dataSource.query('UPDATE children SET photo_url = $1 WHERE id = $2 AND photo_url IS NULL', [key, c.id]);
     console.log(`${c.full_name}: ${key} (avatar #${(c.idx % 10) + 1})`);
   }

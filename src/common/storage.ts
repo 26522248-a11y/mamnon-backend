@@ -3,18 +3,23 @@
  *  - STORAGE_DRIVER=local (default): files in UPLOAD_DIR (Render persistent disk /var/data/uploads, Docker volume…).
  *  - STORAGE_DRIVER=s3: any S3-compatible bucket (Cloudflare R2, AWS S3, MinIO) –
  *    S3_ENDPOINT, S3_BUCKET, S3_ACCESS_KEY, S3_SECRET, optional S3_REGION (default "auto"), S3_PUBLIC_BASE.
+ * B27: EVERY upload (child/picker/pickup/medicine photos, receipts, avatars, announcement + class photos) goes through storage().
  * Files are always streamed through permission-checked API endpoints (children's photos stay private); S3_PUBLIC_BASE is only
  * reported by publicUrl() for non-sensitive assets and is never used for announcement images.
  */
 import * as fs from 'fs';
 import * as path from 'path';
-import { uploadDir } from './upload';
+
+/** Local driver dir (NOT served statically). Resolved lazily so tests / scripts can set UPLOAD_DIR first. */
+export const uploadDir = () => process.env.UPLOAD_DIR || path.resolve(process.cwd(), 'uploads');
 
 export interface FileStorage {
   readonly driver: 'local' | 's3';
   put(key: string, data: Buffer, contentType: string): Promise<void>;
   get(key: string): Promise<Buffer | null>;
   remove(key: string): Promise<void>;
+  /** Keys starting with `prefix` (flat keys only; used by seed cleanup / maintenance scripts). */
+  list(prefix: string): Promise<string[]>;
   publicUrl(key: string): string | null;
 }
 
@@ -25,11 +30,13 @@ const safeKey = (key: string) => {
 
 export class LocalStorage implements FileStorage {
   readonly driver = 'local' as const;
-  constructor(private dir = uploadDir()) {}
+  constructor(private fixedDir?: string) {}
+  private get dir() { return this.fixedDir ?? uploadDir(); }
   private file(key: string) { return path.join(this.dir, safeKey(key)); }
   async put(key: string, data: Buffer) { const f = this.file(key); fs.mkdirSync(path.dirname(f), { recursive: true }); fs.writeFileSync(f, data); }
   async get(key: string) { const f = this.file(key); return fs.existsSync(f) ? fs.readFileSync(f) : null; }
   async remove(key: string) { fs.rmSync(this.file(key), { force: true }); }
+  async list(prefix: string) { return fs.existsSync(this.dir) ? fs.readdirSync(this.dir).filter((f) => f.startsWith(prefix)) : []; }
   publicUrl() { return null; }
 }
 
@@ -65,6 +72,15 @@ export class S3Storage implements FileStorage {
     }
   }
   async remove(key: string) { await this.client.send(new this.sdk.DeleteObjectCommand({ Bucket: this.bucket, Key: safeKey(key) })); }
+  async list(prefix: string) {
+    const out: string[] = []; let token: string | undefined;
+    do {
+      const r = await this.client.send(new this.sdk.ListObjectsV2Command({ Bucket: this.bucket, Prefix: prefix, ContinuationToken: token }));
+      for (const o of r?.Contents ?? []) if (o.Key) out.push(o.Key);
+      token = r?.IsTruncated ? r.NextContinuationToken : undefined;
+    } while (token);
+    return out;
+  }
   publicUrl(key: string) { return this.publicBase ? `${this.publicBase.replace(/\/+$/, '')}/${safeKey(key)}` : null; }
 }
 

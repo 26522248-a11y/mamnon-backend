@@ -173,7 +173,7 @@ export class ChildrenController {
   async remove(@Param('id', ParseUUIDPipe) id: string) {
     const c = await this.access.getChildOr404(id);
     await this.children.delete(id);
-    removeImage(c.photoUrl);
+    await removeImage(c.photoUrl);
   }
 
   @Post(':id/photo') @Roles('admin', 'teacher')
@@ -185,7 +185,7 @@ export class ChildrenController {
     if (!this.access.canOperateClass(u, c.classId)) throw Forbidden('Không có quyền với trẻ này');
     const key = await saveImage(file); // 400 INVALID_FILE unless real JPEG/PNG/HEIC
     await this.children.update(id, { photoUrl: key });
-    removeImage(c.photoUrl);
+    await removeImage(c.photoUrl);
     return { photoUrl: `/api/v1/children/${id}/photo` };
   }
 
@@ -193,7 +193,7 @@ export class ChildrenController {
   @Get(':id/photo')
   async getPhoto(@CurrentUser() u: AuthUser, @Param('id', ParseUUIDPipe) id: string, @Res() res: Response) {
     const c = await this.access.assertChildRead(u, id, true);
-    sendImage(res, c.photoUrl);
+    await sendImage(res, c.photoUrl);
   }
 
   @Get(':id/guardians')

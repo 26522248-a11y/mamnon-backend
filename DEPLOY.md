@@ -8,9 +8,9 @@
                                    └─ ổ đĩa /var/data (ảnh, hoá đơn, nhật ký thao tác)
 ```
 
-Bạn cần 3 tài khoản (đăng nhập bằng GitHub là nhanh nhất): **neon.tech**, **render.com**, **vercel.com**. Render phải có thẻ thanh toán: gói **Starter** cần để gắn ổ đĩa lưu ảnh và hoá đơn.
+Bạn cần 3 tài khoản (đăng nhập bằng GitHub là nhanh nhất): **neon.tech**, **render.com**, **vercel.com**. Render phải có thẻ thanh toán: gói **Starter** cần để gắn ổ đĩa lưu ảnh và hoá đơn – hoặc dùng gói Free + **Cloudflare R2** (xem mục *Lưu ảnh*).
 
-> **Lưu ý về ổ đĩa:** máy chủ Render (kể cả gói Free) **xoá sạch file** mỗi lần deploy hoặc khởi động lại. Ảnh đón bé, ảnh lớp và hoá đơn chỉ còn nếu gắn **Persistent Disk** (đã khai báo trong `render.yaml`, mount `/var/data`, chỉ có trên gói trả phí). Gói Free còn "ngủ" sau 15 phút không dùng, lần mở đầu chờ khoảng 50 giây.
+> **Lưu ý về ổ đĩa (B27):** máy chủ Render (kể cả gói Free) **xoá sạch file** mỗi lần deploy hoặc khởi động lại. Trên gói Free **bắt buộc** dùng Cloudflare R2 (`STORAGE_DRIVER=s3`, xem mục *Lưu ảnh*) – nếu để `local`, mọi ảnh (đón bé, người đón hộ, hồ sơ bé, dặn thuốc, ảnh lớp, thông báo) và hoá đơn sẽ mất sau mỗi lần deploy. Chỉ dùng `local` khi có **Persistent Disk** (gói trả phí, mount `/var/data`, `UPLOAD_DIR=/var/data/uploads`). Gói Free còn "ngủ" sau 15 phút không dùng, lần mở đầu chờ khoảng 50 giây.
 
 ---
 
@@ -55,7 +55,7 @@ Bạn cần 3 tài khoản (đăng nhập bằng GitHub là nhanh nhất): **neo
    - khởi động API. Render kiểm tra `GET /api/v1/health`.
 5. Khi service hiện **Live**, chép URL dạng `https://mamnon-api.onrender.com`. Mở `https://mamnon-api.onrender.com/api/v1/health` phải thấy `{"status":"ok"}`.
 6. **Bắt buộc:** vào **mamnon-api → Environment**, **xoá** `INITIAL_ADMIN_PASSWORD` → **Save Changes** (Render deploy lại; tài khoản vẫn còn).
-7. Kiểm tra ổ đĩa: **mamnon-api → Disks** có `mamnon-data` mount `/var/data`.
+7. Kiểm tra lưu ảnh: dùng R2 thì **Environment** có `STORAGE_DRIVER=s3` + đủ `S3_*`; dùng ổ đĩa thì **mamnon-api → Disks** có `mamnon-data` mount `/var/data`.
 
 > Không có dữ liệu mẫu trên production: lệnh seed (tạo tài khoản 123456) **từ chối chạy** khi `NODE_ENV=production`.
 > Cách khác để tạo admin (gói có Shell): **mamnon-api → Shell** → `INITIAL_ADMIN_USERNAME=hieutruong INITIAL_ADMIN_PASSWORD='...' npm run bootstrap:admin:prod`.
@@ -94,7 +94,7 @@ Neon đã có khôi phục theo thời điểm. Nên thêm bản dump hằng tu�
 30 2 * * 0  pg_dump "postgresql://...neon.tech/neondb?sslmode=require" -Fc -f $HOME/mamnon-backup/mamnon_$(date +\%F).dump && ls -1t $HOME/mamnon-backup/*.dump | tail -n +9 | xargs -r rm
 ```
 Khôi phục: `pg_restore --clean --if-exists -d "<DATABASE_URL>" mamnon_YYYY-MM-DD.dump`.
-Ảnh và hoá đơn nằm trên ổ đĩa Render. Sao lưu ổ đĩa: Render tự chụp snapshot hằng ngày, khôi phục ở **mamnon-api → Disks → Snapshots**.
+Ảnh và hoá đơn: với R2 nằm trong bucket (bật *Object versioning*/lifecycle hoặc sao chép bucket định kỳ nếu cần); với ổ đĩa Render thì Render tự chụp snapshot hằng ngày, khôi phục ở **mamnon-api → Disks → Snapshots**.
 
 ## Cập nhật phiên bản
 - **API:** push lên nhánh `master` → Render tự build và deploy. Migration mới tự chạy khi khởi động; migration chỉ thêm, không xoá dữ liệu. Lỗi thì Render giữ bản cũ đang chạy. Xem log ở **mamnon-api → Logs**.
@@ -118,11 +118,32 @@ API tự kiểm tra thông báo đến giờ gửi mỗi 30 giây (`ANNOUNCEMENT
 3. **Test run** → phải trả `200 {"ok":true,...}`. Sai/thiếu khoá → `401`.
 Gọi nhiều lần không sao: mỗi thông báo chỉ gửi đúng 1 lần (khoá dòng `FOR UPDATE SKIP LOCKED`).
 
-## Lưu ảnh: ổ đĩa Render hoặc Cloudflare R2
-- Mặc định `STORAGE_DRIVER=local`: ảnh nằm trong `UPLOAD_DIR` trên ổ đĩa `/var/data` của Render (cần gói có Disk).
-- Dùng R2 (khuyến nghị nếu không có Disk): Cloudflare → **R2 → Create bucket** (vd `mamnon-uploads`, **không** bật public) → **Manage R2 API Tokens → Create token** quyền *Object Read & Write* cho bucket đó. Điền trên Render:
-  `STORAGE_DRIVER=s3`, `S3_ENDPOINT=https://<account-id>.r2.cloudflarestorage.com`, `S3_BUCKET=mamnon-uploads`, `S3_ACCESS_KEY`, `S3_SECRET`, (`S3_REGION` mặc định `auto`). `S3_PUBLIC_BASE` để trống – ảnh trẻ luôn được phục vụ qua API có kiểm tra quyền, không public.
-- Hiện R2 áp dụng cho ảnh đính kèm thông báo; ảnh hồ sơ trẻ/biên lai vẫn ở `UPLOAD_DIR`.
+## Lưu ảnh: Cloudflare R2 (khuyến nghị) hoặc ổ đĩa Render
+Mọi file tải lên đi qua cùng một lớp lưu trữ (`src/common/storage.ts`): ảnh hồ sơ bé + ảnh đại diện mẫu, ảnh người đón hộ, ảnh giao bé / yêu cầu đón, ảnh dặn thuốc, hoá đơn thu chi (ảnh/PDF), ảnh lớp, ảnh đính kèm thông báo. File luôn được trả qua API có kiểm tra quyền (bucket **riêng tư**).
+
+**R2 (bắt buộc trên gói Free):** Cloudflare → **R2 → Create bucket** (vd `mamnon-uploads`, **không** bật public) → **Manage R2 API Tokens → Create token** quyền *Object Read & Write* chỉ cho bucket đó. Điền trên Render → Environment:
+
+| Biến | Giá trị |
+|---|---|
+| `STORAGE_DRIVER` | `s3` |
+| `S3_ENDPOINT` | `https://<account-id>.r2.cloudflarestorage.com` (Account ID ở trang R2) |
+| `S3_BUCKET` | `mamnon-uploads` |
+| `S3_ACCESS_KEY` | Access Key ID của token |
+| `S3_SECRET` | Secret Access Key của token |
+| `S3_REGION` | `auto` |
+| `S3_PUBLIC_BASE` | để trống (ảnh trẻ không bao giờ public) |
+
+Thiếu một trong `S3_ENDPOINT/S3_BUCKET/S3_ACCESS_KEY/S3_SECRET` thì API báo lỗi ngay khi lưu/đọc file đầu tiên (`STORAGE_DRIVER=s3 needs …`).
+
+**Ổ đĩa:** `STORAGE_DRIVER=local` (mặc định) ghi vào `UPLOAD_DIR`; chỉ bền khi gắn Persistent Disk (gói trả phí, `UPLOAD_DIR=/var/data/uploads`).
+
+**Sau khi chuyển sang R2:** các file ghi trên ổ đĩa tạm trước đó đã mất; bản ghi vẫn trỏ tới chúng sẽ trả 404 "Không có ảnh". Kiểm tra / dọn bằng (chạy với **cùng** biến lưu trữ như API, sao lưu DB trước):
+```bash
+npm run repair:missing-photos              # chỉ liệt kê (dry run), ghi log JSON vào AUDIT_LOG_DIR hoặc logs/
+npm run repair:missing-photos -- --apply   # đặt NULL ảnh/hoá đơn bị mất (bé, người đón hộ, giao bé, yêu cầu đón, dặn thuốc, hoá đơn)
+```
+Ảnh lớp và ảnh thông báo bị mất chỉ được liệt kê (cột bắt buộc), cần xoá/đăng lại thủ công.
+Nếu **tất cả** tham chiếu đều mất, `--apply` sẽ từ chối (phòng trỏ nhầm kho lưu trữ); khi đã chắc chắn (vd toàn bộ file cũ nằm trên ổ đĩa tạm đã bị xoá) thì thêm `--force`.
 
 ## Dữ liệu demo cho ảnh hướng dẫn (staging)
 Chạy từ máy có mã nguồn, trỏ thẳng vào Neon (Render Free không có Shell). Mạng chặn cổng 5432 thì dùng driver WebSocket của Neon (`@neondatabase/serverless`, cổng 443) – xem ghi chú trong `src/database/demo.ts`:
@@ -146,7 +167,7 @@ DATABASE_URL='<Neon direct URL>' npm run demo:purge   # xoá ĐÚNG các dòng d
 | `CORS_ORIGIN` | ✔ | danh sách cách dấu phẩy, hỗ trợ `*` cho preview |
 | `COOKIE_SECURE=true`, `COOKIE_SAMESITE=lax\|none` | ✔ | `none` tự bật Secure |
 | `TRUST_PROXY` | ✔ | `2` (qua Vercel proxy) hoặc `1` (gọi thẳng) |
-| `UPLOAD_DIR`, `AUDIT_LOG_DIR` | ✔ | trên ổ đĩa bền, vd `/var/data/uploads`, `/var/data/logs` |
+| `UPLOAD_DIR`, `AUDIT_LOG_DIR` | khi dùng ổ đĩa | trên ổ đĩa bền, vd `/var/data/uploads`, `/var/data/logs` (không cần `UPLOAD_DIR` khi `STORAGE_DRIVER=s3`) |
 | `SCHOOL_NAME`, `SCHOOL_ADDRESS`, `SCHOOL_PHONE` | nên có | in trên phiếu thu, trang đăng nhập |
 | `INITIAL_ADMIN_USERNAME/PASSWORD/NAME` | lần đầu | xoá PASSWORD sau khi tạo |
 | `PUBLIC_API_BASE` | nên có | tên miền web |
@@ -155,4 +176,4 @@ DATABASE_URL='<Neon direct URL>' npm run demo:purge   # xoá ĐÚNG các dòng d
 | `CRON_SECRET` | nên có | header `X-Cron-Secret` cho cron ngoài; trống = tắt endpoint (401) |
 | `KEEPALIVE_URL`, `KEEPALIVE_INTERVAL_MS` | nên có (Free) | tự gọi `/api/v1/health/ping` để không ngủ; mặc định 10 phút |
 | `ANNOUNCEMENT_TICK_MS` | tuỳ chọn | chu kỳ kiểm tra hẹn giờ, mặc định 30000; 0 = tắt |
-| `STORAGE_DRIVER`, `S3_ENDPOINT/S3_BUCKET/S3_ACCESS_KEY/S3_SECRET/S3_PUBLIC_BASE/S3_REGION` | tuỳ chọn | `local` (mặc định) hoặc `s3` (R2) |
+| `STORAGE_DRIVER`, `S3_ENDPOINT/S3_BUCKET/S3_ACCESS_KEY/S3_SECRET/S3_REGION` | ✔ trên gói Free | `s3` (R2) – bắt buộc khi không có Persistent Disk; `local` (mặc định) chỉ khi có Disk. `S3_PUBLIC_BASE` để trống |
