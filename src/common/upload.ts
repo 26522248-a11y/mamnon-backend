@@ -83,3 +83,27 @@ export async function sendStored(res: Response, stored: string | null | undefine
 }
 
 export const sendImage = (res: Response, stored?: string | null) => sendStored(res, stored, 'Không có ảnh');
+
+/**
+ * B29: multer/busboy hands `originalname` over as latin1-decoded bytes, so "hóa đơn.pdf" arrives as "hÃ³a Ä‘Æ¡n.pdf".
+ * Re-decode as UTF-8 (NFC). Left untouched when it already contains non-latin1 chars or is not valid UTF-8.
+ */
+export function decodeOriginalName(name?: string | null): string {
+  if (!name) return '';
+  if (/[^\x00-\xff]/.test(name)) return name.normalize('NFC');
+  const utf8 = Buffer.from(name, 'latin1').toString('utf8');
+  return (utf8.includes('\uFFFD') ? name : utf8).normalize('NFC');
+}
+
+/** ASCII-only fallback for old clients: strip Vietnamese diacritics (đ → d), anything else unsafe → "_". */
+export function asciiFileName(name: string): string {
+  const a = name.normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/đ/g, 'd').replace(/Đ/g, 'D')
+    .replace(/[^A-Za-z0-9._ -]/g, '_').replace(/\s+/g, ' ').trim();
+  return a || 'file';
+}
+
+/** RFC 6266 / 5987 Content-Disposition: `type; filename="ascii"; filename*=UTF-8''percent-encoded`. */
+export function contentDisposition(type: 'inline' | 'attachment', name: string): string {
+  const enc = encodeURIComponent(name).replace(/['()*]/g, (c) => '%' + c.charCodeAt(0).toString(16).toUpperCase());
+  return `${type}; filename="${asciiFileName(name)}"; filename*=UTF-8''${enc}`;
+}

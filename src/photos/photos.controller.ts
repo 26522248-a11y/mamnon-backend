@@ -12,7 +12,7 @@ import { recordAudit } from '../common/audit';
 import { AuthUser, CurrentUser, Roles } from '../common/auth';
 import { AppError, BadRequest, Forbidden, NotFound } from '../common/errors';
 import { storage } from '../common/storage';
-import { detectImage, heifToJpeg } from '../common/upload';
+import { decodeOriginalName, detectImage, heifToJpeg } from '../common/upload';
 import { NotificationsService } from '../notifications/notifications.service';
 
 const MAX_FILES = 20, MAX_BYTES = 15 * 1024 * 1024;
@@ -132,9 +132,9 @@ export class PhotosController {
     const plan = files.map((f, i) => {
       const t = [...new Set([...(Array.isArray(tags[i]) ? tags[i] : []), ...(Array.isArray(hiddenFor[i]) ? hiddenFor[i] : [])].map(String))];
       const bad = t.filter((id) => !uuid.test(id) || !kids.get(id)?.active);
-      if (bad.length) throw new AppError(400, 'CHILD_NOT_IN_CLASS', 'Có bé không thuộc lớp này', { childIds: bad, file: f.originalname });
+      if (bad.length) throw new AppError(400, 'CHILD_NOT_IN_CLASS', 'Có bé không thuộc lớp này', { childIds: bad, file: decodeOriginalName(f.originalname) });
       const kind = isWebp(f.buffer) ? 'webp' : detectImage(f.buffer);
-      if (!kind) throw new AppError(400, 'UNSUPPORTED_IMAGE', `Tệp không phải ảnh hợp lệ: ${f.originalname}`, { fileName: f.originalname });
+      if (!kind) throw new AppError(400, 'UNSUPPORTED_IMAGE', `Tệp không phải ảnh hợp lệ: ${decodeOriginalName(f.originalname)}`, { fileName: decodeOriginalName(f.originalname) });
       const hide = (Array.isArray(hiddenFor[i]) ? hiddenFor[i] : []).map(String).filter((id) => !kids.get(id)?.consent);
       const missing = t.filter((id) => !kids.get(id)!.consent && !hide.includes(id)).map((id) => ({ childId: id, name: kids.get(id)!.name }));
       const cid = typeof clientIds[i] === 'string' && clientIds[i] ? String(clientIds[i]).slice(0, 80) : null;
@@ -147,15 +147,15 @@ export class PhotosController {
     const sharp = require('sharp');
     for (const p of plan) {
       const dup = p.clientId ? existing.find((x) => x.client_id === p.clientId) : null;
-      if (dup) { results.push({ index: p.i, clientId: p.clientId, file: p.f.originalname, status: 'created', duplicate: true, photoId: dup.id }); continue; }
-      if (p.missing.length) { results.push({ index: p.i, clientId: p.clientId, file: p.f.originalname, status: 'rejected', code: 'PHOTO_CONSENT_MISSING', children: p.missing }); continue; }
+      if (dup) { results.push({ index: p.i, clientId: p.clientId, file: decodeOriginalName(p.f.originalname), status: 'created', duplicate: true, photoId: dup.id }); continue; }
+      if (p.missing.length) { results.push({ index: p.i, clientId: p.clientId, file: decodeOriginalName(p.f.originalname), status: 'rejected', code: 'PHOTO_CONSENT_MISSING', children: p.missing }); continue; }
       let buf = p.f.buffer;
       try {
         if (p.kind === 'heif') buf = await heifToJpeg(buf);
         const full = await sharp(buf).rotate().resize({ width: 2048, height: 2048, fit: 'inside', withoutEnlargement: true }).jpeg({ quality: 85 }).toBuffer({ resolveWithObject: true });
         const thumb = await sharp(buf).rotate().resize({ width: 400, height: 400, fit: 'inside', withoutEnlargement: true }).jpeg({ quality: 78 }).toBuffer();
         toSave.push({ ...p, full: full.data, thumb, w: full.info.width, h: full.info.height });
-      } catch { results.push({ index: p.i, clientId: p.clientId, file: p.f.originalname, status: 'rejected', code: 'UNSUPPORTED_IMAGE' }); }
+      } catch { results.push({ index: p.i, clientId: p.clientId, file: decodeOriginalName(p.f.originalname), status: 'rejected', code: 'UNSUPPORTED_IMAGE' }); }
     }
     const allMissing = (): Kid[] => { const m = new Map<string, Kid>(); plan.forEach((p) => p.missing.forEach((k) => m.set(k.childId, k))); return [...m.values()]; };
     if (!toSave.length && !results.some((r) => r.duplicate)) {
@@ -181,7 +181,7 @@ export class PhotosController {
             await m.query(`INSERT INTO photos (id, post_id, class_id, author_id, client_id, full_key, thumb_key, width, height, child_ids, hidden, hidden_reason, hidden_for_child_ids, hidden_at, position)
               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::uuid[],$11,$12,$13::uuid[],$14,$15)`,
               [(p as any).id, post.id, classId, u.id, p.clientId, (p as any).fullKey, (p as any).thumbKey, p.w, p.h, p.tags, hidden, hidden ? 'CONSENT_MISSING' : null, p.hide, hidden ? new Date() : null, p.i]);
-            results.push({ index: p.i, clientId: p.clientId, file: p.f.originalname, status: 'created', photoId: (p as any).id, hidden });
+            results.push({ index: p.i, clientId: p.clientId, file: decodeOriginalName(p.f.originalname), status: 'created', photoId: (p as any).id, hidden });
           }
           await recordAudit(m, u, { action: 'photo_post.create', entityType: 'photo_post', entityId: post.id, ip: req.ip,
             after: { classId, photos: toSave.map((p) => ({ id: (p as any).id, childIds: p.tags, hiddenForChildIds: p.hide })) } });

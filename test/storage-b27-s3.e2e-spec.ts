@@ -99,7 +99,7 @@ describe('B27 uploads on S3/R2 (mocked client)', () => {
     expect(objects.get(k1)).toMatchObject({ type: 'image/png' });
     const r1 = await as('admin').get(`/finance/entries/${e.id}/receipt`).expect(200);
     expect(r1.headers['content-type']).toBe('image/png');
-    expect(r1.headers['content-disposition']).toBe(`inline; filename*=UTF-8''hoa-don.png`);
+    expect(r1.headers['content-disposition']).toBe(`inline; filename="hoa-don.png"; filename*=UTF-8''hoa-don.png`);
     const pdf = Buffer.from('%PDF-1.4\n%test\n');
     await as('ketoan').upload(`/finance/entries/${e.id}/receipt`).attach('receipt', pdf, 'dien.pdf').expect(200);
     const k2 = (await ds.query(`SELECT receipt_key FROM finance_entries WHERE id = $1`, [e.id]))[0].receipt_key;
@@ -107,7 +107,7 @@ describe('B27 uploads on S3/R2 (mocked client)', () => {
     expect(objects.get(k2)).toMatchObject({ type: 'application/pdf' });
     const r2 = await as('ketoan').get(`/finance/entries/${e.id}/receipt`).expect(200);
     expect(r2.headers['content-type']).toMatch(/application\/pdf/);
-    expect(r2.headers['content-disposition']).toBe(`inline; filename*=UTF-8''dien.pdf`);
+    expect(r2.headers['content-disposition']).toBe(`inline; filename="dien.pdf"; filename*=UTF-8''dien.pdf`);
     await as('ph1').get(`/finance/entries/${e.id}/receipt`).expect(403);
     objects.delete(k2);
     expect((await as('ketoan').get(`/finance/entries/${e.id}/receipt`).expect(404)).body.message).toBe('Không tìm thấy file hoá đơn');
