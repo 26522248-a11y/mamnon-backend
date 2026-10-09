@@ -335,7 +335,7 @@ export class CreditTransaction {
   @ManyToOne(() => Child, { onDelete: 'RESTRICT' }) @JoinColumn({ name: 'child_id' }) child!: Child;
   /** + credit added (prepayment/overpayment/void restore), - credit applied to an invoice */
   @Column({ type: 'integer' }) amount!: number;
-  @Column({ type: 'varchar', length: 20 }) type!: 'prepayment' | 'overpayment' | 'applied' | 'restored' | 'adjustment';
+  @Column({ type: 'varchar', length: 20 }) type!: 'prepayment' | 'overpayment' | 'applied' | 'restored' | 'void_refund' | 'adjustment';
   @Column({ name: 'payment_id', type: 'uuid', nullable: true }) paymentId!: string | null;
   @Column({ name: 'invoice_id', type: 'uuid', nullable: true }) invoiceId!: string | null;
   @Column({ type: 'text', nullable: true }) note!: string | null;
@@ -343,7 +343,41 @@ export class CreditTransaction {
   @CreateDateColumn({ name: 'created_at', type: 'timestamptz' }) createdAt!: Date;
 }
 
+/**
+ * One row per refunded absence day, so the same day is never refunded twice (re-generation, catch-up)
+ * and a later attendance correction can be clawed back exactly once.
+ */
+@Entity('meal_refunds')
+@Index('uq_meal_refund_active', ['attendanceId'], { unique: true, where: 'reversed_by_line_id IS NULL' })
+export class MealRefund {
+  @PrimaryGeneratedColumn('uuid') id!: string;
+  @Column({ name: 'attendance_id', type: 'uuid' }) attendanceId!: string;
+  @ManyToOne(() => Attendance, { onDelete: 'CASCADE' }) @JoinColumn({ name: 'attendance_id' }) attendance!: Attendance;
+  @Index() @Column({ name: 'child_id', type: 'uuid' }) childId!: string;
+  @Index() @Column({ name: 'invoice_line_id', type: 'uuid' }) invoiceLineId!: string;
+  @ManyToOne(() => InvoiceLine, { onDelete: 'CASCADE' }) @JoinColumn({ name: 'invoice_line_id' }) invoiceLine!: InvoiceLine;
+  @Column({ type: 'integer' }) amount!: number;
+  @Column({ name: 'reversed_by_line_id', type: 'uuid', nullable: true }) reversedByLineId!: string | null;
+  @CreateDateColumn({ name: 'created_at', type: 'timestamptz' }) createdAt!: Date;
+}
+
+/** Audit trail for invoice changes (line edits, void, payments). */
+@Entity('invoice_audit')
+export class InvoiceAudit {
+  @PrimaryGeneratedColumn('uuid') id!: string;
+  @Index() @Column({ name: 'invoice_id', type: 'uuid' }) invoiceId!: string;
+  @ManyToOne(() => Invoice, { onDelete: 'CASCADE' }) @JoinColumn({ name: 'invoice_id' }) invoice!: Invoice;
+  @Column({ type: 'varchar', length: 30 }) action!: 'line_added' | 'line_updated' | 'line_deleted' | 'voided';
+  @Column({ name: 'line_id', type: 'uuid', nullable: true }) lineId!: string | null;
+  @Column({ name: 'old_value', type: 'jsonb', nullable: true }) oldValue!: any;
+  @Column({ name: 'new_value', type: 'jsonb', nullable: true }) newValue!: any;
+  @Column({ name: 'changed_by', type: 'uuid', nullable: true }) changedBy!: string | null;
+  @ManyToOne(() => User, { onDelete: 'SET NULL', nullable: true }) @JoinColumn({ name: 'changed_by' }) changer!: User | null;
+  @CreateDateColumn({ name: 'changed_at', type: 'timestamptz' }) changedAt!: Date;
+}
+
 export const ENTITIES = [
+  MealRefund, InvoiceAudit,
   CreditTransaction,
   Announcement, Notification,
   AttendanceHistory, PickupRequest,

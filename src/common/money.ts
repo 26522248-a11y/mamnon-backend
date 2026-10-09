@@ -11,7 +11,7 @@ function readTriple(n: number, full: boolean): string {
     out.push('mười');
     if (u === 5) out.push('lăm'); else if (u > 0) out.push(DIGITS[u]);
   } else if (u > 0) {
-    if (full || h > 0) out.push('lẻ');
+    if (full || h > 0) out.push('linh');
     out.push(DIGITS[u]);
   }
   return out.join(' ');

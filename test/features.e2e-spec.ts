@@ -137,6 +137,46 @@ describe('PM decisions, notifications, reports, users, rate limit (e2e)', () => 
       expect((await as('ph1').get('/notifications').expect(200)).body.items.some((x: any) => x.type === 'invoice' && x.data.period === period)).toBe(true);
     });
 
+    it('refund lines never duplicate; edits are audited; corrected attendance is clawed back once (QA FEE-R04/R05/R06)', async () => {
+      const month = todayStr().slice(0, 7), p1 = nextMonth(month), p2 = nextMonth(p1), p3 = nextMonth(p2), p4 = nextMonth(p3);
+      const inv = async (period: string, idx = 9) => {
+        const i = (await as('ketoan').get(`/invoices?period=${period}&childId=${s.kids[idx].id}`).expect(200)).body.items[0];
+        return (await as('ketoan').get(`/invoices/${i.id}`).expect(200)).body;
+      };
+      expect((await as('ketoan').post('/invoices/generate', { period: p1 }).expect(201)).body).toMatchObject({ created: 0, skippedExisting: 30 });
+      const first = await inv(p1);
+      expect(first.lines.filter((l: any) => l.kind === 'refund')).toHaveLength(1);
+      // audit trail of the accountant's edit in the previous test
+      const h = await as('ketoan').get(`/invoices/${first.id}/history`).expect(200);
+      expect(h.body[0]).toMatchObject({ action: 'line_updated', changedBy: s.users.ketoan.id, old: { quantity: expect.any(Number) }, new: { quantity: 1 } });
+      await as('ph1').get(`/invoices/${first.id}/history`).expect(403);
+      const refundLine = first.lines.find((l: any) => l.kind === 'refund');
+      expect((await as('ketoan').del(`/invoices/${first.id}/lines/${refundLine.id}`).expect(409)).body.code).toBe('REFUND_LINE_USE_PATCH');
+      // next month: the same absence days are not refunded again
+      await as('ketoan').post('/invoices/generate', { period: p2, classId: s.classes.c1.id }).expect(201);
+      expect((await inv(p2)).lines.some((l: any) => l.kind === 'refund')).toBe(false);
+      // attendance corrected (absent-notified -> present) after the refund => one clawback line, only once
+      await as('admin').put(`/classes/${s.classes.c1.id}/attendance`, { date: `${month}-01`, items: [{ childId: s.kids[9].id, status: 'present' }] }).expect(200);
+      await as('ketoan').post('/invoices/generate', { period: p3, classId: s.classes.c1.id }).expect(201);
+      const claw = (await inv(p3)).lines.filter((l: any) => l.description.startsWith('Thu lại tiền ăn'));
+      expect(claw).toHaveLength(1);
+      expect(claw[0]).toMatchObject({ kind: 'charge', amount: 40000 });
+      await as('ketoan').post('/invoices/generate', { period: p4, classId: s.classes.c1.id }).expect(201);
+      expect((await inv(p4)).lines.some((l: any) => l.description.startsWith('Thu lại tiền ăn'))).toBe(false);
+    });
+
+    it('amount in words and overdue cutoff (00:01 VN on the 11th)', async () => {
+      const { vndInWords } = await import('../src/common/money');
+      const { overdueCutoff } = await import('../src/common/dates');
+      expect(vndInWords(0)).toBe('Không đồng');
+      expect(vndInWords(1000005)).toBe('Một triệu không trăm linh năm đồng');
+      expect(vndInWords(2150000)).toBe('Hai triệu một trăm năm mươi nghìn đồng');
+      expect(vndInWords(1000000000)).toBe('Một tỷ đồng');
+      expect(overdueCutoff(new Date('2026-10-10T17:00:59Z'))).toBe('2026-10-10'); // 11/10 00:00:59 VN: due 10/10 not overdue yet
+      expect(overdueCutoff(new Date('2026-10-10T17:01:00Z'))).toBe('2026-10-11'); // 11/10 00:01 VN: due 10/10 overdue
+      expect(overdueCutoff(new Date('2026-10-10T16:59:00Z'))).toBe('2026-10-10'); // 10/10 23:59 VN
+    });
+
     it('prepayment creates credit; voiding restores applied credit', async () => {
       const r = await as('ketoan').post(`/children/${s.kids[2].id}/prepayments`, { amount: 300000, method: 'cash' }).expect(201);
       expect(r.body).toMatchObject({ kind: 'prepayment', creditAdded: 300000, invoice: null, amountInWords: 'Ba trăm nghìn đồng' });

@@ -3,7 +3,7 @@ import { ApiBearerAuth, ApiPropertyOptional, ApiTags } from '@nestjs/swagger';
 import { IsOptional, IsUUID, Matches } from 'class-validator';
 import { DataSource } from 'typeorm';
 import { Roles } from '../common/auth';
-import { todayStr } from '../common/dates';
+import { overdueCutoff, todayStr } from '../common/dates';
 import { BadRequest } from '../common/errors';
 
 const PERIOD = /^\d{4}-(0[1-9]|1[0-2])$/;
@@ -79,7 +79,7 @@ export class ReportsController {
   @Get('finance') @Roles('admin', 'accountant')
   async finance(@Query() q: MonthRangeQuery) {
     const r = range(q);
-    const today = todayStr();
+    const today = todayStr(), cutoff = overdueCutoff();
     const byPeriod: any[] = await this.ds.query(`
       SELECT i.period AS month, COUNT(*)::int AS "invoiceCount",
         COALESCE(SUM(i.total_amount),0)::bigint AS invoiced, COALESCE(SUM(i.paid_amount),0)::bigint AS collected,
@@ -88,7 +88,7 @@ export class ReportsController {
         COUNT(*) FILTER (WHERE i.status = 'paid')::int AS paid, COUNT(*) FILTER (WHERE i.status = 'partial')::int AS partial,
         COUNT(*) FILTER (WHERE i.status = 'unpaid')::int AS unpaid
       FROM invoices i WHERE i.status <> 'void' AND i.period BETWEEN $1 AND $2 AND ($4::uuid IS NULL OR i.class_id = $4)
-      GROUP BY 1 ORDER BY 1`, [r.from, r.to, today, q.classId ?? null]);
+      GROUP BY 1 ORDER BY 1`, [r.from, r.to, cutoff, q.classId ?? null]);
     const deductions: any[] = await this.ds.query(`
       SELECT i.period AS month, l.kind, COALESCE(SUM(-l.amount),0)::bigint AS amount
       FROM invoice_lines l JOIN invoices i ON i.id = l.invoice_id
@@ -106,7 +106,7 @@ export class ReportsController {
     const [debt] = await this.ds.query(`
       SELECT COALESCE(SUM(total_amount - paid_amount),0)::bigint AS "totalDebt",
         COALESCE(SUM(total_amount - paid_amount) FILTER (WHERE due_date < $1),0)::bigint AS "totalOverdue"
-      FROM invoices WHERE status IN ('unpaid','partial')`, [today]);
+      FROM invoices WHERE status IN ('unpaid','partial')`, [cutoff]);
     const [credit] = await this.ds.query(`SELECT COALESCE(SUM(amount),0)::bigint AS "totalCredit" FROM credit_transactions`);
     const n = (v: any) => Number(v);
     return {

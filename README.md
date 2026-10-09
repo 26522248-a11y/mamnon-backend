@@ -69,7 +69,9 @@ Dữ liệu mẫu:
 | GET | `/children/:id` | theo phạm vi |
 | POST / DELETE | `/children`, `/children/:id` | admin |
 | PATCH | `/children/:id` | admin; giáo viên của lớp chỉ được sửa `allergies`, `healthNotes` |
-| POST | `/children/:id/photo` (multipart, field `file`, JPG/PNG/WEBP ≤ 3MB) | admin, giáo viên của lớp |
+| POST | `/children/:id/photo` (multipart, field `file`, JPG/PNG ≤ 3MB; kiểm tra nội dung thật bằng magic bytes) | admin, giáo viên của lớp |
+| GET | `/children/:id/photo` (trả về ảnh, cần header `Authorization`) | admin, giáo viên của lớp, phụ huynh của trẻ |
+| GET | `/pickup-requests/:id/photo` | admin, giáo viên của lớp, phụ huynh của trẻ |
 | GET | `/children/:id/guardians` | admin, giáo viên của lớp, phụ huynh của trẻ |
 | POST | `/children/:id/guardians` (có thể kèm `account:{username,password}` để cấp tài khoản phụ huynh, hoặc `userId` để liên kết) | admin |
 | GET | `/children/:id/attendance?from&to` | admin, giáo viên của lớp, phụ huynh của trẻ |
@@ -95,6 +97,20 @@ Dữ liệu mẫu:
 | GET / PUT | `/menus?week=`, `/menus` `{weekStart (thứ Hai), items:[{date, meal: breakfast\|lunch\|snack, dishes}]}` | đọc: admin, giáo viên, phụ huynh; ghi: admin |
 | GET / PUT | `/classes/:id/daily-notes?date=` `{date, items:[{childId, eating, sleepMinutes, mood, toilet, note}]}` | admin, giáo viên của lớp |
 | GET | `/children/:id/daily-notes?from&to` | admin, giáo viên của lớp, phụ huynh của trẻ |
+| POST / PATCH / DELETE | `/invoices/:id/lines`, `/invoices/:id/lines/:lineId` (sửa dòng hoá đơn, kể cả dòng hoàn tiền ăn) | admin, kế toán |
+| GET | `/invoices/:id/history` (ai sửa, lúc nào, giá trị cũ, giá trị mới) | admin, kế toán |
+| POST | `/children/:id/prepayments` `{amount, method, ...}` | admin, kế toán |
+| GET | `/children/:id/credits` (số dư trả trước / trả thừa và lịch sử) | admin, kế toán; phụ huynh: con mình |
+| POST | `/announcements` `{title, body, scope: school\|class, classId?, audience: all\|parents\|staff}` | admin; giáo viên: chỉ thông báo cho lớp mình |
+| GET / DELETE | `/announcements`, `/announcements/:id` | xem: theo phạm vi; xoá: admin hoặc người tạo |
+| GET | `/notifications?unreadOnly&page&limit` → `{items,total,unreadCount}`, `/notifications/unread-count` | mọi người dùng (hộp thư của chính mình) |
+| POST | `/notifications/:id/read`, `/notifications/read-all` | chính chủ (của người khác thì nhận 404) |
+| GET | `/reports/attendance?fromMonth&toMonth&classId` (tỉ lệ chuyên cần theo lớp, theo tháng) | admin |
+| GET | `/reports/enrollment` (sĩ số, sức chứa, nam/nữ, số trẻ mới nhập học theo tháng) | admin |
+| GET | `/reports/finance?fromMonth&toMonth&classId` (phải thu, đã thu, công nợ, quá hạn, giảm trừ theo kỳ; tiền thu theo tháng) | admin, kế toán |
+| GET/POST/PATCH/DELETE | `/users`, `/users/:id` | admin |
+| POST | `/users/:id/reset-password`, `/users/:id/deactivate`, `/users/:id/activate` | admin |
+| POST | `/auth/change-password` `{currentPassword, newPassword}` → cấp token mới | mọi người dùng |
 
 Mỗi phần tử trong bảng điểm danh có dạng `{ attendanceId, childId, fullName, allergies, status, note, recorded, pickup }`. Trẻ chưa được điểm danh có `status: null` và `recorded: false`.
 
@@ -110,16 +126,53 @@ Mỗi phần tử trong bảng điểm danh có dạng `{ attendanceId, childId,
   - Phụ huynh của trẻ hoặc admin xác nhận hay từ chối. Khi đó giáo viên mới gọi `POST /attendance/:id/pickup {pickupRequestId}`.
   - Yêu cầu còn chờ thì nhận 403 `PICKUP_REQUEST_PENDING`, yêu cầu bị từ chối thì nhận 403 `PICKUP_REQUEST_REJECTED`. Yêu cầu đã xử lý rồi thì nhận 409 `ALREADY_DECIDED`.
 - Dashboard: admin xem toàn trường và từng lớp (`byClass`). Giáo viên xem các lớp của mình kèm `byClass`. Kế toán chỉ xem tổng. Phụ huynh xem con mình kèm trạng thái từng bé.
-- Học phí: admin và kế toán quản lý. Phụ huynh chỉ xem hoá đơn, phiếu thu, công nợ của con mình. Giáo viên không truy cập được (403).
+- Học phí (xem thêm phần "Quyết định PM đã áp dụng"): admin và kế toán quản lý. Phụ huynh chỉ xem hoá đơn, phiếu thu, công nợ của con mình. Giáo viên không truy cập được (403).
   - Mỗi trẻ chỉ có 1 hoá đơn còn hiệu lực cho mỗi kỳ; huỷ hoá đơn thì lập lại được.
-  - Không cho thu vượt số còn nợ (`OVERPAYMENT`). Số tiền tính bằng VND, kiểu số nguyên.
+  - Số tiền tính bằng VND, kiểu số nguyên.
   - Khi lập hoá đơn tháng, khoản `one_time` không tự động được thêm vào.
 - Sức khoẻ và dinh dưỡng: kế toán không truy cập được (403). Phụ huynh chỉ được đọc. Nhật ký ăn ngủ có cùng giới hạn sửa 3 ngày như điểm danh.
+
+## Ảnh
+
+Thư mục `uploads/` (hoặc đường dẫn trong `UPLOAD_DIR`) **không** được phục vụ công khai. `photoUrl` trong dữ liệu trả về là endpoint API, ví dụ `/api/v1/children/:id/photo`. Endpoint này kiểm tra quyền giống như khi xem hồ sơ trẻ. Không có token thì nhận 401, sai người thì nhận 403.
+
+Front end phải tải ảnh bằng `fetch` có header `Authorization`, rồi hiển thị qua `URL.createObjectURL(blob)`, vì thẻ `<img src>` không gửi được Bearer token.
+
+Ảnh được nhận diện qua magic bytes: chỉ chấp nhận JPEG và PNG thật. Tên file hay Content-Type không có tác dụng.
+
+## Quyết định PM đã áp dụng
+
+- **Yêu cầu đón:** hết hạn sau 2 giờ hoặc khi hết ngày (giờ VN), tuỳ mốc nào đến trước (`expiresAt`, trạng thái `expired`).
+  - Giao trẻ theo yêu cầu đã hết hạn thì nhận 403 `PICKUP_REQUEST_EXPIRED`. Xác nhận yêu cầu đã hết hạn thì nhận 409 `REQUEST_EXPIRED`.
+  - Admin xác nhận hay từ chối thay phụ huynh thì bắt buộc có `note`, nếu thiếu nhận 400 `NOTE_REQUIRED`. Khi đó `decidedOnBehalf=true`.
+  - Phụ huynh nhận thông báo trong hộp thư khi có yêu cầu mới. Giáo viên nhận thông báo khi yêu cầu đã được quyết định.
+- **Hoàn tiền ăn:** điểm danh có thêm cờ `notifiedInAdvance`, chỉ có tác dụng khi `status=absent`.
+  - Khi lập hoá đơn, các ngày vắng có báo trước chưa từng được hoàn (xét 3 tháng trước kỳ) được trừ theo mức `mealRefundPerDay` của khoản tiền ăn.
+  - Bảng `meal_refunds` ghi từng ngày đã hoàn, nên lập lại hoá đơn không bao giờ hoàn trùng.
+  - Nếu sau khi đã hoàn mà điểm danh bị sửa (không còn là vắng có báo trước), hoá đơn tiếp theo có đúng 1 dòng "Thu lại tiền ăn".
+  - Kế toán sửa dòng hoàn bằng PATCH, mọi thay đổi được ghi vào `invoice_audit`. Dòng hoàn không xoá được; muốn bỏ hoàn thì đặt `unitPrice=0`.
+- **Trả trước và trả thừa:** phần tiền vượt số còn nợ được cộng vào số dư (credit) của trẻ. `POST /children/:id/prepayments` dùng để trả trước khi chưa có hoá đơn. Số dư được tự trừ vào hoá đơn kế tiếp bằng dòng `credit`.
+- **Huỷ hoá đơn:** huỷ được cả hoá đơn đã thu tiền. Số đã nộp được chuyển thành số dư (`void_refund`), số dư đã dùng cho hoá đơn đó được hoàn lại, và các ngày hoàn tiền ăn được giải phóng để hoá đơn mới xử lý lại.
+- **Giảm trừ:** là khoản thu loại `type=discount`, bắt buộc có `reason`. Mọi dòng hoá đơn đều có `unitPrice ≥ 0`; dấu của số tiền do `kind` quyết định (`charge`, `discount`, `refund`, `credit`). Nhập số âm thì nhận 400.
+  - Khi lập hoá đơn tự động, giảm trừ bị giới hạn để tổng không âm. Lập tay mà tổng âm thì nhận 400.
+- **Quá hạn:** hạn nộp mặc định là ngày 10. Hoá đơn bị tính quá hạn từ **00:01 giờ VN ngày 11**. `/debts` có `overdue`, `overdueAmount`, lọc được bằng `?overdueOnly=true`, và sắp xếp khoản quá hạn lên đầu. Không có phí trễ hạn.
+- **Thực đơn:** mỗi bữa có `allergyNotes` (món thay thế cho trẻ dị ứng). `GET /menus` trả kèm `allergyAlerts` gồm các trẻ có dị ứng: admin thấy toàn trường, giáo viên thấy lớp mình, phụ huynh thấy con mình.
+
+## Tài khoản và bảo mật đăng nhập
+
+- Sai mật khẩu 5 lần trong 15 phút (tính theo cặp username + IP) thì bị khoá 15 phút: trả 429 `TOO_MANY_ATTEMPTS` kèm header `Retry-After`. Khi đang khoá, nhập đúng mật khẩu cũng bị chặn.
+  - Mỗi IP bị giới hạn 30 lần sai. Đăng nhập đúng thì bộ đếm của username đó được xoá. Admin reset mật khẩu cũng mở khoá luôn.
+  - Các ngưỡng chỉnh được qua `LOGIN_MAX_FAILS`, `LOGIN_IP_MAX_FAILS`, `LOGIN_LOCK_MINUTES`. Nếu chạy sau reverse proxy thì đặt `TRUST_PROXY`.
+  - Bộ đếm nằm trong bộ nhớ, chỉ đúng khi chạy 1 instance.
+- Reset mật khẩu, khoá tài khoản, đổi vai trò, hay tự đổi mật khẩu đều thu hồi mọi phiên đăng nhập cũ.
+- Không xoá, khoá hay đổi vai trò được admin cuối cùng (`LAST_ADMIN`). Không tự khoá hay tự đổi vai trò của chính mình.
+  - Tài khoản đã có dữ liệu liên quan thì không xoá được (`USER_HAS_HISTORY`), hãy khoá thay vì xoá.
+  - Đổi vai trò khi tài khoản còn gắn với lớp hoặc trẻ thì nhận `USER_HAS_LINKS`.
 
 ## Định dạng lỗi
 
 Mọi lỗi đều có dạng `{ "code": "FORBIDDEN", "message": "..." }`. Lỗi validate có thêm `details[]`.
-Các mã lỗi: `UNAUTHORIZED`, `TOKEN_INVALID`, `INVALID_CREDENTIALS`, `NO_REFRESH_TOKEN`, `FORBIDDEN`, `EDIT_WINDOW_EXPIRED`, `PICKUP_NOT_ALLOWED`, `NOT_FOUND`, `VALIDATION_ERROR`, `BAD_REQUEST`, `CONFLICT`, `USERNAME_TAKEN`, `PICKUP_REQUEST_PENDING`, `PICKUP_REQUEST_REJECTED`, `ALREADY_DECIDED`, `INVOICE_EXISTS`, `HAS_PAYMENTS`, `ALREADY_VOID`, `ALREADY_PAID`, `OVERPAYMENT`, `INVOICE_VOID`, `INVALID_SCOPE`, `NEGATIVE_TOTAL`, `INVALID_WEEK_START`, `CHILD_NOT_IN_CLASS`, `CLASS_NOT_EMPTY`, `DATE_IN_FUTURE`, `NOTE_REQUIRED`, `INVALID_GUARDIAN`, `INVALID_FILE`, `INTERNAL_ERROR`.
+Các mã lỗi: `UNAUTHORIZED`, `TOKEN_INVALID`, `INVALID_CREDENTIALS`, `NO_REFRESH_TOKEN`, `FORBIDDEN`, `EDIT_WINDOW_EXPIRED`, `PICKUP_NOT_ALLOWED`, `NOT_FOUND`, `VALIDATION_ERROR`, `BAD_REQUEST`, `CONFLICT`, `USERNAME_TAKEN`, `TOO_MANY_ATTEMPTS`, `WRONG_PASSWORD`, `SAME_PASSWORD`, `LAST_ADMIN`, `SELF_CHANGE`, `USER_HAS_LINKS`, `USER_HAS_HISTORY`, `PICKUP_REQUEST_EXPIRED`, `REQUEST_EXPIRED`, `NOTE_REQUIRED`, `REASON_REQUIRED`, `TOTAL_BELOW_PAID`, `CREDIT_LINE_LOCKED`, `REFUND_LINE_USE_PATCH`, `PICKUP_REQUEST_PENDING`, `PICKUP_REQUEST_REJECTED`, `ALREADY_DECIDED`, `INVOICE_EXISTS`, `ALREADY_VOID`, `ALREADY_PAID`, `INVOICE_VOID`, `INVALID_SCOPE`, `NEGATIVE_TOTAL`, `INVALID_WEEK_START`, `CHILD_NOT_IN_CLASS`, `CLASS_NOT_EMPTY`, `DATE_IN_FUTURE`, `NOTE_REQUIRED`, `INVALID_GUARDIAN`, `INVALID_FILE`, `INTERNAL_ERROR`.
 
 ## Cấu trúc
 
@@ -128,10 +181,14 @@ src/database/entities.ts      # users, classes, class_teachers, children, guardi
 src/database/migrations/      # migration TypeORM
 src/database/seed.ts          # dữ liệu mẫu
 src/common/                   # guard JWT, quy tắc phân quyền (access.ts), bộ lọc lỗi, xử lý ngày
-src/auth, classes, children, attendance, dashboard, fees, health/   # controller
-test/app.e2e-spec.ts          # 24 test e2e
+src/auth, classes, children, attendance, dashboard, fees, health, notifications, reports, users/   # controller
+test/app.e2e-spec.ts, test/features.e2e-spec.ts   # 43 test e2e
 ```
 
-## Chưa làm (các tuần sau)
+## Chưa làm
 
-Thông báo đẩy cho phụ huynh khi có yêu cầu đón, thông báo chung, báo cáo thu chi, xuất PDF phiếu thu, API quản lý user và đổi mật khẩu, giới hạn số lần đăng nhập sai, lưu ảnh lên S3 (hiện ảnh nằm trong thư mục `uploads/` trên máy chủ).
+- Gửi push, SMS hoặc Zalo (hiện chỉ có hộp thư trong app) và xuất PDF phiếu thu.
+- Giảm trừ theo % (hiện chỉ có số tiền cố định) và hoàn tiền ăn theo đơn giá của đúng ngày vắng (hiện dùng đơn giá lúc lập hoá đơn).
+- Xử lý khi trẻ nghỉ học hẳn (hoàn tiền hay giữ số dư), đang chờ PM chốt.
+- Bộ đếm giới hạn đăng nhập cần Redis hoặc DB nếu chạy nhiều instance.
+- Lưu ảnh lên S3.
