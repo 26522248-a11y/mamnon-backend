@@ -122,9 +122,10 @@ describe('PM round 3: void rules, withdrawal & payout, discount cap, account sec
       expect(r.body).toMatchObject({ status: 'withdrawn', leaveDate: leave, outstandingDebt: 0, nextAction: 'refund_payout' });
       const moved = r.body.voidedInvoices.reduce((a: number, v: any) => a + v.movedToCredit, 0);
       expect(r.body.voidedInvoices.map((v: any) => v.id)).toContain(nextInv.id);
-      expect(r.body.mealRefund.days).toBeGreaterThanOrEqual(2);
       expect(r.body.mealRefund.amount).toBe(40000 * r.body.mealRefund.days);
-      expect(r.body.creditBalance).toBe(moved + r.body.mealRefund.amount);
+      // leave month: meals only for attended days -> the 2 notified absences are not charged
+      expect(r.body.leaveMonth).toMatchObject({ period: leave.slice(0, 7), mealRate: 40000 });
+      expect(r.body.creditBalance).toBe(moved + r.body.mealRefund.amount + r.body.leaveMonth.movedToCredit);
       const h = (await as('ketoan').get(`/invoices/${nextInv.id}/history`).expect(200)).body;
       expect(h.find((x: any) => x.action === 'voided').new.reason).toMatch(/nghỉ học/);
 
@@ -163,15 +164,65 @@ describe('PM round 3: void rules, withdrawal & payout, discount cap, account sec
       const debtBefore = b0.outstanding.filter((i: any) => i.period <= leave.slice(0, 7)).reduce((a: number, i: any) => a + i.balance, 0);
       expect(debtBefore).toBeGreaterThan(0);
       const r = await as('admin').post(`/children/${w.id}/withdraw`, { leaveDate: leave, reason: 'Gia đình chuyển trường' }).expect(200);
-      expect(r.body.mealRefund.amount).toBeGreaterThan(0);
-      expect(r.body.creditAppliedToInvoices.reduce((a: number, x: any) => a + x.amount, 0)).toBe(r.body.mealRefund.amount);
-      expect(r.body).toMatchObject({ outstandingDebt: debtBefore - r.body.mealRefund.amount, creditBalance: 0, nextAction: 'collect_debt' });
+      const relief = r.body.mealRefund.amount + r.body.leaveMonth.mealAdjustment - r.body.mealClawback.amount;
+      expect(relief).toBeGreaterThan(0);
+      expect(r.body).toMatchObject({ outstandingDebt: debtBefore - relief, creditBalance: 0, nextAction: 'collect_debt' });
       const d = (await as('ketoan').get('/debts').expect(200)).body.items.find((x: any) => x.childId === w.id);
       expect(d).toMatchObject({ childStatus: 'withdrawn', leaveDate: leave, balance: r.body.outstandingDebt });
       expect((await as('ketoan').post(`/children/${w.id}/refund-payouts`, { method: 'cash', recipientName: 'Bố bé' }).expect(409)).body.code).toBe('NO_CREDIT_BALANCE');
       await payAll(w.id);
       expect((await as('ketoan').get('/debts').expect(200)).body.items.find((x: any) => x.childId === w.id)).toBeUndefined();
       expect((await as('ketoan').get(`/children/${w.id}/withdrawal`).expect(200)).body.nextAction).toBe('none');
+    });
+  });
+
+  describe('leave month rule (PM): fixed fees full month, meals by attended days, accountant can edit', () => {
+    const attended = async (childId: string) => Number((await ds.query(
+      `SELECT COUNT(*)::int n FROM attendance WHERE child_id=$1 AND status IN ('present','late') AND date >= $2 AND date <= $3`, [childId, `${leave.slice(0, 7)}-01`, leave]))[0].n);
+    const markDays = async (childId: string) => {
+      for (const [d, st] of [[addDays(today, -4), 'present'], [addDays(today, -5), 'late'], [addDays(today, -6), 'absent']] as const)
+        if (d.slice(0, 7) === leave.slice(0, 7))
+          await as('admin').put(`/classes/${c1()}/attendance`, { date: d, items: [{ childId, status: st, notifiedInAdvance: st === 'absent' }] }).expect(200);
+    };
+
+    it('existing leave-month invoice: tuition unchanged, refund line for meal days not attended, editable by accountant', async () => {
+      const k = s.kids[27]; // seed: notified absence yesterday, this month's invoice exists
+      await markDays(k.id);
+      const days = await attended(k.id);
+      const lmInv = await invOf(k.id, leave.slice(0, 7));
+      const before = (await as('ketoan').get(`/invoices/${lmInv.id}`).expect(200)).body;
+      const r = await as('ketoan').post(`/children/${k.id}/withdraw`, { leaveDate: leave, reason: 'Về quê' }).expect(200);
+      const mealDue = Math.min(900000, days * 40000);
+      expect(r.body.leaveMonth).toMatchObject({ invoiceId: lmInv.id, created: false, attendedDays: days, mealCharged: 900000, mealAdjustment: 900000 - mealDue });
+      const after = (await as('ketoan').get(`/invoices/${lmInv.id}`).expect(200)).body;
+      const tuition = (x: any) => x.lines.filter((l: any) => l.description === 'Học phí');
+      expect(tuition(after)).toEqual(tuition(before));
+      expect(tuition(after)[0]).toMatchObject({ amount: 1500000 });
+      const refund = after.lines.find((l: any) => l.kind === 'refund' && l.description.startsWith('Hoàn tiền ăn tháng nghỉ'));
+      expect(refund).toMatchObject({ amount: -(900000 - mealDue), reason: expect.stringMatching(/Nghỉ học/) });
+      expect(after.totalAmount).toBe(before.totalAmount - (900000 - mealDue));
+      // accountant corrects it manually (e.g. one more day was eaten) -> audited
+      const fixed = await as('ketoan').patch(`/invoices/${lmInv.id}/lines/${refund.id}`, { unitPrice: refund.unitPrice - 40000, reason: 'Bé ăn thêm 1 ngày' }).expect(200);
+      expect(fixed.body.totalAmount).toBe(after.totalAmount + 40000);
+      await as('gv1').patch(`/invoices/${lmInv.id}/lines/${refund.id}`, { unitPrice: 0 }).expect(403);
+      const h = (await as('ketoan').get(`/invoices/${lmInv.id}/history`).expect(200)).body;
+      expect(h.map((x: any) => x.action)).toEqual(expect.arrayContaining(['line_added', 'line_updated']));
+    });
+
+    it('no leave-month invoice yet: created with full tuition and meals × attended days', async () => {
+      const k = s.kids[24];
+      await markDays(k.id);
+      const days = await attended(k.id);
+      const lmInv = await invOf(k.id, leave.slice(0, 7));
+      await as('ketoan').post(`/invoices/${lmInv.id}/void`, { reason: 'Lập lại khi nghỉ học' }).expect(200);
+      const r = await as('admin').post(`/children/${k.id}/withdraw`, { leaveDate: leave, reason: 'Chuyển trường' }).expect(200);
+      expect(r.body.leaveMonth).toMatchObject({ created: true, attendedDays: days, mealCharged: Math.min(900000, days * 40000) });
+      const inv = (await as('ketoan').get(`/invoices/${r.body.leaveMonth.invoiceId}`).expect(200)).body;
+      expect(inv.period).toBe(leave.slice(0, 7));
+      expect(inv.lines.find((l: any) => l.description === 'Học phí')).toMatchObject({ amount: 1500000 });
+      const meal = inv.lines.find((l: any) => l.kind === 'charge' && l.description.startsWith('Tiền ăn'));
+      if (days > 0) expect(meal).toMatchObject({ amount: Math.min(900000, days * 40000), description: expect.stringMatching(/ngày đi học thực tế/) });
+      else expect(meal).toBeUndefined();
     });
   });
 
@@ -188,6 +239,9 @@ describe('PM round 3: void rules, withdrawal & payout, discount cap, account sec
       await as('admin').post(`/users/${u.body.id}/reset-password`, { newPassword: 'tam12345' }).expect(200);
       expect((await login('kt2', 'tam12345').expect(200)).body.user.mustChangePassword).toBe(true);
       expect((await login('ketoan').expect(200)).body.user.mustChangePassword).toBe(false); // seed accounts
+      const tk = (await login('kt2', 'tam12345').expect(200)).body.accessToken;
+      const me = await request(http).get('/api/v1/auth/me').set('Authorization', `Bearer ${tk}`).expect(200);
+      expect(me.body.mustChangePassword).toBe(true);
     });
 
     it('lockout 429 carries lockedUntil; admin list shows it; POST /users/:id/unlock', async () => {

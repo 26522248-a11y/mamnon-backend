@@ -141,6 +141,9 @@ Mỗi phần tử trong bảng điểm danh có dạng `{ attendanceId, childId,
 
 ## Ảnh
 
+- **Ảnh đại diện mẫu:** 10 ảnh của designer nằm ở `assets/avatars/avatar-01.png..avatar-10.png`. Seed gán lần lượt cho 30 trẻ (trẻ thứ i → `avatar-(i%10+1)`), mỗi trẻ một file riêng `uploads/avatar-<childId>.png` (thay ảnh trẻ này không xoá ảnh trẻ khác).
+- `npm run avatars` gán ảnh mẫu cho các trẻ **chưa có ảnh** trên DB đang chạy (không ghi đè ảnh thật, không xoá dữ liệu); `npm run avatars -- "Nguyễn Gia An"` chỉ cho 1 trẻ.
+
 Thư mục `uploads/` (hoặc đường dẫn trong `UPLOAD_DIR`) **không** được phục vụ công khai. `photoUrl` trong dữ liệu trả về là endpoint API, ví dụ `/api/v1/children/:id/photo`. Endpoint này kiểm tra quyền giống như khi xem hồ sơ trẻ. Không có token thì nhận 401, sai người thì nhận 403.
 
 Front end phải tải ảnh bằng `fetch` có header `Authorization`, rồi hiển thị qua `URL.createObjectURL(blob)`, vì thẻ `<img src>` không gửi được Bearer token.
@@ -170,7 +173,11 @@ Front end phải tải ảnh bằng `fetch` có header `Authorization`, rồi hi
   4. Trẻ chuyển `status='withdrawn'`, lưu `leaveDate`, lý do, người thực hiện; yêu cầu đón đang chờ chuyển `expired`.
   - Kết quả có `outstandingDebt`, `creditBalance`, `netBalance`, `nextAction`: `refund_payout` (còn số dư → kế toán lập phiếu chi `POST /children/:id/refund-payouts`, chi đúng toàn bộ số dư, số dư về 0, số phiếu `PCyyyymm-00001`), `collect_debt` (còn nợ → vẫn nằm trong `/debts` đến khi thu đủ), hoặc `none`.
   - Sau khi nghỉ: không có trong danh sách trẻ mặc định (`?status=withdrawn` hoặc `all` để xem), không có trong bảng điểm danh các ngày sau `leaveDate` (điểm danh → 400 `CHILD_WITHDRAWN`), không được lập hoá đơn tự động, lập tay cho kỳ sau tháng nghỉ hay trả trước → 409 `CHILD_WITHDRAWN`. Thu nợ cũ vẫn bình thường.
-  - Học phí của tháng nghỉ giữ nguyên (chưa tính theo ngày). Chưa có thao tác nhập học lại.
+  - **Tháng nghỉ học (chốt):** khoản cố định (học phí, năng khiếu…) tính **đủ tháng**, không chia theo ngày. Tiền ăn chỉ tính **số ngày đi học thực tế** (có mặt / đi muộn, từ ngày 1 đến `leaveDate`) × `mealRefundPerDay`, không vượt mức tiền ăn tháng; vì vậy ngày vắng có báo trước trong tháng nghỉ không bị tính.
+    - Đã có hoá đơn tháng nghỉ: thêm dòng `refund` "Hoàn tiền ăn tháng nghỉ học" = tiền ăn đã tính − tiền ăn theo ngày thực tế. Nếu hoá đơn đã thu nhiều hơn tổng mới, phần thừa thành số dư (`adjustment`).
+    - Chưa có hoá đơn tháng nghỉ: tạo mới với học phí đủ tháng + tiền ăn theo ngày + hoàn tiền ăn các tháng trước.
+    - Kế toán sửa tay dòng đó bằng `PATCH /invoices/:id/lines/:lineId` (có ghi lịch sử). Kết quả withdraw có `leaveMonth: {period, invoiceId, created, attendedDays, mealRate, mealCharged, mealAdjustment, movedToCredit}`.
+  - Nhập học lại: P2, chưa làm.
 - **Thực đơn:** mỗi bữa có `allergyNotes` (món thay thế cho trẻ dị ứng). `GET /menus` trả kèm `allergyAlerts` gồm các trẻ có dị ứng: admin thấy toàn trường, giáo viên thấy lớp mình, phụ huynh thấy con mình.
 
 ## Tài khoản và bảo mật đăng nhập
@@ -178,7 +185,7 @@ Front end phải tải ảnh bằng `fetch` có header `Authorization`, rồi hi
 - Sai mật khẩu 5 lần trong 15 phút (tính theo cặp username + IP) thì bị khoá 15 phút: trả 429 `{ code: "TOO_MANY_ATTEMPTS", message, lockedUntil: "2026-10-09T11:56:46.013Z" (ISO, UTC), retryAfterSeconds, lockScope: "account"|"ip" }` kèm header `Retry-After`. Khi đang khoá, nhập đúng mật khẩu cũng bị chặn.
   - Mỗi IP bị giới hạn 30 lần sai. Đăng nhập đúng thì bộ đếm của username đó được xoá.
   - `GET /users` / `GET /users/:id` có `locked`, `lockedUntil`. Admin mở khoá bằng `POST /users/:id/unlock` (hoặc reset mật khẩu). Khoá theo IP (30 lần) không gỡ bằng unlock, tự hết sau 15 phút.
-- **`mustChangePassword`:** `true` với tài khoản admin tạo (`POST /users`, tài khoản phụ huynh tạo kèm người giám hộ) và sau khi admin reset mật khẩu; về `false` khi người dùng tự đổi (`POST /auth/change-password`). Có trong `user` của response login / refresh / change-password và trong `/users`. Frontend nên chuyển thẳng tới màn hình đổi mật khẩu khi `true` (backend chưa chặn API khác). Không có trong `/auth/me` (script QA AUTH-07 coi mọi khoá chứa chữ "password" là lộ mật khẩu). Tài khoản seed = `false`.
+- **`mustChangePassword`:** `true` với tài khoản admin tạo (`POST /users`, tài khoản phụ huynh tạo kèm người giám hộ) và sau khi admin reset mật khẩu; về `false` khi người dùng tự đổi (`POST /auth/change-password`). Có trong `user` của response login / refresh / change-password và trong `/users`. Frontend nên chuyển thẳng tới màn hình đổi mật khẩu khi `true` (backend chưa chặn API khác). Có cả trong `GET /auth/me`. Tài khoản seed = `false`.
   - Các ngưỡng chỉnh được qua `LOGIN_MAX_FAILS`, `LOGIN_IP_MAX_FAILS`, `LOGIN_LOCK_MINUTES`. Nếu chạy sau reverse proxy thì đặt `TRUST_PROXY`.
   - Bộ đếm nằm trong bộ nhớ, chỉ đúng khi chạy 1 instance.
 - Reset mật khẩu, khoá tài khoản, đổi vai trò, hay tự đổi mật khẩu đều thu hồi mọi phiên đăng nhập cũ.
@@ -206,6 +213,6 @@ test/app.e2e-spec.ts, features.e2e-spec.ts, withdrawal.e2e-spec.ts   # 52 test e
 
 - Gửi push, SMS hoặc Zalo (hiện chỉ có hộp thư trong app) và xuất PDF phiếu thu.
 - Giảm trừ theo % (hiện chỉ có số tiền cố định) và hoàn tiền ăn theo đơn giá của đúng ngày vắng (hiện dùng đơn giá lúc lập hoá đơn).
-- Tính học phí tháng nghỉ theo số ngày học thực tế; nhập học lại trẻ đã nghỉ.
+- Nhập học lại trẻ đã nghỉ (P2).
 - Bộ đếm giới hạn đăng nhập cần Redis hoặc DB nếu chạy nhiều instance.
 - Lưu ảnh lên S3.

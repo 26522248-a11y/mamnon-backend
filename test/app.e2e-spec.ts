@@ -220,7 +220,11 @@ describe('Mầm non API (e2e)', () => {
       expect(files.length).toBeGreaterThan(0);
       const st = await request(http).get(`/uploads/${files[0]}`);
       expect([401, 404]).toContain(st.status);
-      await as('ph2').get(`/children/${s.kids[1].id}/photo`).expect(404); // no photo yet
+      // seed placeholder avatar: real PNG, per-child file (replacing kids[0]'s photo did not touch kids[1]'s)
+      const av = await request(http).get(`/api/v1/children/${s.kids[1].id}/photo`).set('Authorization', `Bearer ${tokens.ph2}`).buffer(true).expect(200);
+      expect(av.headers['content-type']).toBe('image/png');
+      expect(Buffer.from(av.body).subarray(0, 8).toString('hex')).toBe('89504e470d0a1a0a');
+      await request(http).get(`/api/v1/children/${s.kids[1].id}/photo`).set('Authorization', `Bearer ${tokens.ph1}`).expect(403);
     });
   });
 

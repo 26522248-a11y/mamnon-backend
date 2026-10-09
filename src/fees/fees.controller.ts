@@ -9,7 +9,7 @@ import {
 import { DataSource, EntityManager, In, Not, Repository } from 'typeorm';
 import { AccessService } from '../common/access';
 import { AuthUser, CurrentUser, Roles } from '../common/auth';
-import { overdueCutoff, todayStr } from '../common/dates';
+import { addDays, overdueCutoff, todayStr } from '../common/dates';
 import { AppError, BadRequest, Forbidden, NotFound } from '../common/errors';
 import { vndInWords } from '../common/money';
 import { NotificationsService } from '../notifications/notifications.service';
@@ -136,6 +136,27 @@ const invoiceView = (i: Invoice, detail = false) => ({
 type DraftLine = Pick<InvoiceLine, 'feeItemId' | 'kind' | 'description' | 'quantity' | 'unitPrice' | 'amount' | 'reason'>;
 const capMsg = (requested: number, applied: number) =>
   `Giảm trừ ${requested.toLocaleString('vi-VN')}đ vượt số phải thu; chỉ áp dụng ${applied.toLocaleString('vi-VN')}đ, phần dư ${(requested - applied).toLocaleString('vi-VN')}đ bị bỏ (không chuyển thành số dư)`;
+const applicableFees = (fees: FeeItem[], k: Child) =>
+  fees.filter((f) => f.scope === 'school' || (f.scope === 'class' && f.classId === k.classId) || (f.scope === 'child' && f.childId === k.id));
+const mealItemOf = (applicable: FeeItem[]) => applicable.find((f) => f.type === 'monthly' && (f.mealRefundPerDay ?? 0) > 0);
+/**
+ * Monthly charges + discounts. With `mealDays` (leave month, PM rule) the meal item is charged per day actually attended
+ * (rate = mealRefundPerDay, never more than the monthly meal fee); fixed fees (tuition…) stay the full month.
+ */
+const monthlyLines = (applicable: FeeItem[], mealDays?: number): DraftLine[] => {
+  const meal = mealItemOf(applicable);
+  const out: DraftLine[] = [];
+  for (const f of applicable.filter((x) => x.type === 'monthly')) {
+    if (mealDays !== undefined && meal && f.id === meal.id) {
+      const amt = Math.min(f.amount, mealDays * meal.mealRefundPerDay!);
+      if (amt > 0) out.push({ feeItemId: f.id, kind: 'charge', description: `${f.name} (${mealDays} ngày đi học thực tế, tháng nghỉ học)`,
+        quantity: amt === f.amount ? 1 : mealDays, unitPrice: amt === f.amount ? f.amount : meal.mealRefundPerDay!, amount: amt, reason: null });
+    } else out.push({ feeItemId: f.id, kind: 'charge', description: f.name, quantity: 1, unitPrice: f.amount, amount: f.amount, reason: null });
+  }
+  for (const f of applicable.filter((x) => x.type === 'discount'))
+    out.push({ feeItemId: f.id, kind: 'discount', description: f.name, quantity: 1, unitPrice: f.amount, amount: -f.amount, reason: f.reason });
+  return out;
+};
 const leaveMonth = (c: Child) => c.leaveDate?.slice(0, 7) ?? null;
 /** Active meal refund = not reversed by a later invoice line or by a withdrawal settlement. */
 const MR_ACTIVE = 'r.reversed_by_line_id IS NULL AND r.reversed_by_credit_tx_id IS NULL';
@@ -342,13 +363,9 @@ export class FeesController {
     await this.ds.transaction(async (m) => {
       for (const k of kids) {
         if (existing.has(k.id)) continue;
-        const applicable = fees.filter((f) => f.scope === 'school' || (f.scope === 'class' && f.classId === k.classId) || (f.scope === 'child' && f.childId === k.id));
-        const charges = applicable.filter((f) => f.type === 'monthly');
-        if (!charges.length) continue;
-        const lines: DraftLine[] = [
-          ...charges.map((f) => ({ feeItemId: f.id, kind: 'charge' as const, description: f.name, quantity: 1, unitPrice: f.amount, amount: f.amount, reason: null })),
-          ...applicable.filter((f) => f.type === 'discount').map((f) => ({ feeItemId: f.id, kind: 'discount' as const, description: f.name, quantity: 1, unitPrice: f.amount, amount: -f.amount, reason: f.reason })),
-        ];
+        const applicable = applicableFees(fees, k);
+        if (!applicable.some((f) => f.type === 'monthly')) continue;
+        const lines = monthlyLines(applicable);
         const refunds = await this.mealRefundDrafts(m, k, dto.period, applicable);
         lines.push(...refunds.map((r) => r.line));
         const capped = this.capDeductions(lines);
@@ -597,10 +614,14 @@ export class FeesController {
         await this.voidCore(m, u, inv.id, `Trẻ nghỉ học từ ${fmt(leave)}`);
         voided.push({ id: inv.id, invoiceNo: inv.invoiceNo, period: inv.period, movedToCredit: inv.paidAmount });
       }
-      // 2) meal refunds still pending up to the leave date
+      // 2a) leave month (PM): fixed fees full month, meals only for days actually attended (notified absences therefore not charged)
       await this.creditBalance(m, id);
-      const meal = (await this.items.find({ where: { isActive: true, type: 'monthly' } }))
-        .find((f) => (f.mealRefundPerDay ?? 0) > 0 && (f.scope === 'school' || (f.scope === 'class' && f.classId === child.classId) || (f.scope === 'child' && f.childId === id)));
+      const applicable = applicableFees(await this.items.find({ where: { isActive: true, type: In(['monthly', 'discount']) } }), child);
+      const meal = mealItemOf(applicable);
+      const lmFrom = `${lm}-01`;
+      const [{ n: attendedDays }] = await m.query(`SELECT COUNT(*)::int AS n FROM attendance WHERE child_id = $1 AND status IN ('present','late') AND date >= $2 AND date <= $3`, [id, lmFrom, leave]);
+      const leaveMonthInfo = await this.settleLeaveMonth(m, u, child, lm, leave, Number(attendedDays), applicable, meal);
+      // 2b) meal refunds still pending for months BEFORE the leave month
       let mealRefund = { days: 0, amount: 0, dates: [] as string[] }, clawback = { days: 0, amount: 0 };
       if (meal) {
         const from = `${prevPeriod(prevPeriod(prevPeriod(lm)))}-01`;
@@ -608,7 +629,7 @@ export class FeesController {
           SELECT a.id, to_char(a.date, 'YYYY-MM-DD') AS date FROM attendance a
           WHERE a.child_id = $1 AND a.status = 'absent' AND a.notified_in_advance AND a.date >= $2 AND a.date <= $3
             AND NOT EXISTS (SELECT 1 FROM meal_refunds r WHERE r.attendance_id = a.id AND ${MR_ACTIVE})
-          ORDER BY a.date`, [id, from, leave]);
+          ORDER BY a.date`, [id, from, addDays(lmFrom, -1)]);
         if (days.length) {
           const rate = meal.mealRefundPerDay!, amount = rate * days.length;
           const tx = await m.save(CreditTransaction, m.create(CreditTransaction, { childId: id, amount, type: 'meal_refund',
@@ -646,9 +667,53 @@ export class FeesController {
       // 4) status
       await m.update(Child, id, { status: 'withdrawn', leaveDate: leave, withdrawalReason: reason, withdrawnAt: new Date(), withdrawnBy: u.id });
       await m.createQueryBuilder().update(PickupRequest).set({ status: 'expired' }).where("child_id = :id AND status = 'pending'", { id }).execute();
-      return { voidedInvoices: voided, mealRefund, mealClawback: clawback, creditAppliedToInvoices: applied, ...(await this.settlementState(m, id)) };
+      return { voidedInvoices: voided, leaveMonth: leaveMonthInfo, mealRefund, mealClawback: clawback, creditAppliedToInvoices: applied, ...(await this.settlementState(m, id)) };
     });
     return { childId: id, status: 'withdrawn', leaveDate: leave, reason, ...summary };
+  }
+
+  /**
+   * Leave-month invoice per PM rule. If it does not exist yet it is created (full fixed fees, meals × attended days,
+   * plus refunds of earlier notified absences). If it exists, a 'refund' line returns the meal fee for days not attended;
+   * the accountant can PATCH that line afterwards. If the invoice was already paid beyond the new total, the excess goes to credit.
+   */
+  private async settleLeaveMonth(m: EntityManager, u: AuthUser, child: Child, lm: string, leave: string, attendedDays: number, applicable: FeeItem[], meal?: FeeItem) {
+    const rate = meal?.mealRefundPerDay ?? 0;
+    const base = { period: lm, attendedDays, mealRate: rate };
+    const fmt = (d: string) => d.split('-').reverse().join('/');
+    const inv = await m.findOne(Invoice, { where: { childId: child.id, period: lm, status: Not('void') }, relations: { lines: true }, lock: { mode: 'pessimistic_write', tables: ['invoices'] } });
+    if (!inv) {
+      if (!applicable.some((f) => f.type === 'monthly')) return { ...base, invoiceId: null, created: false, mealCharged: 0, mealAdjustment: 0, movedToCredit: 0, warnings: [] };
+      const lines = monthlyLines(applicable, attendedDays);
+      const refunds = await this.mealRefundDrafts(m, child, lm, applicable);
+      lines.push(...refunds.map((r) => r.line));
+      const capped = this.capDeductions(lines);
+      const created = await this.insertInvoice(m, u, child, lm, this.dueDefault(lm), capped.lines, { note: `Hoá đơn tháng nghỉ học (nghỉ từ ${fmt(leave)})` });
+      await this.recordRefunds(m, child, created, refunds);
+      const mealCharged = created.lines.filter((l) => l.kind === 'charge' && l.feeItemId === meal?.id && !l.description.startsWith('Thu lại')).reduce((s, l) => s + l.amount, 0);
+      return { ...base, invoiceId: created.id, created: true, mealCharged, mealAdjustment: 0, movedToCredit: 0, warnings: capped.warnings };
+    }
+    const mealLines = meal ? inv.lines.filter((l) => l.kind === 'charge' && l.feeItemId === meal.id && !l.description.startsWith('Thu lại')) : [];
+    const charged = mealLines.reduce((s, l) => s + l.quantity * l.unitPrice, 0);
+    let adj = Math.max(0, charged - Math.min(charged, attendedDays * rate));
+    const warnings: CapWarning[] = [];
+    if (adj > inv.totalAmount) { warnings.push({ code: 'DISCOUNT_CAPPED', message: capMsg(adj, inv.totalAmount), description: 'Hoàn tiền ăn tháng nghỉ', kind: 'refund', requested: adj, applied: inv.totalAmount, discarded: adj - inv.totalAmount }); adj = inv.totalAmount; }
+    let movedToCredit = 0;
+    if (adj > 0) {
+      const line = await m.save(InvoiceLine, m.create(InvoiceLine, { invoiceId: inv.id, feeItemId: meal!.id, kind: 'refund',
+        description: `Hoàn tiền ăn tháng nghỉ học: chỉ tính ${attendedDays} ngày đi học thực tế đến ${fmt(leave)}`, quantity: 1, unitPrice: adj, amount: -adj,
+        reason: `Nghỉ học từ ${fmt(leave)}` }));
+      const total = inv.totalAmount - adj;
+      let paid = inv.paidAmount;
+      if (paid > total) {
+        movedToCredit = paid - total; paid = total;
+        await m.save(CreditTransaction, m.create(CreditTransaction, { childId: child.id, amount: movedToCredit, type: 'adjustment', invoiceId: inv.id,
+          note: `Tiền ăn tháng nghỉ đã nộp thừa ở hoá đơn ${inv.invoiceNo} chuyển thành số dư`, createdBy: u.id }));
+      }
+      await m.update(Invoice, inv.id, { totalAmount: total, paidAmount: paid, status: statusOf(total, paid) });
+      await this.audit(m, u, inv.id, 'line_added', line.id, null, { ...lineView(line), reason: 'withdrawal_leave_month', movedToCredit });
+    }
+    return { ...base, invoiceId: inv.id, created: false, mealCharged: charged, mealAdjustment: adj, movedToCredit, warnings };
   }
 
   /** Current withdrawal / settlement state of a child (+ payouts). */

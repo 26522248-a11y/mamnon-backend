@@ -104,10 +104,6 @@ export class AuthController {
     return this.issue(user, res);
   }
 
-  /**
-   * Current user. mustChangePassword is intentionally NOT included here (QA AUTH-07 flags any key containing "password");
-   * it is returned in login / refresh / change-password responses (`user.mustChangePassword`).
-   */
   @Get('me') @ApiBearerAuth() @ApiOkResponse({ type: UserView })
-  me(@CurrentUser() u: AuthUser) { const { mustChangePassword, ...rest } = u; return rest; }
+  me(@CurrentUser() u: AuthUser) { return u; }
 }
