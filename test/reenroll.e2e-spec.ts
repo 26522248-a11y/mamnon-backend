@@ -104,4 +104,40 @@ describe('B12 re-enroll withdrawn child (e2e)', () => {
     await as('admin').post(`/children/${kid.id}/reenroll`, { classId: s.classes.c3.id, startDate: start }).expect(409);
     await as('admin').post(`/children/${kid.id}/reenroll`, { classId: s.classes.c3.id, startDate: addDays(T, 400) }).expect(400);
   });
+
+  it('credit after re-enroll rolls into the next invoice (no refund_payout); start month bills meals only from the start date', async () => {
+    const kid = s.kids.filter((k: any) => k.classId === s.classes.c2.id)[2];
+    await as('admin').post(`/children/${kid.id}/withdraw`, { leaveDate: addDays(T, -2), reason: 'Nghỉ tạm' }).expect(200);
+    // settle every invoice and leave a 1,000,000đ credit (tester case "QA Học Phí 47d8")
+    await ds.query(`UPDATE invoices SET paid_amount = total_amount, status = 'paid' WHERE child_id = $1 AND status IN ('unpaid','partial')`, [kid.id]);
+    const [{ c }] = await ds.query(`SELECT COALESCE(SUM(amount),0)::int AS c FROM credit_transactions WHERE child_id = $1`, [kid.id]);
+    await ds.query(`INSERT INTO credit_transactions (child_id, amount, type, note) VALUES ($1, $2, 'adjustment', 'QA credit')`, [kid.id, 1_000_000 - Number(c)]);
+    expect((await as('ketoan').get(`/children/${kid.id}/withdrawal`).expect(200)).body).toMatchObject({ status: 'withdrawn', creditBalance: 1_000_000, outstandingDebt: 0, nextAction: 'refund_payout' });
+
+    const nextMonth = (() => { const [y, m] = T.slice(0, 7).split('-').map(Number); return m === 12 ? `${y + 1}-01` : `${y}-${String(m + 1).padStart(2, '0')}`; })();
+    const start = `${nextMonth}-20`;
+    const r = (await as('admin').post(`/children/${kid.id}/reenroll`, { classId: s.classes.c1.id, startDate: start }).expect(200)).body;
+    expect(r).toMatchObject({ status: 'active', creditBalance: 1_000_000, outstandingDebt: 0, nextAction: 'apply_to_next_invoice', nextActionText: expect.stringContaining('hoá đơn kế tiếp') });
+    expect(r.warnings.map((w: any) => w.code)).not.toContain('OUTSTANDING_DEBT');
+    expect((await as('ketoan').get(`/children/${kid.id}/withdrawal`).expect(200)).body).toMatchObject({ status: 'active', nextAction: 'apply_to_next_invoice' });
+    expect((await as('ketoan').post(`/children/${kid.id}/refund-payouts`, { method: 'cash', recipientName: 'Mẹ bé' }).expect(409)).body.code).toBe('CHILD_NOT_WITHDRAWN');
+
+    // withdrawn / not-yet-started days are not billed: meals = school days from the start date only, tuition = full month
+    await as('ketoan').post('/invoices/generate', { period: nextMonth, classId: s.classes.c1.id }).expect(201);
+    const [inv] = await ds.query(`SELECT id, total_amount FROM invoices WHERE child_id = $1 AND period = $2 AND status <> 'void'`, [kid.id, nextMonth]);
+    const lines = await ds.query(`SELECT fee_item_id AS "feeItemId", kind, quantity, unit_price AS "unitPrice", amount, description FROM invoice_lines WHERE invoice_id = $1`, [inv.id]);
+    const [ny, nm] = nextMonth.split('-').map(Number);
+    const end = addDays(nm === 12 ? `${ny + 1}-01-01` : `${ny}-${String(nm + 1).padStart(2, '0')}-01`, -1);
+    let days = 0; for (let d = start; d <= end; d = addDays(d, 1)) { const wd = new Date(d + 'T00:00:00Z').getUTCDay(); if (wd !== 0 && wd !== 6) days++; }
+    const meal = lines.find((l: any) => l.feeItemId === s.fees.meals.id);
+    expect(meal).toMatchObject({ kind: 'charge', quantity: days, unitPrice: 40_000, amount: days * 40_000 });
+    expect(meal.description).toMatch(/nhập học lại/);
+    expect(lines.find((l: any) => l.feeItemId === s.fees.tuition.id)).toMatchObject({ quantity: 1, amount: s.fees.tuition.amount });
+    const credit = lines.find((l: any) => l.kind === 'credit');
+    const gross = lines.filter((l: any) => l.kind !== 'credit').reduce((t: number, l: any) => t + Number(l.amount), 0);
+    expect(-Number(credit.amount)).toBe(Math.min(1_000_000, gross));
+    const after = (await as('ketoan').get(`/children/${kid.id}/withdrawal`).expect(200)).body;
+    expect(after.creditBalance).toBe(1_000_000 - Math.min(1_000_000, gross));
+    expect(after.nextAction).not.toBe('refund_payout');
+  });
 });

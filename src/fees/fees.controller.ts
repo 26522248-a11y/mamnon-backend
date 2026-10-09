@@ -199,13 +199,13 @@ const mealItemOf = (applicable: FeeItem[]) => applicable.find((f) => f.type === 
  * Monthly charges + discounts. With `mealDays` (leave month, PM rule) the meal item is charged per day actually attended
  * (rate = mealRefundPerDay, never more than the monthly meal fee); fixed fees (tuition…) stay the full month.
  */
-const monthlyLines = (applicable: FeeItem[], mealDays?: number): DraftLine[] => {
+const monthlyLines = (applicable: FeeItem[], mealDays?: number, mealLabel = 'ngày đi học thực tế, tháng nghỉ học'): DraftLine[] => {
   const meal = mealItemOf(applicable);
   const out: DraftLine[] = [];
   for (const f of applicable.filter((x) => x.type === 'monthly')) {
     if (mealDays !== undefined && meal && f.id === meal.id) {
       const amt = Math.min(f.amount, mealDays * meal.mealRefundPerDay!);
-      if (amt > 0) out.push({ feeItemId: f.id, kind: 'charge', description: `${f.name} (${mealDays} ngày đi học thực tế, tháng nghỉ học)`,
+      if (amt > 0) out.push({ feeItemId: f.id, kind: 'charge', description: `${f.name} (${mealDays} ${mealLabel})`,
         quantity: amt === f.amount ? 1 : mealDays, unitPrice: amt === f.amount ? f.amount : meal.mealRefundPerDay!, amount: amt, reason: null });
     } else out.push({ feeItemId: f.id, kind: 'charge', description: f.name, quantity: 1, unitPrice: f.amount, amount: f.amount, reason: null });
   }
@@ -417,6 +417,8 @@ export class FeesController {
     const periodEnd = addDays(`${nextPeriodOf(dto.period)}-01`, -1);
     const reenrolled = new Set((await this.ds.query(`SELECT DISTINCT child_id FROM enrollments WHERE kind = 'reenroll'`)).map((r: any) => r.child_id));
     for (let i = kids.length - 1; i >= 0; i--) if (reenrolled.has(kids[i].id) && kids[i].enrolledAt && kids[i].enrolledAt! > periodEnd) kids.splice(i, 1);
+    const closed = new Set((await this.ds.query(`SELECT date::text AS d FROM holidays WHERE status = 'confirmed' AND date BETWEEN $1 AND $2`, [`${dto.period}-01`, periodEnd])).map((r: any) => r.d));
+    const schoolDays = (from: string, to: string) => { let n = 0; for (let d = from; d <= to; d = addDays(d, 1)) { const wd = new Date(d + 'T00:00:00Z').getUTCDay(); if (wd !== 0 && wd !== 6 && !closed.has(d)) n++; } return n; };
     const existing = new Set((await this.invoices.find({ where: { period: dto.period, status: Not('void'), childId: In(kids.length ? kids.map((k) => k.id) : ['00000000-0000-0000-0000-000000000000']) } })).map((i) => i.childId));
     const created: Invoice[] = [];
     const warnings: (CapWarning & { invoiceId: string; childId: string; childName: string })[] = [];
@@ -425,7 +427,10 @@ export class FeesController {
         if (existing.has(k.id)) continue;
         const applicable = applicableFees(fees, k);
         if (!applicable.some((f) => f.type === 'monthly')) continue;
-        const lines = monthlyLines(applicable);
+        // B12: re-enrolled mid-month → meals only for school days from the new start date (fixed fees: full month, as in the leave month)
+        const midStart = reenrolled.has(k.id) && k.enrolledAt && k.enrolledAt > `${dto.period}-01` && k.enrolledAt <= periodEnd
+          && schoolDays(`${dto.period}-01`, addDays(k.enrolledAt, -1)) > 0 ? k.enrolledAt : null;
+        const lines = midStart ? monthlyLines(applicable, schoolDays(midStart, periodEnd), `ngày học từ ${midStart.slice(8, 10)}/${midStart.slice(5, 7)}, nhập học lại`) : monthlyLines(applicable);
         const refunds = await this.mealRefundDrafts(m, k, dto.period, applicable);
         lines.push(...refunds.map((r) => r.line));
         const capped = this.capDeductions(lines);
@@ -658,11 +663,16 @@ export class FeesController {
       FROM invoices WHERE child_id = $1 AND status IN ('unpaid','partial')`, [childId, overdueCutoff()]);
     const [{ c }] = await m.query('SELECT COALESCE(SUM(amount),0)::int AS c FROM credit_transactions WHERE child_id = $1', [childId]);
     const outstandingDebt = Number(debt), creditBalance = Number(c), netBalance = creditBalance - outstandingDebt;
+    // Payout (phiếu chi) only for a withdrawn child; an active (e.g. re-enrolled) child's credit rolls into the next invoice.
+    const [child] = await m.query('SELECT status FROM children WHERE id = $1', [childId]);
+    const withdrawn = child?.status === 'withdrawn';
+    const vnd = (x: number) => x.toLocaleString('vi-VN') + 'đ';
+    const nextAction = outstandingDebt > 0 ? 'collect_debt' : creditBalance > 0 ? (withdrawn ? 'refund_payout' : 'apply_to_next_invoice') : 'none';
     return {
-      outstandingDebt, overdueDebt: Number(overdue), outstandingInvoiceCount: Number(n), creditBalance, netBalance,
-      nextAction: creditBalance > 0 && outstandingDebt === 0 ? 'refund_payout' : outstandingDebt > 0 ? 'collect_debt' : 'none',
-      nextActionText: creditBalance > 0 && outstandingDebt === 0 ? `Lập phiếu chi trả lại ${creditBalance.toLocaleString('vi-VN')}đ (POST /children/:id/refund-payouts)`
-        : outstandingDebt > 0 ? `Còn nợ ${outstandingDebt.toLocaleString('vi-VN')}đ – vẫn hiện trong /debts đến khi thu đủ` : 'Đã tất toán',
+      outstandingDebt, overdueDebt: Number(overdue), outstandingInvoiceCount: Number(n), creditBalance, netBalance, nextAction,
+      nextActionText: nextAction === 'refund_payout' ? `Lập phiếu chi trả lại ${vnd(creditBalance)} (POST /children/:id/refund-payouts)`
+        : nextAction === 'apply_to_next_invoice' ? `Số dư ${vnd(creditBalance)} tự trừ vào hoá đơn kế tiếp`
+        : nextAction === 'collect_debt' ? `Còn nợ ${vnd(outstandingDebt)} – vẫn hiện trong /debts đến khi thu đủ` : 'Đã tất toán',
     };
   }
 
