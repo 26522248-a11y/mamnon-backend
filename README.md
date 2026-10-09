@@ -358,5 +358,15 @@ Swagger tag `finance`. Tháng theo giờ VN.
 
 Mọi thao tác ghi đều vào nhật ký (`finance.expense.create`, `finance.entry.approve|reject|void`, `finance.receipt.attach`, `finance_category.*`). Migration `1791557748627-Finance` chỉ thêm bảng `finance_*`. Test: `test/finance.e2e-spec.ts`.
 
+## Thông báo hẹn giờ + ảnh đính kèm (B9)
+- `POST /announcements/attachments` (multipart `file`, ≤12MB, JPG/PNG/HEIC – kiểm tra magic bytes, HEIC→JPEG, xoay theo EXIF, cạnh dài ≤2560, thumb 360×360) → `{id,url,thumbUrl,width,height,size}`. Admin/giáo viên.
+- `DELETE /announcements/attachments/:id` (chưa gắn), `GET /announcements/attachments/:id` và `/thumb` (người nhận chỉ xem được khi thông báo đã gửi).
+- `POST /announcements` thêm `scheduledAt` (ISO có múi giờ, vd `2026-10-10T07:30:00+07:00`; quá khứ → 400 `SCHEDULE_IN_PAST`, >90 ngày → `SCHEDULE_TOO_FAR`) và `attachmentIds` (≤6). Không có `scheduledAt` = gửi ngay.
+- Trả về `status: scheduled|sent|revoked`, `scheduledAt`, `sentAt` (giờ VN `+07:00`), `canEdit`, `attachments[]`.
+- `GET /announcements?status=scheduled` (của mình; admin thấy hết) — mặc định chỉ trả thông báo đã gửi/thu hồi. Phụ huynh không bao giờ thấy bản hẹn giờ.
+- `PATCH /announcements/:id`, `POST /announcements/:id/cancel` — chỉ khi `scheduled`, sau đó 409 `NOT_SCHEDULED`.
+- Bộ hẹn giờ trong tiến trình mỗi `ANNOUNCEMENT_TICK_MS` (30s) + gửi bù khi khởi động; `POST /internal/cron/announcements` với header `X-Cron-Secret` (= `CRON_SECRET`) cho cron ngoài. Gửi đúng 1 lần nhờ `FOR UPDATE SKIP LOCKED` + đổi trạng thái cùng giao dịch tạo thông báo.
+- Lưu file qua `src/common/storage.ts`: `local` (UPLOAD_DIR) hoặc `s3` (R2). Xem DEPLOY.md.
+
 ## Triển khai
 Vercel (web) + Render (API, `render.yaml`) + Neon (Postgres): xem [DEPLOY.md](DEPLOY.md). VPS/Docker: `deploy/`.

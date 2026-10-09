@@ -80,3 +80,21 @@ services:
         sync: false
       - key: VAPID_SUBJECT
         sync: false
+      # B9: khoá cho cron ngoài (cron-job.org) gọi POST /api/v1/internal/cron/announcements
+      - key: CRON_SECRET
+        generateValue: true
+      - key: ANNOUNCEMENT_TICK_MS
+        value: "30000"
+      # Lưu ảnh: mặc định ổ đĩa /var/data (UPLOAD_DIR). Đặt STORAGE_DRIVER=s3 + S3_* để dùng Cloudflare R2
+      - key: STORAGE_DRIVER
+        value: local
+      - key: S3_ENDPOINT
+        sync: false
+      - key: S3_BUCKET
+        sync: false
+      - key: S3_ACCESS_KEY
+        sync: false
+      - key: S3_SECRET
+        sync: false
+      - key: S3_PUBLIC_BASE
+        sync: false

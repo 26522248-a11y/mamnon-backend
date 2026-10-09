@@ -490,6 +490,27 @@ export class Announcement {
   @Index() @Column({ name: 'recalled_at', type: 'timestamptz', nullable: true }) recalledAt!: Date | null;
   @Column({ name: 'recalled_by', type: 'uuid', nullable: true }) recalledBy!: string | null;
   @Column({ name: 'recipient_count', type: 'integer', default: 0 }) recipientCount!: number;
+  /** B9: scheduled → (scheduler) sent; revoked = cancelled while scheduled or recalled after sending */
+  @Index() @Column({ type: 'varchar', length: 10, default: 'sent' }) status!: 'scheduled' | 'sent' | 'revoked';
+  @Index() @Column({ name: 'scheduled_at', type: 'timestamptz', nullable: true }) scheduledAt!: Date | null;
+  @Column({ name: 'sent_at', type: 'timestamptz', nullable: true }) sentAt!: Date | null;
+  @OneToMany(() => AnnouncementAttachment, (x) => x.announcement) attachments!: AnnouncementAttachment[];
+}
+
+/** B9: image attached to an announcement (uploaded first, linked on create/patch). Files live in UPLOAD_DIR. */
+@Entity('announcement_attachments')
+export class AnnouncementAttachment {
+  @PrimaryGeneratedColumn('uuid') id!: string;
+  @Index() @Column({ name: 'announcement_id', type: 'uuid', nullable: true }) announcementId!: string | null;
+  @ManyToOne(() => Announcement, (a) => a.attachments, { onDelete: 'CASCADE', nullable: true }) @JoinColumn({ name: 'announcement_id' }) announcement!: Announcement | null;
+  @Column({ name: 'file_key', length: 80 }) fileKey!: string;
+  @Column({ name: 'thumb_key', length: 80 }) thumbKey!: string;
+  @Column({ type: 'integer' }) width!: number;
+  @Column({ type: 'integer' }) height!: number;
+  @Column({ type: 'integer' }) size!: number;
+  @Column({ name: 'sort_order', type: 'integer', default: 0 }) sortOrder!: number;
+  @Index() @Column({ name: 'uploaded_by', type: 'uuid', nullable: true }) uploadedBy!: string | null;
+  @CreateDateColumn({ name: 'created_at', type: 'timestamptz' }) createdAt!: Date;
 }
 
 export type NotificationType = 'announcement' | 'pickup_request' | 'pickup_decision' | 'invoice' | 'payment' | 'picked_up' | 'picker_registration' | 'picker_decision' | 'contact_change'
@@ -922,5 +943,5 @@ export const ENTITIES = [
   Announcement, Notification,
   AttendanceHistory, PickupRequest,
   User, ClassRoom, ClassTeacher, Child, Guardian, Attendance, Pickup,
-  FeeItem, Invoice, InvoiceLine, Payment, GrowthRecord, MenuItem, DailyNote, FinanceCategory, FinanceEntry,
+  FeeItem, Invoice, InvoiceLine, Payment, GrowthRecord, MenuItem, DailyNote, FinanceCategory, FinanceEntry, AnnouncementAttachment,
 ];

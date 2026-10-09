@@ -32,7 +32,7 @@ export function detectImage(buf: Buffer): 'jpg' | 'png' | 'heif' | null {
 }
 
 /** HEIC/HEIF (iPhone photos) -> JPEG, so every stored photo displays in any browser. Undecodable -> 400. */
-async function heifToJpeg(buf: Buffer): Promise<Buffer> {
+export async function heifToJpeg(buf: Buffer): Promise<Buffer> {
   try {
     // eslint-disable-next-line @typescript-eslint/no-var-requires
     const convert = require('heic-convert');

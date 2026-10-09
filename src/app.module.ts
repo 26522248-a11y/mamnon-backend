@@ -22,6 +22,7 @@ import { HealthController as HealthNutritionController } from './health/health.c
 import { LoginThrottleService } from './auth/login-throttle.service';
 import { NotificationsController } from './notifications/notifications.controller';
 import { NotificationsService } from './notifications/notifications.service';
+import { AnnouncementsService } from './notifications/announcements.service';
 import { NotificationDispatcher } from './notifications/channels';
 import { AuthorizedPickersController, ContactPhonesController } from './pickup/authorized-pickers.controller';
 import { PickupDutiesController } from './pickup/duties.controller';
@@ -69,7 +70,7 @@ class SettingsController {
   ],
   controllers: [HealthController, SettingsController, AuthController, ClassesController, ChildrenController, AttendanceController, DashboardController, FeesController, HealthNutritionController, NotificationsController, ReportsController, UsersController, ImportsController, AuthorizedPickersController, ContactPhonesController, PickupDutiesController, PushController, AuditController, SensitiveAuditController, StaffController, FinanceController, AbsencesController, HolidaysController, ParentMessagesController, PhotoConsentController],
   providers: [
-    AccessService, UserContextService, AbsencesService, HolidayReminderService, NotificationsService, NotificationDispatcher, PickupSafetyService, LoginThrottleService,
+    AccessService, AnnouncementsService, UserContextService, AbsencesService, HolidayReminderService, NotificationsService, NotificationDispatcher, PickupSafetyService, LoginThrottleService,
     { provide: APP_GUARD, useClass: JwtAuthGuard },
     { provide: APP_FILTER, useClass: AllExceptionsFilter },
   ],

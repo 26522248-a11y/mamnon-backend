@@ -104,6 +104,22 @@ Khôi phục: `pg_restore --clean --if-exists -d "<DATABASE_URL>" mamnon_YYYY-MM
 ## Tự chạy trên VPS bằng Docker
 Xem `deploy/docker-compose.yml` và `deploy/CHECKLIST.md`: Postgres 17, API, web, Caddy HTTPS, backup hằng ngày.
 
+## Thông báo hẹn giờ – cron ngoài (bắt buộc trên Render gói Free)
+API tự kiểm tra thông báo đến giờ gửi mỗi 30 giây (`ANNOUNCEMENT_TICK_MS`) và gửi bù ngay khi khởi động. Render gói Free **ngủ** sau 15 phút không có truy cập, nên cần một cron ngoài đánh thức đúng giờ:
+1. Render → **mamnon-api → Environment**: copy giá trị `CRON_SECRET` (Render tự sinh).
+2. Vào https://cron-job.org → **Create cronjob**:
+   - URL: `https://<tên-api>.onrender.com/api/v1/internal/cron/announcements`
+   - Schedule: **Every 5 minutes** (hoặc mỗi phút nếu muốn đúng giờ hơn).
+   - **Advanced → Request method: POST**, thêm Header `X-Cron-Secret: <giá trị CRON_SECRET>`.
+3. **Test run** → phải trả `200 {"ok":true,...}`. Sai/thiếu khoá → `401`.
+Gọi nhiều lần không sao: mỗi thông báo chỉ gửi đúng 1 lần (khoá dòng `FOR UPDATE SKIP LOCKED`).
+
+## Lưu ảnh: ổ đĩa Render hoặc Cloudflare R2
+- Mặc định `STORAGE_DRIVER=local`: ảnh nằm trong `UPLOAD_DIR` trên ổ đĩa `/var/data` của Render (cần gói có Disk).
+- Dùng R2 (khuyến nghị nếu không có Disk): Cloudflare → **R2 → Create bucket** (vd `mamnon-uploads`, **không** bật public) → **Manage R2 API Tokens → Create token** quyền *Object Read & Write* cho bucket đó. Điền trên Render:
+  `STORAGE_DRIVER=s3`, `S3_ENDPOINT=https://<account-id>.r2.cloudflarestorage.com`, `S3_BUCKET=mamnon-uploads`, `S3_ACCESS_KEY`, `S3_SECRET`, (`S3_REGION` mặc định `auto`). `S3_PUBLIC_BASE` để trống – ảnh trẻ luôn được phục vụ qua API có kiểm tra quyền, không public.
+- Hiện R2 áp dụng cho ảnh đính kèm thông báo; ảnh hồ sơ trẻ/biên lai vẫn ở `UPLOAD_DIR`.
+
 ## Bảng biến môi trường API
 | Biến | Bắt buộc | Ghi chú |
 |---|---|---|
@@ -119,3 +135,6 @@ Xem `deploy/docker-compose.yml` và `deploy/CHECKLIST.md`: Postgres 17, API, web
 | `PUBLIC_API_BASE` | nên có | tên miền web |
 | `VAPID_*`, `NOTIFY_CHANNELS` | tuỳ chọn | thông báo đẩy |
 | `FINANCE_APPROVAL_LIMIT` | tuỳ chọn | mặc định 10000000 |
+| `CRON_SECRET` | nên có | header `X-Cron-Secret` cho cron ngoài; trống = tắt endpoint (401) |
+| `ANNOUNCEMENT_TICK_MS` | tuỳ chọn | chu kỳ kiểm tra hẹn giờ, mặc định 30000; 0 = tắt |
+| `STORAGE_DRIVER`, `S3_ENDPOINT/S3_BUCKET/S3_ACCESS_KEY/S3_SECRET/S3_PUBLIC_BASE/S3_REGION` | tuỳ chọn | `local` (mặc định) hoặc `s3` (R2) |
