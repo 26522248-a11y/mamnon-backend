@@ -120,6 +120,19 @@ Gọi nhiều lần không sao: mỗi thông báo chỉ gửi đúng 1 lần (kh
   `STORAGE_DRIVER=s3`, `S3_ENDPOINT=https://<account-id>.r2.cloudflarestorage.com`, `S3_BUCKET=mamnon-uploads`, `S3_ACCESS_KEY`, `S3_SECRET`, (`S3_REGION` mặc định `auto`). `S3_PUBLIC_BASE` để trống – ảnh trẻ luôn được phục vụ qua API có kiểm tra quyền, không public.
 - Hiện R2 áp dụng cho ảnh đính kèm thông báo; ảnh hồ sơ trẻ/biên lai vẫn ở `UPLOAD_DIR`.
 
+## Dữ liệu demo cho ảnh hướng dẫn (staging)
+Chạy từ máy có mã nguồn, trỏ thẳng vào Neon (Render Free không có Shell). Mạng chặn cổng 5432 thì dùng driver WebSocket của Neon (`@neondatabase/serverless`, cổng 443) – xem ghi chú trong `src/database/demo.ts`:
+```
+DATABASE_URL='<Neon direct URL>' npm run demo:load    # 3 lớp (Mầm 1, Chồi 1 dùng lại nếu có; Lá 1), 27 bé + phụ huynh, 2 GV demo,
+                                                      # điểm danh + nhật ký tuần này, học phí 2 tháng (đã/thiếu/chưa đóng), ca làm,
+                                                      # chấm công, 1 nghỉ phép, 1 trông thay, thu chi (1 khoản > 10tr chờ duyệt),
+                                                      # 1 thông báo đã gửi + 1 hẹn giờ, thực đơn tuần. Không tải ảnh.
+DATABASE_URL='<Neon direct URL>' npm run demo:purge   # xoá ĐÚNG các dòng demo (kể cả phiếu thu/hoá đơn người test tạo thêm cho bé demo)
+```
+- Mỗi dòng tạo ra được ghi vào bảng `demo_registry`; `demo:purge` chỉ xoá các dòng đó rồi xoá bảng. Tài khoản thật (hieutruong, gv_mam1, ketoan, ph_an…) và dữ liệu nhập tay không bị đụng tới.
+- Lớp "Mầm 1"/"Chồi 1" đã có thì được dùng lại và **không** bị xoá; bé demo trong lớp thì bị xoá.
+- `demo:load` từ chối chạy lần 2 khi chưa purge. 2 GV demo (`demo_gv_huong`, `demo_gv_mai`) có mật khẩu ngẫu nhiên, không đăng nhập được.
+
 ## Bảng biến môi trường API
 | Biến | Bắt buộc | Ghi chú |
 |---|---|---|
