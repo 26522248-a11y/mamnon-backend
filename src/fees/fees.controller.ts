@@ -1,5 +1,6 @@
 import { bankConfig, schoolInfo } from '../common/school';
 import { recordAudit } from '../common/audit';
+import { closeStint } from '../children/enrollment';
 import { vietQrPayload } from './vietqr';
 import { Body, Controller, Delete, Get, HttpCode, Param, ParseUUIDPipe, Patch, Post, Query, Req, Res } from '@nestjs/common';
 import type { Request, Response } from 'express';
@@ -10,7 +11,7 @@ import {
   ArrayMinSize, IsArray, IsBoolean, IsDateString, IsIn, IsInt, IsISO8601, IsOptional, IsString, IsUUID, Matches, Max, MaxLength, Min,
   MinLength, ValidateNested,
 } from 'class-validator';
-import { DataSource, EntityManager, In, Not, Repository } from 'typeorm';
+import { DataSource, EntityManager, In, IsNull, Not, Repository } from 'typeorm';
 import { AccessService } from '../common/access';
 import { AuthUser, CurrentUser, Roles } from '../common/auth';
 import { addDays, overdueCutoff, todayStr } from '../common/dates';
@@ -19,7 +20,7 @@ import { vndInWords } from '../common/money';
 import { NotificationsService } from '../notifications/notifications.service';
 import {
   Attendance, Child, CreditTransaction, FeeItem, FeeScope, FeeType, Invoice, InvoiceAudit, InvoiceLine, LineKind, MealRefund, Payment,
-  PickupRequest, RefundPayout, TransferClaim, User,
+  PickupRequest, RefundPayout, TransferClaim, User, Enrollment,
 } from '../database/entities';
 
 /**
@@ -32,6 +33,7 @@ export const MEAL_REFUNDABLE = `a.status = 'absent' AND (a.notified_in_advance O
 const PERIOD = /^\d{4}-(0[1-9]|1[0-2])$/;
 const MAX_VND = 1_000_000_000;
 export const DUE_DAY = 10;
+const nextPeriodOf = (p: string) => { const [y, m] = p.split('-').map(Number); return m === 12 ? `${y + 1}-01` : `${y}-${String(m + 1).padStart(2, '0')}`; };
 const prevPeriod = (p: string) => { const [y, m] = p.split('-').map(Number); return m === 1 ? `${y - 1}-12` : `${y}-${String(m - 1).padStart(2, '0')}`; };
 const lastDay = (p: string) => { const [y, m] = p.split('-').map(Number); return new Date(Date.UTC(y, m, 0)).toISOString().slice(0, 10); };
 const signed = (kind: LineKind, n: number) => (kind === 'charge' ? n : -n);
@@ -102,6 +104,11 @@ export class VoidDto {
 export class WithdrawDto {
   @ApiProperty({ example: '2026-10-15', description: 'Ngày học cuối cùng (không được ở tương lai)' }) @IsDateString() leaveDate!: string;
   @ApiProperty({ example: 'Chuyển nhà' }) @IsString() @MaxLength(500) reason!: string;
+}
+export class ReenrollDto {
+  @ApiProperty({ description: 'Lớp nhập học lại' }) @IsUUID() classId!: string;
+  @ApiProperty({ example: '2026-11-02', description: 'Ngày bắt đầu học lại (sau ngày nghỉ học; có thể ở tương lai, tối đa 180 ngày)' }) @IsDateString() startDate!: string;
+  @ApiPropertyOptional({ example: 'Gia đình chuyển về lại' }) @IsOptional() @IsString() @MaxLength(500) note?: string;
 }
 export class PayoutDto {
   @ApiPropertyOptional({ example: 350000, description: 'Mặc định = toàn bộ số dư; nếu gửi phải đúng bằng số dư (số dư về 0)' }) @IsOptional() @IsInt() @Min(1) @Max(MAX_VND) amount?: number;
@@ -406,6 +413,10 @@ export class FeesController {
     if (dto.classId) await this.access.getClassOr404(dto.classId);
     const kids = await this.children.find({ where: { status: 'active', ...(dto.classId ? { classId: dto.classId } : {}) }, order: { fullName: 'ASC' } });
     const fees = await this.items.find({ where: { isActive: true, type: In(['monthly', 'discount']) } });
+    // B12: re-enrolled children start billing in the month of their new start date
+    const periodEnd = addDays(`${nextPeriodOf(dto.period)}-01`, -1);
+    const reenrolled = new Set((await this.ds.query(`SELECT DISTINCT child_id FROM enrollments WHERE kind = 'reenroll'`)).map((r: any) => r.child_id));
+    for (let i = kids.length - 1; i >= 0; i--) if (reenrolled.has(kids[i].id) && kids[i].enrolledAt && kids[i].enrolledAt! > periodEnd) kids.splice(i, 1);
     const existing = new Set((await this.invoices.find({ where: { period: dto.period, status: Not('void'), childId: In(kids.length ? kids.map((k) => k.id) : ['00000000-0000-0000-0000-000000000000']) } })).map((i) => i.childId));
     const created: Invoice[] = [];
     const warnings: (CapWarning & { invoiceId: string; childId: string; childName: string })[] = [];
@@ -730,10 +741,58 @@ export class FeesController {
       }
       // 4) status
       await m.update(Child, id, { status: 'withdrawn', leaveDate: leave, withdrawalReason: reason, withdrawnAt: new Date(), withdrawnBy: u.id });
+      await closeStint(m, child, leave, reason, u.id); // B12: enrollment history
       await m.createQueryBuilder().update(PickupRequest).set({ status: 'expired' }).where("child_id = :id AND status = 'pending'", { id }).execute();
       return { voidedInvoices: voided, leaveMonth: leaveMonthInfo, mealRefund, mealClawback: clawback, creditAppliedToInvoices: applied, ...(await this.settlementState(m, id)) };
     });
     return { childId: id, status: 'withdrawn', leaveDate: leave, reason, ...summary };
+  }
+
+  /**
+   * B12 – re-enroll a withdrawn child (admin). Nothing old is touched: attendance, notes, invoices, payments, credit and
+   * payouts stay as they are (old debt stays in /debts, remaining credit is applied to the next invoice as usual).
+   * The child becomes active in the chosen class from `startDate`; days between leaveDate and startDate are a gap
+   * (not on attendance sheets, no attendance allowed, no monthly invoice for months entirely before startDate).
+   * A new enrollment stint is opened and an audit_events row (child.reenroll) is written in the same transaction.
+   */
+  @Post('children/:id/reenroll') @Roles('admin') @HttpCode(200)
+  async reenroll(@CurrentUser() u: AuthUser, @Param('id', ParseUUIDPipe) id: string, @Body() dto: ReenrollDto, @Req() req: Request) {
+    const start = dto.startDate.slice(0, 10);
+    if (start > addDays(todayStr(), 180)) throw BadRequest('Ngày học lại quá xa (tối đa 180 ngày tới)', 'INVALID_START_DATE');
+    const cls = await this.access.getClassOr404(dto.classId);
+    const note = dto.note?.trim() || null;
+    return this.ds.transaction(async (m) => {
+      const child = await m.findOne(Child, { where: { id }, relations: { classRoom: true }, lock: { mode: 'pessimistic_write', tables: ['children'] } });
+      if (!child) throw NotFound('Không tìm thấy trẻ');
+      if (child.status !== 'withdrawn') throw new AppError(409, 'CHILD_NOT_WITHDRAWN', 'Chỉ nhập học lại cho trẻ đã nghỉ học');
+      if (child.leaveDate && start <= child.leaveDate) throw BadRequest(`Ngày học lại phải sau ngày nghỉ học (${child.leaveDate})`, 'INVALID_START_DATE');
+      const before = { status: child.status, classId: child.classId, className: child.classRoom?.name ?? null, leaveDate: child.leaveDate, withdrawalReason: child.withdrawalReason, enrolledAt: child.enrolledAt };
+      // make sure the finished stint exists (children created after the Enrollments migration have no row yet)
+      const hasClosed = await m.count(Enrollment, { where: { childId: id, endDate: Not(IsNull()) } });
+      if (!hasClosed && child.leaveDate) await closeStint(m, child, child.leaveDate, child.withdrawalReason ?? '', child.withdrawnBy ?? u.id);
+      const stint = await m.save(Enrollment, m.create(Enrollment, { childId: id, classId: cls.id, kind: 'reenroll', startDate: start, note, startedBy: u.id }));
+      await m.update(Child, id, { status: 'active', classId: cls.id, enrolledAt: start, leaveDate: null, withdrawalReason: null, withdrawnAt: null, withdrawnBy: null });
+      const after = { status: 'active', classId: cls.id, className: cls.name, startDate: start };
+      await recordAudit(m, u, { action: 'child.reenroll', entityType: 'child', entityId: id, childId: id, before, after, reason: note, ip: req.ip ?? null,
+        targetLabel: `${child.fullName} · ${cls.name}` });
+      const warnings: { code: string; message: string }[] = [];
+      if (cls.capacity) {
+        const [{ n }] = await m.query(`SELECT COUNT(*)::int AS n FROM children WHERE class_id = $1 AND status = 'active'`, [cls.id]);
+        if (Number(n) > cls.capacity) warnings.push({ code: 'CLASS_OVER_CAPACITY', message: `Lớp ${cls.name} vượt sức chứa (${n}/${cls.capacity})` });
+      }
+      const settlement = await this.settlementState(m, id);
+      if (settlement.outstandingDebt > 0) warnings.push({ code: 'OUTSTANDING_DEBT', message: `Bé còn nợ ${settlement.outstandingDebt.toLocaleString('vi-VN')}đ từ lần học trước` });
+      return { childId: id, status: 'active', classId: cls.id, className: cls.name, startDate: start, previous: { leaveDate: before.leaveDate, reason: before.withdrawalReason, classId: before.classId, className: before.className },
+        enrollment: { id: stint.id, kind: stint.kind, startDate: start, note }, warnings, ...settlement };
+    });
+  }
+
+  /** B12 – enrollment history (stints) of a child. */
+  @Get('children/:id/enrollments') @Roles('admin', 'accountant')
+  async enrollments(@Param('id', ParseUUIDPipe) id: string) {
+    await this.access.getChildOr404(id);
+    const rows = await this.ds.getRepository(Enrollment).find({ where: { childId: id }, relations: { classRoom: true }, order: { createdAt: 'ASC' } });
+    return { childId: id, items: rows.map((e) => ({ id: e.id, kind: e.kind, classId: e.classId, className: e.classRoom?.name ?? null, startDate: e.startDate, endDate: e.endDate, endReason: e.endReason, note: e.note, createdAt: e.createdAt })) };
   }
 
   /**

@@ -17,6 +17,7 @@ import { Response } from 'express';
 import { ABSENCE_REASONS, AbsenceDay, AbsenceReason, Absence, Attendance, AttendanceHistory, AttStatus, AuthorizedPicker, Child, ClassRoom, Guardian, Pickup, PickupCallAttempt, PickupRequest, User } from '../database/entities';
 import { ESCALATE_MINUTES, maskId, PickupSafetyService } from '../pickup/pickup-safety.service';
 import { cleanName, parsePhone } from '../imports/children-import';
+import { childrenInGap, notInEnrollmentGap } from '../children/enrollment';
 import { recordAudit } from '../common/audit';
 import { Request } from 'express';
 import { isExpired, requestBlockers } from '../pickup/request-rules';
@@ -141,7 +142,7 @@ export class AttendanceController {
   private async sheet(classId: string, date: string) {
     // withdrawn children stay on sheets up to (and including) their leave date
     const kids = await this.children.createQueryBuilder('c').where('c.class_id = :classId', { classId })
-      .andWhere("(c.status = 'active' OR (c.status = 'withdrawn' AND c.leave_date >= :date))", { date }).orderBy('c.fullName', 'ASC').getMany();
+      .andWhere("(c.status = 'active' OR (c.status = 'withdrawn' AND c.leave_date >= :date))", { date }).andWhere(notInEnrollmentGap(':date')).orderBy('c.fullName', 'ASC').getMany();
     const rows = await this.att.find({ where: { classId, date }, relations: { pickup: true } });
     const byChild = new Map(rows.map((r) => [r.childId, r]));
     const extra = rows.filter((r) => !kids.some((k) => k.id === r.childId));
@@ -197,6 +198,8 @@ export class AttendanceController {
       if (bad.length) throw BadRequest(`Trẻ không thuộc lớp này: ${bad.join(', ')}`, 'CHILD_NOT_IN_CLASS');
       const gone = kids.filter((k) => k.status === 'withdrawn' && (!k.leaveDate || dto.date > k.leaveDate));
       if (gone.length) throw BadRequest(`Trẻ đã nghỉ học, không điểm danh sau ngày nghỉ: ${gone.map((k) => `${k.fullName} (${k.leaveDate})`).join(', ')}`, 'CHILD_WITHDRAWN');
+      const gap = await childrenInGap(this.ds, ids, dto.date); // B12: between leaving and re-enrolling
+      if (gap.size) throw BadRequest(`Trẻ chưa học lại vào ngày này: ${kids.filter((k) => gap.has(k.id)).map((k) => `${k.fullName} (học lại từ ${k.enrolledAt})`).join(', ')}`, 'CHILD_NOT_ENROLLED');
     }
     const skipped: { childId: string; reason: string }[] = [];
     const overrides: { childId: string; absenceId: string }[] = [];

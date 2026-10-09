@@ -757,7 +757,30 @@ export class TransferClaim {
   @ManyToOne(() => Payment, { onDelete: 'SET NULL', nullable: true }) @JoinColumn({ name: 'payment_id' }) payment!: Payment | null;
 }
 
+/** B12: one row per enrollment stint of a child (initial + every re-enrollment). History only; children.* keeps the current state. */
+@Entity('enrollments')
+@Index('ix_enrollments_child_start', ['childId', 'startDate'])
+export class Enrollment {
+  @PrimaryGeneratedColumn('uuid') id!: string;
+  @Column({ name: 'child_id', type: 'uuid' }) childId!: string;
+  @ManyToOne(() => Child, { onDelete: 'CASCADE' }) @JoinColumn({ name: 'child_id' }) child!: Child;
+  @Column({ name: 'class_id', type: 'uuid', nullable: true }) classId!: string | null;
+  @ManyToOne(() => ClassRoom, { onDelete: 'SET NULL' }) @JoinColumn({ name: 'class_id' }) classRoom!: ClassRoom | null;
+  /** initial | reenroll */
+  @Column({ length: 12, default: 'initial' }) kind!: 'initial' | 'reenroll';
+  @Column({ name: 'start_date', type: 'date', nullable: true }) startDate!: string | null;
+  /** last attended day (withdrawal leave date); null = ongoing */
+  @Column({ name: 'end_date', type: 'date', nullable: true }) endDate!: string | null;
+  @Column({ name: 'end_reason', type: 'text', nullable: true }) endReason!: string | null;
+  @Column({ type: 'text', nullable: true }) note!: string | null;
+  @Column({ name: 'started_by', type: 'uuid', nullable: true }) startedBy!: string | null;
+  @Column({ name: 'ended_by', type: 'uuid', nullable: true }) endedBy!: string | null;
+  @CreateDateColumn({ name: 'created_at', type: 'timestamptz' }) createdAt!: Date;
+  @UpdateDateColumn({ name: 'updated_at', type: 'timestamptz' }) updatedAt!: Date;
+}
+
 export const ENTITIES = [
+  Enrollment,
   TransferClaim,
   Absence, AbsenceDay, AbsenceEvent, Holiday, Medicine, MedicineDose, LatePickup,
   AuthorizedPicker, AuthorizedPickerHistory, ChildContactHistory, AuditEvent, SensitiveAccessLog, PickupDuty, PickupCallAttempt, PushSubscription, NotificationDelivery,

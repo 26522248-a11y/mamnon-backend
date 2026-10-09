@@ -198,7 +198,9 @@ Front end phải tải ảnh bằng `fetch` có header `Authorization`, rồi hi
     - Đã có hoá đơn tháng nghỉ: thêm dòng `refund` "Hoàn tiền ăn tháng nghỉ học" = tiền ăn đã tính − tiền ăn theo ngày thực tế. Nếu hoá đơn đã thu nhiều hơn tổng mới, phần thừa thành số dư (`adjustment`).
     - Chưa có hoá đơn tháng nghỉ: tạo mới với học phí đủ tháng + tiền ăn theo ngày + hoàn tiền ăn các tháng trước.
     - Kế toán sửa tay dòng đó bằng `PATCH /invoices/:id/lines/:lineId` (có ghi lịch sử). Kết quả withdraw có `leaveMonth: {period, invoiceId, created, attendedDays, mealRate, mealCharged, mealAdjustment, movedToCredit}`.
-  - Nhập học lại: P2, chưa làm.
+  - **Nhập học lại (B12):** `POST /children/:id/reenroll` `{classId, startDate, note?}` (chỉ admin; kế toán / GV → 403). Trẻ phải đang `withdrawn` (khác → 409 `CHILD_NOT_WITHDRAWN`); `startDate` phải **sau** `leaveDate` và không quá 180 ngày tới (→ 400 `INVALID_START_DATE`). Trong 1 transaction: mở đợt học mới (bảng `enrollments`, `kind=reenroll`), trẻ thành `active` ở lớp đã chọn, `enrolledAt = startDate`, xoá `leaveDate`/lý do nghỉ trên hồ sơ (vẫn lưu ở đợt học cũ), ghi `audit_events` `child.reenroll` (trước/sau, ghi chú, IP). **Không động vào dữ liệu cũ**: điểm danh, nhật ký, hoá đơn, phiếu thu, số dư, phiếu chi giữ nguyên; nợ cũ vẫn trong `/debts`, số dư trả trước còn lại tự trừ vào hoá đơn kế tiếp. Kết quả: `{childId, status, classId, className, startDate, previous:{leaveDate, reason, classId, className}, enrollment, warnings[] (CLASS_OVER_CAPACITY, OUTSTANDING_DEBT), outstandingDebt, creditBalance, netBalance, nextAction…}`.
+    - Những ngày giữa `leaveDate` và `startDate`: trẻ không có trong bảng điểm danh, điểm danh → 400 `CHILD_NOT_ENROLLED`. Lập hoá đơn tháng bỏ qua các kỳ kết thúc trước `startDate`; tháng học lại tính như tháng thường (kế toán sửa tay nếu cần). Ngày của đợt cũ (≤ `leaveDate`) vẫn sửa được như trước.
+    - `GET /children/:id/enrollments` (admin, kế toán) → `{items:[{kind: initial|reenroll, classId, className, startDate, endDate, endReason, note}]}`. Migration `Enrollments` tạo 1 đợt `initial` cho mọi trẻ có sẵn; nghỉ học đóng đợt đang mở.
 - **Thực đơn:** mỗi bữa có `allergyNotes` (món thay thế cho trẻ dị ứng). `GET /menus` trả kèm `allergyAlerts` gồm các trẻ có dị ứng: admin thấy toàn trường, giáo viên thấy lớp mình, phụ huynh thấy con mình.
 
 ## Tài khoản và bảo mật đăng nhập
@@ -311,6 +313,5 @@ test/app.e2e-spec.ts, features.e2e-spec.ts, withdrawal.e2e-spec.ts   # 52 test e
 
 - Gửi push, SMS hoặc Zalo (hiện chỉ có hộp thư trong app) và xuất PDF phiếu thu.
 - Giảm trừ theo % (hiện chỉ có số tiền cố định) và hoàn tiền ăn theo đơn giá của đúng ngày vắng (hiện dùng đơn giá lúc lập hoá đơn).
-- Nhập học lại trẻ đã nghỉ (P2).
 - Bộ đếm giới hạn đăng nhập cần Redis hoặc DB nếu chạy nhiều instance.
 - Lưu ảnh lên S3.
