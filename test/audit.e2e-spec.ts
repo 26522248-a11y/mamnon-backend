@@ -62,7 +62,7 @@ describe('audit_events (e2e)', () => {
 
     const rows = await ds.query(`SELECT action, entity_type, entity_id, child_id, actor_id, actor_role, before, after, reason, source FROM audit_events ORDER BY created_at`);
     expect(rows.map((r: any) => r.action)).toEqual(['child.contact_phones', 'authorized_picker.approve', 'pickup.identity_view', 'guardian.remove']);
-    expect(rows[0]).toMatchObject({ entity_type: 'child', child_id: kid, actor_id: s.users.ph1.id, actor_role: 'parent', before: { phone1: null, phone2: null }, after: { phone1: '0977000001', phone2: null }, source: 'api' });
+    expect(rows[0]).toMatchObject({ entity_type: 'child', child_id: kid, actor_id: s.users.ph1.id, actor_role: 'parent', before: { phone1: expect.stringMatching(/^\+?\d{8,}$/) }, after: { phone1: '0977000001', phone2: null }, source: 'api' }); // B20: before = numbers in use (guardian phones)
     expect(rows[1]).toMatchObject({ entity_type: 'authorized_picker', entity_id: p.body.id, before: { status: 'pending' }, after: { status: 'approved', idNumber: '********6789' } });
     expect(rows[2]).toMatchObject({ entity_type: 'authorized_picker', entity_id: p.body.id, actor_role: 'teacher' });
     expect(rows[3]).toMatchObject({ entity_type: 'guardian', entity_id: grandma.id, reason: 'Gắn nhầm', before: { fullName: grandma.fullName } });

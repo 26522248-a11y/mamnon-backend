@@ -254,10 +254,15 @@ export class ContactPhonesController {
     if (phone2 === phone1) throw new AppError(400, 'VALIDATION_ERROR', 'Dữ liệu không hợp lệ', ['phone2: trùng phone1']);
     const before = { phone1: c.contactPhone1, phone2: c.contactPhone2 };
     if (before.phone1 === phone1 && before.phone2 === phone2) return this.view(id);
+    // B20: the audit 'before' is the numbers that were actually in use (call order: contact phones, else guardian /
+    // parent-account phones), not the raw contact columns, which are empty until the first edit.
+    const inUse = await this.safety.parentPhones(id);
+    const auditBefore = { phone1: inUse[0]?.phone ?? null, phone2: inUse[1]?.phone ?? null };
     await this.ds.transaction(async (m) => {
       await m.getRepository(Child).update(id, { contactPhone1: phone1, contactPhone2: phone2, contactPhonesUpdatedBy: u.id, contactPhonesUpdatedAt: new Date() });
       await m.getRepository(ChildContactHistory).insert({ childId: id, before, after: { phone1, phone2 }, changedBy: u.id });
-      await recordAudit(m, u, { action: 'child.contact_phones', entityType: 'child', entityId: id, childId: id, before, after: { phone1, phone2 }, ip: req.ip ?? null });
+      await recordAudit(m, u, { action: 'child.contact_phones', entityType: 'child', entityId: id, childId: id, before: auditBefore, after: { phone1, phone2 }, ip: req.ip ?? null,
+        data: { beforeSource: inUse.map((x) => x.source), storedBefore: before } });
     });
     if (u.role === 'parent') {
       const admins = await this.ds.getRepository(User).find({ where: { role: 'admin', isActive: true }, select: { id: true } });

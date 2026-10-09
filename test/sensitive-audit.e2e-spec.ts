@@ -79,6 +79,29 @@ describe('B18 sensitive-change history (e2e)', () => {
     for (const full of ['0977000001', '0988000002', '0901234567', grandma.phone].filter(Boolean)) expect(json).not.toContain(full);
   });
 
+  it('B20: phone change stores before = old numbers in use, after = new numbers (first edit falls back to guardian phones)', async () => {
+    const kid = s.kids[3]; // fresh child: contact phones never edited
+    const ph = (await ds.query(`SELECT g.phone FROM guardians g WHERE g.child_id = $1 AND g.phone IS NOT NULL ORDER BY (g.user_id IS NOT NULL) DESC, g.created_at, g.id`, [kid.id])).map((r: any) => r.phone.replace(/\s/g, ''));
+    expect(ph.length).toBeGreaterThanOrEqual(1);
+    const inUse = (await as('admin').get(`/children/${kid.id}/contact-phones`).expect(200)).body.callOrder.map((x: any) => x.phone);
+    await as('admin').patch(`/children/${kid.id}/contact-phones`, { phone1: '0933111222' }).expect(200);
+    await as('admin').patch(`/children/${kid.id}/contact-phones`, { phone1: '0933111333', phone2: '0933111444' }).expect(200);
+    const rows = await ds.query(`SELECT before, after FROM audit_events WHERE action = 'child.contact_phones' AND child_id = $1 ORDER BY created_at`, [kid.id]);
+    expect(rows).toHaveLength(2);
+    expect(rows[0].before).toEqual({ phone1: inUse[0], phone2: inUse[1] ?? null });
+    expect(rows[0].before.phone1).toBe(ph[0]);
+    expect(rows[0].after).toEqual({ phone1: '0933111222', phone2: null });
+    // second edit: before = exactly what the first edit set (+ guardian fallback for the empty slot 2), after = new pair
+    expect(rows[1].before.phone1).toBe('0933111222');
+    expect(rows[1].after).toEqual({ phone1: '0933111333', phone2: '0933111444' });
+    const api = (await as('admin').get(`/audit/sensitive?type=phone_change&q=${encodeURIComponent(kid.fullName)}`).expect(200)).body.items;
+    expect(api[0]).toMatchObject({ beforeText: expect.stringMatching(/^0933 \*\*\* 222/), afterText: '0933 *** 333 / 0933 *** 444' });
+    expect(api[1].beforeText).not.toBe('—');
+    expect(api[1].afterText).toBe('0933 *** 222');
+    // keep the counts used by the next test unchanged
+    await ds.query(`DELETE FROM audit_events WHERE action = 'child.contact_phones' AND child_id = $1`, [kid.id]);
+  });
+
   it('filters: type (one / many), date range, search, paging; bad params → 400', async () => {
     const t = todayStr();
     expect((await as('admin').get('/audit/sensitive?type=phone_change').expect(200)).body).toMatchObject({ total: 2, counts: { all: 4 } });
