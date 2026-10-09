@@ -4,7 +4,7 @@ import { ArrayMaxSize, IsArray, IsDateString, IsIn, IsOptional, IsString, MaxLen
 import { DataSource, In } from 'typeorm';
 import { AccessService } from '../common/access';
 import { AuthUser, CurrentUser, Public, Roles } from '../common/auth';
-import { addDays, dayDiff, todayStr } from '../common/dates';
+import { addDays, dayDiff, todayStr, viDayLabel } from '../common/dates';
 import { AppError, BadRequest, Forbidden, NotFound } from '../common/errors';
 import { absenceCutoff, latestPickupTime } from '../common/school';
 import { ABSENCE_REASONS, Absence, AbsenceDay, AbsenceEvent, AbsenceReason, Attendance, AttendanceHistory } from '../database/entities';
@@ -96,7 +96,7 @@ export class AbsencesController {
     });
 
     const [view] = await this.svc.views(u, [Object.assign(result.abs, { skippedDates: result.skipped })]);
-    const span = result.dates.length === 1 ? `ngày ${result.dates[0]}` : `${result.dates.length} ngày (${result.dates[0]} → ${result.dates[result.dates.length - 1]})`;
+    const span = result.dates.length === 1 ? viDayLabel(result.dates[0]) : `${result.dates.length} ngày (${viDayLabel(result.dates[0])} → ${viDayLabel(result.dates[result.dates.length - 1])})`;
     const msg = { title: `Báo vắng: ${child.fullName}${child.classRoom ? ` (${child.classRoom.name})` : ''} – ${span}`,
       body: `${REASON_LABEL[dto.reason!]}${dto.note ? `: ${dto.note}` : ''}`, data: { absenceId: result.abs.id, childId: id, dates: result.dates }, refId: result.abs.id };
     await this.notify.send(await this.svc.classTeacherIds(child.classId), { type: 'absence_report', ...msg });
@@ -150,7 +150,7 @@ export class AbsencesController {
     });
     const fresh = await this.ds.getRepository(Absence).findOneByOrFail({ id });
     const child = await this.access.getChildOr404(a.childId);
-    const msg = { title: `Hủy báo vắng: ${child.fullName}${child.classRoom ? ` (${child.classRoom.name})` : ''} – ${done.join(', ')}`,
+    const msg = { title: `Hủy báo vắng: ${child.fullName}${child.classRoom ? ` (${child.classRoom.name})` : ''} – ${done.map(viDayLabel).join(', ')}`,
       data: { absenceId: id, childId: a.childId, dates: done }, refId: id };
     await this.notify.send(await this.svc.classTeacherIds(child.classId), { type: 'absence_cancelled', ...msg });
     if (done.includes(todayStr())) await this.notify.send(await this.svc.kitchenIds(), { type: 'kitchen_change', ...msg });

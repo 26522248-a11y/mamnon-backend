@@ -11,7 +11,7 @@ import { Test } from '@nestjs/testing';
 import request from 'supertest';
 import { DataSource } from 'typeorm';
 import { AppModule, configureApp } from '../src/app.module';
-import { addDays, todayStr } from '../src/common/dates';
+import { addDays, todayStr, viDayLabel } from '../src/common/dates';
 import { seed } from '../src/database/seed';
 import { HolidayReminderService } from '../src/calendar/holiday-reminder.service';
 
@@ -69,12 +69,14 @@ describe('round 2 batch 2/2b: medicine, late pickup, feed, notes, attention, pho
       await as('gv1').get(`/medicines/${r.body.id}/photo`).expect(200);
       await as('gv2').get(`/medicines/${r.body.id}/photo`).expect(403);
       expect((await notes('gv1', 'medicine_request')).length).toBe(1);
+      expect((await notes('gv1', 'medicine_request'))[0].title).toMatch(new RegExp(` – ${viDayLabel(d)}$`)); // P14
       const t = await as('ph1').multipart(`/children/${kid}/medicines`).field('date', d).field('name', 'Vitamin').field('dose', '1 viên').field('times', '08:30').field('times', '15:30').expect(201);
       expect(t.body.doses.map((x: any) => x.time)).toEqual(['08:30', '15:30']);
       expect((await as('gv1').get(`/children/${kid}/medicines?date=${d}`).expect(200)).body.items).toHaveLength(2);
       await as('gv2').get(`/children/${kid}/medicines?date=${d}`).expect(403);
       // parent cancels (nothing given yet)
       expect((await as('ph1').del(`/medicines/${t.body.id}`).expect(200)).body.status).toBe('cancelled');
+      expect((await notes('gv1', 'medicine_cancelled')).map((x: any) => x.title)).toContainEqual(expect.stringMatching(new RegExp(`– Vitamin \\(${viDayLabel(d)}\\)$`))); // P14
       // dose of a future day cannot be given yet
       expect((await as('gv1').post(`/medicine-doses/${r.body.doses[0].id}/given`, {}).expect(400)).body.code).toBe('NOT_TODAY');
     });
@@ -123,6 +125,7 @@ describe('round 2 batch 2/2b: medicine, late pickup, feed, notes, attention, pho
       expect(r.body).toMatchObject({ childId: kid, date: d, time: '17:45', pickerName: 'Bà ngoại', status: 'active', className: 'Mầm 1' });
       expect((await as('ph1').post(`/children/${kid}/late-pickups`, { date: d, time: '17:30' }).expect(409)).body.code).toBe('LATE_PICKUP_EXISTS');
       expect((await notes('gv1', 'late_pickup')).length).toBe(1);
+      expect((await notes('gv1', 'late_pickup'))[0].title).toMatch(new RegExp(` – 17:45 ${viDayLabel(d)}$`)); // P14
       expect((await as('gv1').get(`/children/${kid}/late-pickups`).expect(200)).body.items).toHaveLength(1);
 
       // feed
@@ -138,6 +141,7 @@ describe('round 2 batch 2/2b: medicine, late pickup, feed, notes, attention, pho
       await as('ph1').get(`/classes/${c1}/parent-messages?date=${d}`).expect(403);
       // cancel late pickup → gone from the feed, can re-send
       expect((await as('ph1').del(`/late-pickups/${r.body.id}`).expect(200)).body.status).toBe('cancelled');
+      expect((await notes('gv1', 'late_pickup_cancelled')).map((x: any) => x.title)).toContainEqual(expect.stringMatching(new RegExp(` – ${viDayLabel(d)}$`))); // P14
       expect((await as('gv1').get(`/classes/${c1}/parent-messages?date=${d}`).expect(200)).body.counts.latePickups).toBe(0);
       await as('ph1').post(`/children/${kid}/late-pickups`, { date: d, time: '17:30' }).expect(201);
     });
@@ -274,6 +278,7 @@ describe('round 2 batch 2/2b: medicine, late pickup, feed, notes, attention, pho
       const pn = await notes('ph1', 'school_closure');
       expect(pn).toHaveLength(1);
       expect(pn[0]).toMatchObject({ important: true, body: 'Mất điện toàn khu vực' });
+      expect(pn[0].title).toMatch(new RegExp(` ${viDayLabel(P)}$`)); // P14
       // meal refund: next month's invoice refunds P for the absent child, not for the present one
       const period = nextMonth(today.slice(0, 7));
       await as('ketoan').post('/invoices/generate', { period, classId: c1 }).expect(201);

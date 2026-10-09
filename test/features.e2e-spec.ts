@@ -9,7 +9,7 @@ import request from 'supertest';
 import { DataSource } from 'typeorm';
 import { AppModule, configureApp } from '../src/app.module';
 import { pickupRequestExpiry } from '../src/attendance/attendance.controller';
-import { addDays, todayStr } from '../src/common/dates';
+import { addDays, todayStr, viDayLabel } from '../src/common/dates';
 import { parentReported } from './helpers/absence';
 import { seed } from '../src/database/seed';
 
@@ -140,6 +140,8 @@ describe('PM decisions, notifications, reports, users, rate limit (e2e)', () => 
       expect((await as('ketoan').get(`/children/${s.kids[7].id}/credits`).expect(200)).body.creditBalance).toBe(0);
       // parent got an invoice notification
       expect((await as('ph1').get('/notifications').expect(200)).body.items.some((x: any) => x.type === 'invoice' && x.data.period === period)).toBe(true);
+      const k0 = await get(0);
+      expect((await as('ph1').get('/notifications').expect(200)).body.items.find((x: any) => x.type === 'invoice' && x.data.invoiceId === k0.id).body).toContain(`hạn nộp ${viDayLabel(k0.dueDate)}.`); // P14
     });
 
     it('refund lines never duplicate; edits are audited; corrected attendance is clawed back once (QA FEE-R04/R05/R06)', async () => {

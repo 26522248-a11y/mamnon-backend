@@ -7,7 +7,7 @@ import { DataSource, In, IsNull } from 'typeorm';
 import { AbsencesService, confirmedHolidays, isWeekend } from '../absences/absences.service';
 import { AccessService } from '../common/access';
 import { AuthUser, CurrentUser, Roles } from '../common/auth';
-import { addDays, todayStr } from '../common/dates';
+import { addDays, todayStr, viDayLabel } from '../common/dates';
 import { AppError, BadRequest, Forbidden, NotFound } from '../common/errors';
 import { latestPickupTime, medicineLateMinutes, schoolOpenTime, vnNowHM } from '../common/school';
 import { imageUploadOptions, saveImage, sendImage } from '../common/upload';
@@ -151,7 +151,7 @@ export class ParentMessagesController {
       return med;
     });
     await this.notify.send(await this.absences.classTeacherIds(child.classId), {
-      type: 'medicine_request', title: `Dặn thuốc: ${child.fullName}${child.classRoom ? ` (${child.classRoom.name})` : ''} – ${date}`,
+      type: 'medicine_request', title: `Dặn thuốc: ${child.fullName}${child.classRoom ? ` (${child.classRoom.name})` : ''} – ${viDayLabel(date)}`,
       body: `${med.name}, ${med.dose} lúc ${doses.map((d) => d.time).join(', ')}`, data: { medicineId: med.id, childId: id, date }, refId: med.id,
     });
     return (await this.medicineViews([med]))[0];
@@ -190,7 +190,7 @@ export class ParentMessagesController {
     await this.ds.getRepository(Medicine).update(id, { cancelledAt: new Date(), cancelledBy: u.id });
     const child = await this.access.getChildOr404(med.childId);
     await this.notify.send(await this.absences.classTeacherIds(child.classId), {
-      type: 'medicine_cancelled', title: `Hủy dặn thuốc: ${child.fullName} – ${med.name} (${med.date})`, data: { medicineId: id, childId: med.childId }, refId: id });
+      type: 'medicine_cancelled', title: `Hủy dặn thuốc: ${child.fullName} – ${med.name} (${viDayLabel(med.date)})`, data: { medicineId: id, childId: med.childId }, refId: id });
     return (await this.medicineViews([await this.ds.getRepository(Medicine).findOneByOrFail({ id })]))[0];
   }
 
@@ -251,7 +251,7 @@ export class ParentMessagesController {
       throw e;
     });
     await this.notify.send(await this.absences.classTeacherIds(child.classId), {
-      type: 'late_pickup', title: `Đón muộn: ${child.fullName}${child.classRoom ? ` (${child.classRoom.name})` : ''} – ${dto.time} ngày ${dto.date}`,
+      type: 'late_pickup', title: `Đón muộn: ${child.fullName}${child.classRoom ? ` (${child.classRoom.name})` : ''} – ${dto.time} ${viDayLabel(dto.date)}`,
       body: [row.pickerName ? `Người đón: ${row.pickerName}` : null, row.note].filter(Boolean).join(' – ') || null, data: { latePickupId: row.id, childId: id, date: dto.date }, refId: row.id,
     });
     return (await this.lateViews([row]))[0];
@@ -273,7 +273,7 @@ export class ParentMessagesController {
     if (!row.cancelledAt) {
       await this.ds.getRepository(LatePickup).update(id, { cancelledAt: new Date(), cancelledBy: u.id });
       await this.notify.send(await this.absences.classTeacherIds(child.classId), {
-        type: 'late_pickup_cancelled', title: `Hủy đón muộn: ${child.fullName} – ${row.date}`, data: { latePickupId: id, childId: row.childId }, refId: id });
+        type: 'late_pickup_cancelled', title: `Hủy đón muộn: ${child.fullName} – ${viDayLabel(row.date)}`, data: { latePickupId: id, childId: row.childId }, refId: id });
     }
     return (await this.lateViews([await this.ds.getRepository(LatePickup).findOneByOrFail({ id })]))[0];
   }

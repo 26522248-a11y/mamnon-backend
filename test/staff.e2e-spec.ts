@@ -139,6 +139,16 @@ describe('Staff module (e2e)', () => {
     const gv3 = rep.items.find((r: any) => r.user.id === s.users.gv3.id).days.find((d: any) => d.date === WED);
     expect(gv3).toMatchObject({ status: 'substitute', substituteFor: [{ classId: s.classes.c2.id, className: s.classes.c2.name, absentUser: { id: s.users.gv2.id } }] });
     expect(rep.items.find((r: any) => r.user.id === gv4.id).days.find((d: any) => d.date === THU).status).toBe('absent');
+    expect(gv3.planned).toBe(false);
+    // H9: a planned substitution next week (no check-in yet) → 'substitute' + planned, not 'pending', and not counted as worked
+    const NEXT = addDays(MON, 21);
+    await as('admin').post('/staff/assignments', { userId: s.users.gv2.id, shiftId: shift.id, classId: s.classes.c2.id, dates: [NEXT] }).expect(201);
+    const subNext = (await as('admin').post('/staff/substitutions', { ...body, date: NEXT, substituteUserId: gv4.id, force: true }).expect(201)).body;
+    const nextRep = (await as('admin').get(`/staff/attendance?from=${NEXT}&to=${addDays(NEXT, 4)}`).expect(200)).body;
+    const gv4Row = nextRep.items.find((r: any) => r.user.id === gv4.id);
+    expect(gv4Row.days.find((d: any) => d.date === NEXT)).toMatchObject({ status: 'substitute', planned: true, checkInAt: null, substituteFor: [{ classId: s.classes.c2.id }] });
+    expect(gv4Row.totals).toMatchObject({ substitute: 0, workDays: 0 });
+    await as('admin').del(`/staff/substitutions/${subNext.id}`).expect(204);
     expect(rep.items.find((r: any) => r.user.id === s.users.gv2.id).days.find((d: any) => d.date === WED).coveredBy[0]).toMatchObject({ substituteUser: { id: s.users.gv3.id } });
     // lists
     const forGv3 = (await as('gv3').get(`/staff/substitutions?from=${MON}&to=${FRI}`).expect(200)).body.items;
@@ -176,6 +186,7 @@ describe('Staff module (e2e)', () => {
     expect([o.status, o2.status]).toEqual([200, 200]);
     expect(o.body).toMatchObject({ canCheckOut: false, checkOutAt: expect.any(String) });
     expect(o.body.checkOutAt).toBe(o2.body.checkOutAt);
+    expect([o.body.alreadyCheckedOut, o2.body.alreadyCheckedOut].sort()).toEqual([false, true]); // H9: exactly one tap recorded it
     expect(new Date(o.body.checkOutAt).getTime()).toBeGreaterThan(new Date(o.body.checkInAt).getTime());
     const o3 = (await as('gv1').post('/staff/me/check-out', {}).expect(200)).body;
     expect(o3).toMatchObject({ alreadyCheckedOut: true, checkOutAt: o.body.checkOutAt });

@@ -8,7 +8,7 @@ import { Request } from 'express';
 import { Between, DataSource, EntityManager, In, IsNull, LessThanOrEqual, MoreThanOrEqual, Not } from 'typeorm';
 import { recordAudit } from '../common/audit';
 import { AuthUser, CurrentUser, Roles } from '../common/auth';
-import { addDays, todayStr } from '../common/dates';
+import { addDays, todayStr, viDayLabel } from '../common/dates';
 import { AppError, BadRequest, Forbidden, NotFound } from '../common/errors';
 import {
   ClassRoom, LeaveSession, Medicine, MedicineDose, StaffCheckin, StaffLeave, StaffLeaveType, StaffShift, StaffShiftAssignment, StaffSubstitution, User,
@@ -119,7 +119,8 @@ export const LEAVE_TYPE_LABEL: Record<StaffLeaveType, string> = { sick: 'Ốm', 
 export const SESSION_LABEL: Record<LeaveSession, string> = { full: 'Cả ngày', morning: 'Buổi sáng', afternoon: 'Buổi chiều' };
 const SESSION_SUFFIX: Record<LeaveSession, string> = { full: '', morning: ' (buổi sáng)', afternoon: ' (buổi chiều)' };
 const dm = (d: string) => `${d.slice(8, 10)}/${d.slice(5, 7)}`;
-const rangeLabel = (l: { fromDate: string; toDate: string }) => (l.fromDate === l.toDate ? dm(l.fromDate) : `${dm(l.fromDate)}–${dm(l.toDate)}`);
+/** P14: notification dates use viDayLabel ('Thứ Tư 14/10'); ranges 'Thứ Hai 12/10 → Thứ Tư 14/10'. */
+const rangeLabel = (l: { fromDate: string; toDate: string }) => (l.fromDate === l.toDate ? viDayLabel(l.fromDate) : `${viDayLabel(l.fromDate)} → ${viDayLabel(l.toDate)}`);
 const clash = (a: LeaveSession, b: LeaveSession) => a === 'full' || b === 'full' || a === b;
 const annualAllowance = () => Number(process.env.ANNUAL_LEAVE_DAYS ?? 12) || 12;
 /** Monday..Friday of the week containing `d` */
@@ -258,9 +259,11 @@ export class StaffController {
     if (now.getTime() - ex.checkInAt.getTime() < MIN_SHIFT_MS)
       throw new AppError(409, 'CHECKOUT_TOO_SOON', `Cô vừa vào ca lúc ${vnHm(ex.checkInAt)}, chưa ra ca được ngay. Nếu bấm nhầm thì không sao, giờ vào ca vẫn được giữ.`);
     // conditional update: two concurrent taps record one checkout only
-    await this.ds.query(`UPDATE staff_checkins SET check_out_at = $2, check_out_ip = $3${dto.note ? ', note = $4' : ''} WHERE id = $1 AND check_out_at IS NULL`,
+    // H9: the tap whose UPDATE lost the race reports alreadyCheckedOut: true
+    const res = await this.ds.query(`UPDATE staff_checkins SET check_out_at = $2, check_out_ip = $3${dto.note ? ', note = $4' : ''} WHERE id = $1 AND check_out_at IS NULL RETURNING id`,
       dto.note ? [ex.id, now, req.ip?.slice(0, 64) ?? null, dto.note] : [ex.id, now, req.ip?.slice(0, 64) ?? null]);
-    return { ...(await this.today(u)), alreadyCheckedOut: false };
+    const updated = Array.isArray(res) && Array.isArray(res[0]) ? res[0].length : Array.isArray(res) ? res.length : 0;
+    return { ...(await this.today(u)), alreadyCheckedOut: updated === 0 };
   }
 
   @Get('me/today') @Roles('admin', 'teacher', 'accountant')
@@ -347,10 +350,14 @@ export class StaffController {
           status = covering.length ? 'substitute' : late ? 'late' : 'full';
           if (!late) lateMinutes = 0;
         } else if (leave) status = 'leave';
-        else if (own.length || covering.length) status = date < today || (date === today && lastEnd && now >= vnAt(date, lastEnd)) ? 'absent' : 'pending';
+        else if (own.length || covering.length) {
+          const over = date < today || (date === today && !!lastEnd && now >= vnAt(date, lastEnd));
+          // H9: a planned substitution (today before the shift ends, or a future day) is 'substitute', not 'pending'; `planned` = not checked in yet
+          status = over ? 'absent' : covering.length ? 'substitute' : 'pending';
+        }
         else status = 'off';
         return {
-          date, status, lateMinutes, checkInAt: c?.checkInAt ?? null, checkOutAt: c?.checkOutAt ?? null, checkInSource: c?.source ?? null,
+          date, status, planned: status === 'substitute' && !c?.checkInAt, lateMinutes, checkInAt: c?.checkInAt ?? null, checkOutAt: c?.checkOutAt ?? null, checkInSource: c?.source ?? null,
           shifts: [...new Map(shifts.map((s) => [s.id, shiftView(s)])).values()],
           classes: own.filter((a) => a.classId).map((a) => ({ id: a.classId, name: a.classRoom?.name ?? null, shiftId: a.shiftId })),
           substituteFor: covering.map((s) => ({ substitutionId: s.id, classId: s.classId, className: s.classRoom?.name ?? null, shiftId: s.shiftId, absentUser: person(s.absentUser, s.absentUserId) })),
@@ -359,7 +366,8 @@ export class StaffController {
           leaveDays: leave && isoWeekday(date) <= 5 ? (leave.session === 'full' ? 1 : 0.5) : 0,
         };
       });
-      const count = (st: DayStatus) => days.filter((d) => d.status === st).length;
+      // H9: planned substitute days (not checked in yet) are not worked days
+      const count = (st: DayStatus) => days.filter((d) => d.status === st && !d.planned).length;
       // G6: half-day leave counts 0.5 leave; if the other half was worked it counts 0.5 work day
       const leaveDays = days.reduce((t, d) => t + d.leaveDays, 0);
       const halfWorked = days.filter((d) => d.leaveDays === 0.5 && ['full', 'late', 'substitute'].includes(d.status)).length;
@@ -762,7 +770,7 @@ export class StaffController {
   private async afterSub(saved: StaffSubstitution) {
     const full = (await this.subsQuery({ from: saved.date, to: saved.date }).andWhere('s.id = :id', { id: saved.id }).getOne())!;
     const cls = full.classRoom, shift = full.shift, sess = (full.session ?? 'full') as LeaveSession;
-    const when = `${dm(full.date)}${sess === 'full' ? '' : ` ${SESSION_LABEL[sess].toLowerCase()}`}`;
+    const when = `${viDayLabel(full.date)}${sess === 'full' ? '' : ` ${SESSION_LABEL[sess].toLowerCase()}`}`;
     const note = full.leaveId ? (await this.ds.getRepository(StaffLeave).findOneBy({ id: full.leaveId }))?.handoverNote ?? full.note : full.note;
     await this.notify.send([full.substituteUserId], { type: 'substitution', refId: full.id, title: `Trông thay lớp ${cls?.name ?? ''} · ${when}`,
       body: [`${shift.name} ${shift.startTime}–${shift.endTime}${full.absentUser ? ` · thay ${full.absentUser.name}` : ''}`, note && `Bàn giao: ${note}`].filter(Boolean).join('\n'),
@@ -772,7 +780,7 @@ export class StaffController {
         `SELECT DISTINCT g.user_id FROM guardians g JOIN children c ON c.id = g.child_id WHERE c.class_id = $1 AND c.status = 'active' AND g.user_id IS NOT NULL`, [full.classId])).map((r: any) => r.user_id);
       const subName = full.substituteUser?.name ?? '';
       if (parents.length) await this.notify.send(parents, { type: 'substitute_teacher', refId: full.id,
-        title: full.date === todayStr() ? '↔ Cô trông thay hôm nay' : `↔ Cô trông thay ngày ${dm(full.date)}`,
+        title: full.date === todayStr() ? '↔ Cô trông thay hôm nay' : `↔ Cô trông thay ${viDayLabel(full.date)}`,
         body: `${subName} trông lớp ${cls?.name ?? ''}${sess === 'full' ? '' : ` ${SESSION_LABEL[sess].toLowerCase()}`}${full.absentUser ? ` thay ${full.absentUser.name}` : ''}.`,
         data: { substitutionId: full.id, classId: full.classId, className: cls?.name ?? null, date: full.date, session: sess, substituteName: subName } });
     }

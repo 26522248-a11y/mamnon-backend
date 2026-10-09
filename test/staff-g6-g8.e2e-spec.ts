@@ -10,7 +10,7 @@ import { Test } from '@nestjs/testing';
 import request from 'supertest';
 import { DataSource } from 'typeorm';
 import { AppModule, configureApp } from '../src/app.module';
-import { addDays, todayStr } from '../src/common/dates';
+import { addDays, todayStr, viDayLabel } from '../src/common/dates';
 import { seed } from '../src/database/seed';
 import { isoWeekday } from '../src/staff/staff-time';
 
@@ -26,7 +26,6 @@ describe('Staff G6–G8 (e2e)', () => {
   const notes = async (who: string, type: string) => (await as(who).get('/notifications?limit=100').expect(200)).body.items.filter((n: any) => n.type === type);
   const T = todayStr();
   const MON = addDays(T, 8 - isoWeekday(T)); // next Monday
-  const dm = (d: string) => `${d.slice(8, 10)}/${d.slice(5, 7)}`;
   let shift: any, leaveId: string;
 
   beforeAll(async () => {
@@ -63,7 +62,7 @@ describe('Staff G6–G8 (e2e)', () => {
 
   it('G7/H1: admin notified with url → approval page; approve with substitute; teacher + substitute + parents notified; no double approve', async () => {
     const n = (await notes('admin', 'staff_leave')).find((x: any) => x.data?.leaveId === leaveId);
-    expect(n.title).toBe(`${s.users.gv1.name} xin nghỉ ốm ${dm(MON)} (buổi sáng)`);
+    expect(n.title).toBe(`${s.users.gv1.name} xin nghỉ ốm ${viDayLabel(MON)} (buổi sáng)`);
     expect(n.body).toMatch(/Mầm 1 cần cô trông thay/);
     expect(n.data.url).toBe(`/staff/leaves/${leaveId}`);
     const page = (await as('admin').get(`/staff/leaves/${leaveId}`).expect(200)).body;
@@ -75,13 +74,14 @@ describe('Staff G6–G8 (e2e)', () => {
     expect(ok).toMatchObject({ status: 'approved', substitutions: [{ date: MON, session: 'morning', class: { id: s.classes.c1.id }, substituteTeacher: { id: s.users.gv3.id } }] });
     await as('admin').post(`/staff/leaves/${leaveId}/approve`, { substituteUserId: s.users.gv3.id }).expect(409);
     const d = (await notes('gv1', 'staff_leave_decision')).find((x: any) => x.data?.leaveId === leaveId);
-    expect(d.title).toBe(`✓ Đơn nghỉ ốm ${dm(MON)} (buổi sáng) đã duyệt`);
+    expect(d.title).toBe(`✓ Đơn nghỉ ốm ${viDayLabel(MON)} (buổi sáng) đã duyệt`);
     expect(d.body).toContain(`Cô trông thay: ${s.users.gv3.name}`);
     const sub = (await notes('gv3', 'substitution')).find((x: any) => x.data?.leaveId === leaveId);
     expect(sub.body).toContain('Bàn giao: Bé Na dị ứng sữa');
+    expect(sub.title).toBe(`Trông thay lớp Mầm 1 · ${viDayLabel(MON)} buổi sáng`); // P14
     const pa = (await notes('ph1', 'substitute_teacher'));
     expect(pa).toHaveLength(1);
-    expect(pa[0]).toMatchObject({ title: `↔ Cô trông thay ngày ${dm(MON)}`, data: { classId: s.classes.c1.id, session: 'morning', substituteName: s.users.gv3.name, date: MON, className: 'Mầm 1' } }); // P9
+    expect(pa[0]).toMatchObject({ title: `↔ Cô trông thay ${viDayLabel(MON)}`, data: { classId: s.classes.c1.id, session: 'morning', substituteName: s.users.gv3.name, date: MON, className: 'Mầm 1' } }); // P9
     // P9: parent-readable upcoming substitutions for the child's class
     const ps = (await as('ph1').get(`/children/${s.kids[0].id}/substitutions`).expect(200)).body.items;
     expect(ps).toEqual(expect.arrayContaining([expect.objectContaining({ date: MON, session: 'morning', classId: s.classes.c1.id, substituteName: s.users.gv3.name })]));
@@ -93,7 +93,7 @@ describe('Staff G6–G8 (e2e)', () => {
     await as('admin').post(`/staff/leaves/${other.id}/reject`, {}).expect(400);
     await as('admin').post(`/staff/leaves/${other.id}/reject`, { note: 'Trùng hội giảng' }).expect(200);
     const rj = (await notes('gv2', 'staff_leave_decision')).find((x: any) => x.data?.leaveId === other.id);
-    expect(rj).toMatchObject({ title: `Đơn nghỉ việc riêng ${dm(addDays(MON, 4))} bị từ chối`, body: 'Lý do: Trùng hội giảng' });
+    expect(rj).toMatchObject({ title: `Đơn nghỉ việc riêng ${viDayLabel(addDays(MON, 4))} bị từ chối`, body: 'Lý do: Trùng hội giảng' });
   });
 
   it('G6: timesheet counts half day as 0.5', async () => {
