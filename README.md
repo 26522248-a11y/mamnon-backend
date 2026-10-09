@@ -193,6 +193,31 @@ Front end phải tải ảnh bằng `fetch` có header `Authorization`, rồi hi
   - Tài khoản đã có dữ liệu liên quan thì không xoá được (`USER_HAS_HISTORY`), hãy khoá thay vì xoá.
   - Đổi vai trò khi tài khoản còn gắn với lớp hoặc trẻ thì nhận `USER_HAS_LINKS`.
 
+## Triển khai (Docker Compose)
+
+Thư mục `deploy/`: PostgreSQL 17 + API + web (Next.js, build từ `../mamnon-web`) + Caddy (HTTPS tự động) + backup hằng ngày. Yêu cầu: Docker + Compose v2, thư mục đặt cạnh nhau `<root>/mamnon-backend` và `<root>/mamnon-web`, domain trỏ về máy chủ, mở cổng 80/443.
+
+```bash
+cd mamnon-backend/deploy
+cp .env.example .env        # sửa DOMAIN, ACME_EMAIL, POSTGRES_PASSWORD, JWT_*_SECRET (openssl rand -base64 48), SCHOOL_*
+docker compose up -d --build
+docker compose ps           # migrate: exited (0); db, api, web, caddy, backup: running/healthy
+```
+
+- **Thứ tự khởi động:** `db` (healthcheck) → `migrate` (chạy migration một lần rồi thoát, không xoá dữ liệu) → `api`. Không service nào seed. Dữ liệu demo (XOÁ SẠCH DB): `docker compose run --rm api node dist/database/seed.js --force`.
+- **Định tuyến (Caddy, `deploy/Caddyfile`):** `https://DOMAIN/api/*` → API (Swagger ở `/api/docs`), còn lại → web. Web build với `NEXT_PUBLIC_API_URL=""` nên gọi `/api/v1` cùng origin; cookie refresh `Secure`, `CORS_ORIGIN=https://DOMAIN`, `TRUST_PROXY=1` (IP thật cho giới hạn đăng nhập). Có HSTS, nosniff, chặn iframe, giới hạn body 5MB. Thử trong LAN không có domain: `DOMAIN=localhost` (chứng chỉ nội bộ của Caddy).
+- **Ảnh:** volume `uploads` (`/data/uploads`), chỉ phục vụ qua API có kiểm tra quyền.
+- **Backup** (service `backup`, `deploy/backup/`): mỗi ngày lúc `BACKUP_TIME` (giờ VN, mặc định 02:30) chạy `pg_dump -Fc` (kiểm tra đọc lại bằng `pg_restore -l`) + nén thư mục ảnh vào `BACKUP_DIR/daily`; giữ 14 bản ngày, 8 bản Chủ nhật (`weekly`), 12 bản ngày 1 (`monthly`) – chỉnh bằng `BACKUP_KEEP_*`. Chạy ngay: `docker compose exec backup backup.sh`. **Nên chép `BACKUP_DIR` ra ngoài máy chủ.**
+- **Khôi phục:**
+  ```bash
+  docker compose stop api
+  docker compose exec -T db pg_restore -U mamnon -d mamnon --clean --if-exists < backups/daily/mamnon_YYYY-MM-DD_HHMM.dump
+  docker compose run --rm -v "$PWD/backups:/b" --entrypoint sh api -c 'cd /data/uploads && tar -xzf /b/daily/uploads_YYYY-MM-DD_HHMM.tar.gz'
+  docker compose start api
+  ```
+- **Cập nhật phiên bản:** `git pull` cả 2 repo → `docker compose up -d --build` (migrate tự chạy migration mới trước khi API khởi động).
+- Lưu ý: giới hạn đăng nhập lưu trong bộ nhớ → chạy 1 instance `api`. Nên chặn `/api/docs` ở môi trường thật nếu không cần (thêm `respond /api/docs* 404` trong Caddyfile).
+
 ## Định dạng lỗi
 
 Mọi lỗi đều có dạng `{ "code": "FORBIDDEN", "message": "..." }`. Lỗi validate có thêm `details[]`; 429 có thêm `lockedUntil`; `AMOUNT_MISMATCH` có `details.creditBalance`.

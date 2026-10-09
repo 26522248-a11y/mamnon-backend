@@ -1,0 +1,127 @@
+# Mầm non – production stack: PostgreSQL + API (NestJS) + web (Next.js) + Caddy (HTTPS) + daily backup.
+# Layout expected:  <root>/mamnon-backend (this repo)  and  <root>/mamnon-web
+#   cd mamnon-backend/deploy && cp .env.example .env && edit .env
+#   docker compose up -d --build
+# The stack never seeds. First-time demo data (wipes DB!): docker compose run --rm api node dist/database/seed.js --force
+name: mamnon
+
+x-restart: &restart
+  restart: unless-stopped
+
+services:
+  db:
+    <<: *restart
+    image: postgres:17-bookworm
+    environment:
+      POSTGRES_DB: mamnon
+      POSTGRES_USER: mamnon
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in deploy/.env}
+      TZ: Asia/Ho_Chi_Minh
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U mamnon -d mamnon"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    # not published to the host; only reachable inside the compose network
+
+  # one-shot: applies pending TypeORM migrations (data-preserving), then exits. api starts only if it succeeded.
+  migrate:
+    image: mamnon-api:latest
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    command: ["node", "node_modules/typeorm/cli.js", "-d", "dist/database/data-source.js", "migration:run"]
+    environment: &api_env
+      DATABASE_URL: postgres://mamnon:${POSTGRES_PASSWORD}@db:5432/mamnon
+      JWT_ACCESS_SECRET: ${JWT_ACCESS_SECRET:?set JWT_ACCESS_SECRET}
+      JWT_REFRESH_SECRET: ${JWT_REFRESH_SECRET:?set JWT_REFRESH_SECRET}
+      JWT_ACCESS_TTL: ${JWT_ACCESS_TTL:-15m}
+      JWT_REFRESH_TTL: ${JWT_REFRESH_TTL:-7d}
+      CORS_ORIGIN: https://${DOMAIN}
+      COOKIE_SECURE: "true"
+      TRUST_PROXY: "1"
+      TZ_SCHOOL: Asia/Ho_Chi_Minh
+      SCHOOL_NAME: ${SCHOOL_NAME:-Trường Mầm non}
+      SCHOOL_ADDRESS: ${SCHOOL_ADDRESS:-}
+      SCHOOL_PHONE: ${SCHOOL_PHONE:-}
+      LOGIN_MAX_FAILS: ${LOGIN_MAX_FAILS:-5}
+      LOGIN_IP_MAX_FAILS: ${LOGIN_IP_MAX_FAILS:-30}
+      LOGIN_LOCK_MINUTES: ${LOGIN_LOCK_MINUTES:-15}
+      UPLOAD_DIR: /data/uploads
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: "no"
+
+  api:
+    <<: *restart
+    image: mamnon-api:latest
+    environment: *api_env
+    volumes:
+      - uploads:/data/uploads
+    depends_on:
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
+  web:
+    <<: *restart
+    image: mamnon-web:latest
+    build:
+      context: ../../mamnon-web
+      dockerfile: ../mamnon-backend/deploy/web.Dockerfile
+      args:
+        NEXT_PUBLIC_API_URL: ""   # same origin: /api/v1 via Caddy
+    depends_on:
+      - api
+
+  caddy:
+    <<: *restart
+    image: caddy:2
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    environment:
+      DOMAIN: ${DOMAIN:?set DOMAIN}
+      ACME_EMAIL: ${ACME_EMAIL:-admin@example.com}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - api
+      - web
+
+  backup:
+    <<: *restart
+    image: postgres:17-bookworm
+    entrypoint: ["/usr/local/bin/entrypoint.sh"]
+    environment:
+      PGHOST: db
+      PGUSER: mamnon
+      PGDATABASE: mamnon
+      PGPASSWORD: ${POSTGRES_PASSWORD}
+      TZ: Asia/Ho_Chi_Minh
+      BACKUP_TIME: ${BACKUP_TIME:-02:30}
+      BACKUP_KEEP_DAILY: ${BACKUP_KEEP_DAILY:-14}
+      BACKUP_KEEP_WEEKLY: ${BACKUP_KEEP_WEEKLY:-8}
+      BACKUP_KEEP_MONTHLY: ${BACKUP_KEEP_MONTHLY:-12}
+      BACKUP_ON_START: ${BACKUP_ON_START:-false}
+    volumes:
+      - ./backup/backup.sh:/usr/local/bin/backup.sh:ro
+      - ./backup/entrypoint.sh:/usr/local/bin/entrypoint.sh:ro
+      - ${BACKUP_DIR:-./backups}:/backups
+      - uploads:/uploads:ro
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  pgdata:
+  uploads:
+  caddy_data:
+  caddy_config:
